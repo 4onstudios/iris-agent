@@ -20,5 +20,5 @@
     "types": ["node", "jest"]
   },
   "include": ["src/**/*", "api/**/*.ts", "server.ts", "cli.ts", "tests/**/*.ts", "tests/**/*.tsx"],
-  "exclude": ["dist", "node_modules", "src-tauri", "coverage"]
+  "exclude": ["dist", "node_modules", "coverage"]
 }
