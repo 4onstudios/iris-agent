@@ -9,6 +9,18 @@ It provides streaming chat, workspace tools, LSP routes, MCP integration, comman
 
 ## Quick Start
 
+This project can be installed and run with either npm or Yarn.
+
+```sh
+# npm
+npm install
+OPENAI_API_KEY=... npm start
+
+# yarn
+yarn install
+yarn start
+```
+
 ### HTTP Service
 
 ```sh
