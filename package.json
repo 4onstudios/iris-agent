@@ -1,0 +1,72 @@
+{
+  "name": "@4onstudios/iris-agent",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Standalone HTTP coding-agent service and CLI with ACP (Agent Client Protocol) support.",
+  "type": "module",
+  "bin": {
+    "iris-agent": "./bin/iris-agent.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "packageManager": "yarn@1.22.22",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "start": "tsx server.ts",
+    "dev": "tsx watch server.ts",
+    "cli": "tsx cli.ts",
+    "cli:dev": "tsx watch cli.ts",
+    "build": "tsc",
+    "test": "jest --config jest.config.cjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/4onstudios/iris-agent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/4onstudios/iris-agent/issues"
+  },
+  "homepage": "https://github.com/4onstudios/iris-agent#readme",
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^1.4.0",
+    "@ai-sdk/anthropic": "^2.0.53",
+    "@ai-sdk/google": "^4.0.58",
+    "@ai-sdk/openai": "^2.0.72",
+    "@mastra/core": "^1.59.0",
+    "@mastra/libsql": "^1.22.2",
+    "@mastra/memory": "^1.28.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@openrouter/ai-sdk-provider": "^2.10.0",
+    "ajv": "^6.15.0",
+    "diff": "^9.0.0",
+    "dotenv": "^8.6.0",
+    "express": "^5.2.1",
+    "glob": "^13.0.0",
+    "isomorphic-git": "^1.41.9",
+    "json-schema": "^0.4.0",
+    "puppeteer": "^25.9.0",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^6.0.1",
+    "yargs": "^18.0.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.29.6",
+    "@babel/plugin-transform-runtime": "^7.29.7",
+    "@babel/preset-env": "^7.20.2",
+    "@babel/preset-react": "^7.29.7",
+    "@babel/preset-typescript": "^7.28.5",
+    "@babel/runtime": "^8.0.0",
+    "@types/express": "^4.17.25",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^18.19.124",
+    "babel-jest": "^30.5.0",
+    "jest": "^30.5.0",
+    "tsx": "^4.23.13",
+    "typescript": "^5.9.3"
+  }
+}
