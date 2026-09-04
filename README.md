@@ -1,4 +1,16 @@
-# Iris Agent
+<p align="center">
+  <img src="assets/iris-agent-logo.svg" alt="Iris Agent logo" width="180">
+</p>
+
+<h1 align="center">Iris Agent</h1>
+
+<p align="center">
+  <a href="https://4onstudios.com/">Built by 4onStudios</a>
+  ·
+  <a href="https://github.com/4onstudios/iris-agent/issues">Issues</a>
+  ·
+  <a href="https://github.com/4onstudios/iris-agent/pulls">Contribute</a>
+</p>
 
 Iris Agent is the standalone coding-agent service used by [AIRIS](https://github.com/4onstudios/iris).
 
@@ -29,6 +41,25 @@ OPENAI_API_KEY=... npm start
 ```
 
 The service listens on port `8080` by default. Set `PORT` to change it. `GET /health` reports service readiness.
+
+### Using Iris Agent in an IDE
+
+To run the standalone agent service for an IDE integration:
+
+```bash
+git clone https://github.com/4onstudios/iris-agent.git
+cd iris-agent
+npm install
+npm start
+```
+
+The service listens on port `8080` by default and exposes its API under
+`/api/agent`. Set `PORT` to use another port and configure
+`AGENT_ALLOWED_ORIGINS` with the IDE's origin when browser CORS is required:
+
+```bash
+PORT=8080 AGENT_ALLOWED_ORIGINS=http://localhost:3000 npm start
+```
 
 The HTTP API is mounted below `/api/agent`. The main endpoints are:
 
@@ -231,5 +262,22 @@ For production, run the compiled output from a process supervisor, restrict
 `AGENT_ALLOWED_ORIGINS`, keep provider credentials in a secret store, protect
 the HTTP service behind TLS/authentication, and use a writable persistent
 location for the run database.
+
+## Contributing
+
+Contributions are welcome. To get started:
+
+1. Fork the repository and create a focused branch.
+2. Install dependencies with `npm install`.
+3. Run `npm run typecheck` and `npm test` before opening a pull request.
+4. Include a clear description of the problem, the approach, and validation.
+
+Please keep changes focused, avoid committing secrets, and open an issue first
+for larger feature proposals.
+
+The project logo is available at
+[`assets/iris-agent-logo.svg`](./assets/iris-agent-logo.svg) for repository and
+community references. Keep the logo unchanged when using it as the project
+mark.
 
 This project is released under the [MIT License](LICENSE).

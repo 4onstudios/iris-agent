@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Iris Agent logo</title>
+  <desc id="desc">A monochrome coding terminal with an agent spark.</desc>
+
+  <rect width="512" height="512" rx="112" fill="#ffffff"/>
+  <rect x="56" y="56" width="400" height="400" rx="72" fill="#0a0a0a"/>
+
+  <!-- Four marks reference 4onStudios while the terminal keeps the coding focus. -->
+  <circle cx="116" cy="116" r="9" fill="#ffffff"/>
+  <circle cx="146" cy="116" r="9" fill="#ffffff"/>
+  <circle cx="176" cy="116" r="9" fill="#ffffff"/>
+  <circle cx="206" cy="116" r="9" fill="#ffffff"/>
+
+  <path d="M104 178h304" stroke="#888888" stroke-width="4"/>
+
+  <g fill="none" stroke="#ffffff" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m122 244 52 48-52 48"/>
+    <path d="M202 340h82"/>
+  </g>
+
+  <circle cx="354" cy="292" r="56" fill="#ffffff"/>
+  <path d="m354 246 12 34 34 12-34 12-12 34-12-34-34-12 34-12 12-34Z"
+        fill="#0a0a0a"/>
+  <path d="M354 218v-18M354 374v-18M280 292h-18M446 292h-18"
+        stroke="#ffffff" stroke-width="8" stroke-linecap="round"/>
+</svg>
