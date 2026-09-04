@@ -5,6 +5,7 @@ module.exports = {
   },
   transformIgnorePatterns: [],
   testPathIgnorePatterns: [
+    "<rootDir>/dist/",
     "<rootDir>/tests/dist/",
     "<rootDir>/(api|src)/.*?/dist/",
   ],
