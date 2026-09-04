@@ -7,7 +7,7 @@
     "jsx": "preserve",
     "allowJs": false,
     "checkJs": false,
-    "noEmit": true,
+    "outDir": "./dist",
     "isolatedModules": true,
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,
