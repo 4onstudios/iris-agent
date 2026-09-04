@@ -2,14 +2,22 @@
   "name": "@4onstudios/iris-agent",
   "version": "0.1.0",
   "private": false,
-  "description": "Standalone HTTP coding-agent service extracted from AIRIS.",
+  "description": "Standalone HTTP coding-agent service and CLI with ACP (Agent Client Protocol) support.",
   "type": "module",
+  "bin": {
+    "iris-agent": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "engines": {
     "node": ">=22.13.0"
   },
   "scripts": {
     "start": "tsx server.ts",
     "dev": "tsx watch server.ts",
+    "cli": "tsx cli.ts",
+    "cli:dev": "tsx watch cli.ts",
+    "build": "tsc",
     "test": "jest --config jest.config.cjs",
     "typecheck": "tsc --noEmit"
   },
@@ -23,6 +31,7 @@
   },
   "homepage": "https://github.com/4onstudios/iris-agent#readme",
   "dependencies": {
+    "@agentclientprotocol/sdk": "^1.4.0",
     "@ai-sdk/anthropic": "^2.0.53",
     "@ai-sdk/google": "^4.0.58",
     "@ai-sdk/openai": "^2.0.72",
@@ -41,6 +50,7 @@
     "puppeteer": "^25.9.0",
     "sqlite": "^5.1.1",
     "sqlite3": "^6.0.1",
+    "yargs": "^18.0.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {

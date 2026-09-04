@@ -7,7 +7,7 @@
     "jsx": "preserve",
     "allowJs": false,
     "checkJs": false,
-    "noEmit": true,
+    "outDir": "./dist",
     "isolatedModules": true,
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,
@@ -19,6 +19,6 @@
     "forceConsistentCasingInFileNames": true,
     "types": ["node", "jest"]
   },
-  "include": ["src/**/*", "api/**/*.ts", "server.ts", "tests/**/*.ts", "tests/**/*.tsx"],
+  "include": ["src/**/*", "api/**/*.ts", "server.ts", "cli.ts", "tests/**/*.ts", "tests/**/*.tsx"],
   "exclude": ["dist", "node_modules", "src-tauri", "coverage"]
 }
