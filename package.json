@@ -5,7 +5,7 @@
   "description": "Standalone HTTP coding-agent service and CLI with ACP (Agent Client Protocol) support.",
   "type": "module",
   "bin": {
-    "iris-agent": "./dist/cli.js"
+    "iris-agent": "./bin/iris-agent.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
