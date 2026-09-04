@@ -12,6 +12,12 @@
   <a href="https://github.com/4onstudios/iris-agent/pulls">Contribute</a>
 </p>
 
+<p align="center">
+  <a href="https://github.com/4onstudios/iris-agent/actions/workflows/ci.yml"><img src="https://github.com/4onstudios/iris-agent/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="https://www.npmjs.com/package/@4onstudios/iris-agent"><img src="https://img.shields.io/npm/v/%404onstudios%2Firis-agent" alt="npm version"></a>
+  <a href="https://github.com/4onstudios/iris-agent/blob/main/LICENSE"><img src="https://img.shields.io/github/license/4onstudios/iris-agent" alt="MIT License"></a>
+</p>
+
 Iris Agent is the standalone coding-agent service used by [AIRIS](https://github.com/4onstudios/iris).
 
 It provides streaming chat, workspace tools, LSP routes, MCP integration, command approvals, and run lifecycle APIs. It can run as:
@@ -265,19 +271,36 @@ location for the run database.
 
 ## Contributing
 
-Contributions are welcome. To get started:
-
-1. Fork the repository and create a focused branch.
-2. Install dependencies with `npm install`.
-3. Run `npm run typecheck` and `npm test` before opening a pull request.
-4. Include a clear description of the problem, the approach, and validation.
-
-Please keep changes focused, avoid committing secrets, and open an issue first
-for larger feature proposals.
+Contributions are welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for setup,
+validation, and pull request guidance. Use the repository's issue templates for
+bug reports and feature requests. See [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)
+for community expectations and [SECURITY.md](./SECURITY.md) for private
+vulnerability reporting.
 
 The project logo is available at
 [`assets/iris-agent-logo.svg`](./assets/iris-agent-logo.svg) for repository and
 community references. Keep the logo unchanged when using it as the project
 mark.
+
+## Package publishing
+
+The package is configured for public npm publication:
+
+```sh
+npm login
+npm publish
+```
+
+Yarn users can install the published package with:
+
+```sh
+yarn global add @4onstudios/iris-agent
+```
+
+Publishing requires access to the `@4onstudios` npm scope. The package is
+configured with public access, but npm credentials and organization
+permissions must be supplied by the publisher.
+
+See [RELEASING.md](./RELEASING.md) for npm publication and versioning steps.
 
 This project is released under the [MIT License](LICENSE).
