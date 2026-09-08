@@ -89,4 +89,31 @@ describe("IrisClient", () => {
             }),
         ).rejects.toMatchObject({ code: "ENOENT" });
     });
+
+    it("rejects a concurrent session open while the first is in flight", async () => {
+        let releaseSession: () => void = () => undefined;
+        const sessionGate = new Promise<void>((resolve) => {
+            releaseSession = resolve;
+        });
+        const agent = acp
+            .agent({ name: "delayed-agent" })
+            .onRequest(acp.methods.agent.initialize, async () => ({
+                protocolVersion: acp.PROTOCOL_VERSION,
+                agentCapabilities: { sessionCapabilities: { close: {} } },
+            }))
+            .onRequest(acp.methods.agent.session.new, async () => {
+                await sessionGate;
+                return { sessionId: "session-1" };
+            })
+            .onRequest(acp.methods.agent.session.close, async () => ({}));
+        const client = await IrisClient.connect(agent);
+
+        const firstOpen = client.openSession("/workspace");
+        await expect(client.openSession("/other")).rejects.toThrow(
+            "An ACP session is already opening",
+        );
+        releaseSession();
+        await expect(firstOpen).resolves.toBe("session-1");
+        await client.close();
+    });
 });

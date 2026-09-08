@@ -139,7 +139,7 @@ describe("ACP server", () => {
             expect(response.stopReason).toBe("end_turn");
             expect(runtime.generate).toHaveBeenCalledWith(
                 "Explain this\n\n[Resource: README.md](file:///workspace/README.md)",
-                { workspaceRoot: "/workspace" },
+                expect.objectContaining({ workspaceRoot: "/workspace" }),
             );
             expect(updates).toEqual([
                 expect.objectContaining({
@@ -151,5 +151,98 @@ describe("ACP server", () => {
                 }),
             ]);
         });
+    });
+
+    it("reuses an ordered generated tool id when stream chunks omit ids", async () => {
+        const runtime: AcpRuntimeAgent = {
+            stream: jest.fn(async () => ({
+                fullStream: createChunkStream([
+                    { type: "tool-call", payload: { toolName: "readFile" } },
+                    {
+                        type: "tool-result",
+                        payload: { toolName: "readFile", result: "contents" },
+                    },
+                ]),
+                text: Promise.resolve(""),
+            })),
+        };
+        const updates: acp.SessionNotification[] = [];
+        const client = acp
+            .client({ name: "iris-agent-test-client" })
+            .onNotification(acp.methods.client.session.update, (ctx) => {
+                updates.push(ctx.params);
+            });
+
+        await client.connectWith(createAcpAgentApp(runtime), async (ctx) => {
+            await ctx.request(acp.methods.agent.initialize, {
+                protocolVersion: acp.PROTOCOL_VERSION,
+                clientCapabilities: {},
+            });
+            const session = await ctx.request(acp.methods.agent.session.new, {
+                cwd: "/workspace",
+                mcpServers: [],
+            });
+            await ctx.request(acp.methods.agent.session.prompt, {
+                sessionId: session.sessionId,
+                prompt: [{ type: "text", text: "Read the file" }],
+            });
+        });
+
+        expect(updates).toHaveLength(2);
+        expect(updates[0]?.update).toEqual(
+            expect.objectContaining({
+                sessionUpdate: "tool_call",
+                toolCallId: "generated-readFile-1",
+            }),
+        );
+        expect(updates[1]?.update).toEqual(
+            expect.objectContaining({
+                sessionUpdate: "tool_call_update",
+                toolCallId: "generated-readFile-1",
+                status: "completed",
+            }),
+        );
+    });
+
+    it("cancels a fallback turn before it emits the generated response", async () => {
+        let resolveGenerate!: (value: { text: string }) => void;
+        const generateResult = new Promise<{ text: string }>((resolve) => {
+            resolveGenerate = resolve;
+        });
+        const runtime: AcpRuntimeAgent = {
+            generate: jest.fn(async (_input, options) => {
+                expect(options?.signal).toBeInstanceOf(AbortSignal);
+                return generateResult;
+            }),
+        };
+        const updates: acp.SessionNotification[] = [];
+        const client = acp
+            .client({ name: "iris-agent-test-client" })
+            .onNotification(acp.methods.client.session.update, (ctx) => {
+                updates.push(ctx.params);
+            });
+
+        await client.connectWith(createAcpAgentApp(runtime), async (ctx) => {
+            await ctx.request(acp.methods.agent.initialize, {
+                protocolVersion: acp.PROTOCOL_VERSION,
+                clientCapabilities: {},
+            });
+            const session = await ctx.request(acp.methods.agent.session.new, {
+                cwd: "/workspace",
+                mcpServers: [],
+            });
+            const prompt = ctx.request(acp.methods.agent.session.prompt, {
+                sessionId: session.sessionId,
+                prompt: [{ type: "text", text: "Wait" }],
+            });
+            await ctx.notify(acp.methods.agent.session.cancel, {
+                sessionId: session.sessionId,
+            });
+            resolveGenerate({ text: "Should not be emitted" });
+
+            await expect(prompt).resolves.toEqual({ stopReason: "cancelled" });
+        });
+
+        expect(updates).toHaveLength(0);
     });
 });

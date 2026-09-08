@@ -22,6 +22,7 @@ export class IrisClient {
     private readonly context: acp.ClientContext;
     private closeTransport?: () => void;
     private activeSession?: acp.ActiveSession;
+    private openingSession?: Promise<string>;
     private closed = false;
 
     private constructor(
@@ -105,8 +106,22 @@ export class IrisClient {
         if (this.activeSession) {
             throw new Error("An ACP session is already open");
         }
-        this.activeSession = await this.context.buildSession(cwd).start();
-        return this.activeSession.sessionId;
+        if (this.openingSession) {
+            throw new Error("An ACP session is already opening");
+        }
+
+        const openingSession = this.context.buildSession(cwd).start().then((session) => {
+            this.activeSession = session;
+            return session.sessionId;
+        });
+        this.openingSession = openingSession;
+        try {
+            return await openingSession;
+        } finally {
+            if (this.openingSession === openingSession) {
+                this.openingSession = undefined;
+            }
+        }
     }
 
     async prompt(prompt: string | acp.ContentBlock[]): Promise<acp.PromptResponse> {

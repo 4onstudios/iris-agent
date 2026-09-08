@@ -994,13 +994,13 @@ const createGeneratedAgentRuntimeAdapter = (
       typeof tee === "function"
         ? tee.call(rawStreamResult.fullStream)
         : [
-            new ReadableStream<NativeAgentStreamChunk>({
-              start(controller) {
-                controller.close();
-              },
-            }),
-            rawStreamResult.fullStream,
-          ];
+          new ReadableStream<NativeAgentStreamChunk>({
+            start(controller) {
+              controller.close();
+            },
+          }),
+          rawStreamResult.fullStream,
+        ];
     const mappedStream = hostEventSource.pipeThrough(
       new TransformStream<NativeAgentStreamChunk, AgentStreamEvent>({
         transform(chunk, controller) {
@@ -1058,6 +1058,7 @@ const createGeneratedAgentRuntimeAdapter = (
         },
       }),
     );
+    void hostEventSource.cancel().catch(() => undefined);
     const transportStreamResult: NativeAgentStreamResult = {
       ...rawStreamResult,
       fullStream: transportSource,

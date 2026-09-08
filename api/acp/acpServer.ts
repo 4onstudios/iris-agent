@@ -28,6 +28,7 @@ export type AcpRuntimeAgent = {
   ) => Promise<{ text?: string }>;
   chat?: (request: {
     messages: Array<{ role: "user"; content: string }>;
+    signal?: AbortSignal;
   }) => Promise<unknown>;
 };
 
@@ -124,8 +125,33 @@ export const createAcpAgentApp = (runtimeAgent: AcpRuntimeAgent): acp.AgentApp =
           })) as AgentStreamResult;
           const reader = streamResult.fullStream.getReader();
           activeTurn.cancelStream = async () => reader.cancel();
-          const knownToolCalls = new Set<string>();
+          const pendingToolCallIds = new Map<string, string[]>();
+          const generatedToolCallCounts = new Map<string, number>();
           let emittedText = false;
+
+          const getToolCallId = (
+            toolName: string,
+            suppliedId: unknown,
+            consumePending: boolean,
+          ): string => {
+            if (typeof suppliedId === "string" && suppliedId.length > 0) {
+              if (consumePending) {
+                const pending = pendingToolCallIds.get(toolName);
+                const index = pending?.indexOf(suppliedId) ?? -1;
+                if (index >= 0) pending?.splice(index, 1);
+              }
+              return suppliedId;
+            }
+
+            const pending = pendingToolCallIds.get(toolName);
+            if (consumePending && pending?.length) {
+              return pending.shift() as string;
+            }
+
+            const occurrence = (generatedToolCallCounts.get(toolName) || 0) + 1;
+            generatedToolCallCounts.set(toolName, occurrence);
+            return `generated-${toolName}-${occurrence}`;
+          };
 
           while (true) {
             if (activeTurn.abortController.signal.aborted) {
@@ -159,8 +185,14 @@ export const createAcpAgentApp = (runtimeAgent: AcpRuntimeAgent): acp.AgentApp =
 
             if (value.type === "tool-call") {
               const toolName = String(value.payload?.toolName || "tool");
-              const toolCallId = String(value.payload?.toolCallId || randomUUID());
-              knownToolCalls.add(toolCallId);
+              const toolCallId = getToolCallId(
+                toolName,
+                value.payload?.toolCallId,
+                false,
+              );
+              const pending = pendingToolCallIds.get(toolName) || [];
+              pending.push(toolCallId);
+              pendingToolCallIds.set(toolName, pending);
               await ctx.client.notify(acp.methods.client.session.update, {
                 sessionId: ctx.params.sessionId,
                 update: {
@@ -178,9 +210,18 @@ export const createAcpAgentApp = (runtimeAgent: AcpRuntimeAgent): acp.AgentApp =
 
             if (value.type === "tool-result") {
               const toolName = String(value.payload?.toolName || "tool");
-              const toolCallId = String(value.payload?.toolCallId || randomUUID());
-              if (!knownToolCalls.has(toolCallId)) {
-                knownToolCalls.add(toolCallId);
+              const suppliedToolCallId = value.payload?.toolCallId;
+              const pending = pendingToolCallIds.get(toolName);
+              const hadPendingCall = Boolean(pending?.length);
+              const toolCallId = getToolCallId(
+                toolName,
+                suppliedToolCallId,
+                true,
+              );
+              const hasMatchingCall =
+                typeof suppliedToolCallId === "string" ||
+                hadPendingCall;
+              if (!hasMatchingCall) {
                 await ctx.client.notify(acp.methods.client.session.update, {
                   sessionId: ctx.params.sessionId,
                   update: {
@@ -230,12 +271,22 @@ export const createAcpAgentApp = (runtimeAgent: AcpRuntimeAgent): acp.AgentApp =
         }
 
         const generated = runtimeAgent.generate
-          ? await runtimeAgent.generate(promptText, { workspaceRoot: session.cwd })
+          ? await runtimeAgent.generate(promptText, {
+            workspaceRoot: session.cwd,
+            signal: activeTurn.abortController.signal,
+          })
           : await runtimeAgent.chat?.({
             messages: [{ role: "user", content: promptText }],
+            signal: activeTurn.abortController.signal,
           });
+        if (activeTurn.abortController.signal.aborted) {
+          return { stopReason: "cancelled" as const };
+        }
         const responseText = extractText(generated);
         if (responseText) {
+          if (activeTurn.abortController.signal.aborted) {
+            return { stopReason: "cancelled" as const };
+          }
           await ctx.client.notify(acp.methods.client.session.update, {
             sessionId: ctx.params.sessionId,
             update: {
