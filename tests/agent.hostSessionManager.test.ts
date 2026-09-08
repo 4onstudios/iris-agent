@@ -243,6 +243,33 @@ describe("HostSessionManager", () => {
         expect(runTurnStream).not.toHaveBeenCalled();
     });
 
+    it("guards a tool selected by the runtime without declared metadata", async () => {
+        const onPreToolUse = jest.fn(() => ({ permissionDecision: "deny" as const }));
+        const runtime = createRuntime({
+            runTurn: jest.fn(async (request) => {
+                await request.onPreToolUse?.({
+                    toolName: "undeclaredTool",
+                    toolArgs: { value: 1 },
+                });
+                return { text: "unreachable" };
+            }),
+        });
+        const manager = new HostSessionManager(() => runtime, {
+            workspacePath: "/workspace",
+        });
+        const session = await manager.createSession({
+            hooks: { onPreToolUse },
+        });
+
+        await expect(session.sendAndWait({ prompt: "run the tool" })).rejects.toThrow(
+            "Tool 'undeclaredTool' denied by onPreToolUse hook",
+        );
+        expect(onPreToolUse).toHaveBeenCalledWith(
+            expect.objectContaining({ toolName: "undeclaredTool" }),
+            { sessionId: session.sessionId },
+        );
+    });
+
     it("deduplicates concurrent opens and delegates cancellation", async () => {
         let releaseStart!: () => void;
         const startGate = new Promise<void>((resolve) => {

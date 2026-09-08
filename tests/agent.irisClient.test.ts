@@ -33,6 +33,7 @@ describe("IrisClient", () => {
         });
         expect(runtime.stream).toHaveBeenCalledWith("Say hello", {
             workspaceRoot: "/workspace",
+            signal: expect.any(AbortSignal),
         });
         expect(updates).toEqual([
             expect.objectContaining({

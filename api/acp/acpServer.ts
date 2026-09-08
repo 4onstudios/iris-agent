@@ -122,6 +122,7 @@ export const createAcpAgentApp = (runtimeAgent: AcpRuntimeAgent): acp.AgentApp =
         if (runtimeAgent.stream) {
           const streamResult = (await runtimeAgent.stream(promptText, {
             workspaceRoot: session.cwd,
+            signal: activeTurn.abortController.signal,
           })) as AgentStreamResult;
           const reader = streamResult.fullStream.getReader();
           activeTurn.cancelStream = async () => reader.cancel();

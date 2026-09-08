@@ -38,7 +38,17 @@ async function main() {
   const workspaceRoot = argv.workspace as string;
 
   if (argv.acp) {
-    console.log = console.error.bind(console);
+    const stderrLog = console.error.bind(console);
+    console.log = stderrLog;
+    console.debug = stderrLog;
+    console.info = stderrLog;
+    console.warn = stderrLog;
+    console.dir = stderrLog;
+    console.table = stderrLog;
+    console.trace = stderrLog;
+    console.group = stderrLog;
+    console.groupCollapsed = stderrLog;
+    console.groupEnd = stderrLog;
   }
 
   console.log(`🚀 Iris Agent CLI`);

@@ -952,6 +952,10 @@ const createGeneratedAgentRuntimeAdapter = (
       metadata.generateOptions && typeof metadata.generateOptions === "object"
         ? (metadata.generateOptions as Record<string, unknown>)
         : {};
+    const requestContext = generateOptions.requestContext as {
+      set?: (key: string, value: unknown) => void;
+    } | undefined;
+    requestContext?.set?.("onPreToolUse", request.onPreToolUse);
 
     const result = await agent.generate(modelInput, generateOptions);
 
@@ -976,12 +980,16 @@ const createGeneratedAgentRuntimeAdapter = (
       metadata.generateOptions && typeof metadata.generateOptions === "object"
         ? (metadata.generateOptions as Record<string, unknown>)
         : {};
+    const requestContext = generateOptions.requestContext as {
+      set?: (key: string, value: unknown) => void;
+    } | undefined;
+    requestContext?.set?.("onPreToolUse", request.onPreToolUse);
 
     if (typeof agent.stream !== "function") {
       throw new Error("Generated agent runtime does not support streaming");
     }
 
-    const rawStreamResult = await agent.stream(modelInput, generateOptions);
+  const rawStreamResult = await agent.stream(modelInput, generateOptions);
     const tee = (
       rawStreamResult.fullStream as ReadableStream<NativeAgentStreamChunk> & {
         tee?: () => [

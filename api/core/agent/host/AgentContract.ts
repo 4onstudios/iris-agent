@@ -59,6 +59,11 @@ export type AgentTurnRequest = {
     content: string;
   }>;
   metadata?: Record<string, unknown>;
+  onPreToolUse?: (input: {
+    toolName: string;
+    toolCallId?: string;
+    toolArgs?: Record<string, unknown>;
+  }) => Promise<void> | void;
 };
 
 export type AgentStreamEvent =

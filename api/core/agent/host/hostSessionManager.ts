@@ -163,24 +163,37 @@ const enforceDeclaredToolHooks = async (
 ): Promise<void> => {
   const declaredToolCalls = getDeclaredToolCalls(turnRequest.metadata);
   for (const declared of declaredToolCalls) {
-    const preHookResult = await Promise.resolve(
+    await turnRequest.onPreToolUse?.({
+      toolName: declared.toolName,
+      toolCallId: declared.toolCallId,
+      toolArgs: declared.toolArgs,
+    });
+  }
+};
+
+const createPreToolUseHook = (
+  hooks: HostSessionHooks | undefined,
+  turnRequest: AgentTurnRequest,
+  invocation: { sessionId: string },
+): NonNullable<AgentTurnRequest["onPreToolUse"]> => {
+  const invoked = new Set<string>();
+  return async ({ toolName, toolCallId, toolArgs }) => {
+    const key = toolCallId || `${toolName}:${JSON.stringify(toolArgs || {})}`;
+    if (invoked.has(key)) return;
+    invoked.add(key);
+    const result = await Promise.resolve(
       hooks?.onPreToolUse?.(
-        {
-          toolName: declared.toolName,
-          toolCallId: declared.toolCallId,
-          toolArgs: declared.toolArgs,
-          turnRequest,
-        },
+        { toolName, toolCallId, toolArgs, turnRequest },
         invocation,
       ),
     );
-    if (preHookResult && preHookResult.permissionDecision === "deny") {
-      throw new Error(`Tool '${declared.toolName}' denied by onPreToolUse hook`);
+    if (result && result.permissionDecision === "deny") {
+      throw new Error(`Tool '${toolName}' denied by onPreToolUse hook`);
     }
-    if (preHookResult && preHookResult.permissionDecision === "ask") {
-      throw new Error(`Tool '${declared.toolName}' requires external approval`);
+    if (result && result.permissionDecision === "ask") {
+      throw new Error(`Tool '${toolName}' requires external approval`);
     }
-  }
+  };
 };
 
 const runPostToolHooks = async (
@@ -348,6 +361,11 @@ export class HostSessionManager<TRuntime extends AgentRuntime> {
     const managed = this.getManagedSession(sessionId);
     const invocation = { sessionId };
     const turnRequest = toAgentTurnRequest(sessionId, request);
+    turnRequest.onPreToolUse = createPreToolUseHook(
+      managed.config.hooks,
+      turnRequest,
+      invocation,
+    );
 
     await this.enforcePermission(sessionId, managed.config, request.permissionRequest);
     await Promise.resolve(managed.config.hooks?.onPreTurn?.({ request: turnRequest }, invocation));
@@ -376,6 +394,11 @@ export class HostSessionManager<TRuntime extends AgentRuntime> {
 
     const invocation = { sessionId };
     const turnRequest = toAgentTurnRequest(sessionId, request);
+    turnRequest.onPreToolUse = createPreToolUseHook(
+      managed.config.hooks,
+      turnRequest,
+      invocation,
+    );
 
     await this.enforcePermission(sessionId, managed.config, request.permissionRequest);
     await Promise.resolve(managed.config.hooks?.onPreTurn?.({ request: turnRequest }, invocation));

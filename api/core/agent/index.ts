@@ -162,6 +162,11 @@ type AgentRequestContextValues = {
     isImage?: boolean;
   }>;
   multimodalImageCount?: number;
+  onPreToolUse?: (input: {
+    toolName: string;
+    toolCallId?: string;
+    toolArgs?: Record<string, unknown>;
+  }) => Promise<void> | void;
 };
 
 export type AgentRequestValues = Omit<AgentRequestContextValues, "enabledSkills">;
@@ -175,6 +180,46 @@ type ToolLike<TParams extends ToolParams = ToolParams, TResult extends ToolResul
   execute: (params: TParams) => Promise<TResult>;
   [key: string]: unknown;
 };
+
+const withRuntimePreToolHook = (tools: Record<string, unknown>): Record<string, unknown> =>
+  Object.fromEntries(
+    Object.entries(tools).map(([toolName, tool]) => {
+      if (
+        !tool ||
+        typeof tool !== "object" ||
+        typeof (tool as { execute?: unknown }).execute !== "function"
+      ) {
+        return [toolName, tool];
+      }
+      const originalExecute = (
+        tool as {
+          execute: (input: unknown, context?: unknown) => Promise<unknown>;
+        }
+      ).execute;
+      return [toolName, {
+        ...(tool as Record<string, unknown>),
+        execute: async (input: unknown, context?: unknown) => {
+          const requestContext = (
+            context as {
+              requestContext?: { get?: (key: string) => unknown };
+            } | undefined
+          )?.requestContext;
+          const onPreToolUse = requestContext?.get?.("onPreToolUse") as
+            | AgentRequestContextValues["onPreToolUse"]
+            | undefined;
+          await onPreToolUse?.({
+            toolName,
+            toolCallId: (context as { toolCallId?: string } | undefined)?.toolCallId,
+            toolArgs:
+              input && typeof input === "object"
+                ? input as Record<string, unknown>
+                : undefined,
+          });
+          return originalExecute(input, context);
+        },
+      }];
+    }),
+  );
 
 type ValidationCommandConfig = {
   autoLint: boolean;
@@ -1344,6 +1389,50 @@ export const createCodingAgent = async (
     },
   };
 
+  const runtimeTools = withRuntimePreToolHook({
+    // Local workspaces provide these through Mastra Workspace under the
+    // established Iris names. Virtual workspaces retain the client-aware tools.
+    ...(workspace
+      ? {
+        writeFile: wrappedWriteFile,
+        editFile: wrappedEditFile,
+      }
+      : {
+        readFile: wrappedReadFile,
+        listDirectory: wrappedListDirectory,
+        grepSearch: wrappedGrepSearch,
+        writeFile: wrappedWriteFile,
+        editFile: wrappedEditFile,
+        deleteFile: wrappedDeleteFile,
+        createDirectory: wrappedCreateDirectory,
+      }),
+    searchFiles: wrappedSearchFiles,
+    renameFile: wrappedRenameFile,
+    getWorkspaceInfo: wrappedGetWorkspaceInfo,
+    findFileContent: wrappedFindFileContent,
+    getSymbols: wrappedGetSymbols,
+    runTerminalCommand: wrappedRunTerminalCommand,
+    applyDiff: wrappedApplyDiff,
+    queryKnowledgeGraph: wrappedQueryKnowledgeGraph,
+    getTypeInfo: wrappedGetTypeInfo,
+    findDefinition: wrappedFindDefinition,
+    findReferences: wrappedFindReferences,
+    getSymbolsLSP: wrappedGetSymbolsLSP,
+    getCodeCompletion: wrappedGetCodeCompletion,
+    getSignatureHelp: wrappedGetSignatureHelp,
+    getCodeActions: wrappedGetCodeActions,
+    renameSymbol: wrappedRenameSymbol,
+    formatDocument: wrappedFormatDocument,
+    getWorkspaceSymbols: wrappedGetWorkspaceSymbols,
+    getCodeContext: wrappedGetCodeContext,
+    taskList: taskListTool,
+    taskOutput: taskOutputTool,
+    taskStop: taskStopTool,
+    webSearch: resolvedWebSearchTool,
+    fetchWebpage: mastraWebFetchTool,
+    ...mcpTools,
+  });
+
   const agent = createMastraCodingAgent({
     id: options.id || "custom-coding-agent",
     name: options.name || "Coding Agent",
@@ -1358,53 +1447,7 @@ export const createCodingAgent = async (
 
     model: getModel(modelId),
     workspace,
-    tools: enforceToolCallBudgetForTools({
-      // Local workspaces provide these through Mastra Workspace under the
-      // established Iris names. Virtual workspaces retain the client-aware tools.
-      ...(workspace
-        ? {
-          writeFile: wrappedWriteFile,
-          editFile: wrappedEditFile,
-        }
-        : {
-          readFile: wrappedReadFile,
-          listDirectory: wrappedListDirectory,
-          grepSearch: wrappedGrepSearch,
-          writeFile: wrappedWriteFile,
-          editFile: wrappedEditFile,
-          deleteFile: wrappedDeleteFile,
-          createDirectory: wrappedCreateDirectory,
-        }),
-      searchFiles: wrappedSearchFiles,
-      renameFile: wrappedRenameFile,
-      getWorkspaceInfo: wrappedGetWorkspaceInfo,
-      findFileContent: wrappedFindFileContent,
-      getSymbols: wrappedGetSymbols,
-      runTerminalCommand: wrappedRunTerminalCommand,
-      applyDiff: wrappedApplyDiff,
-      queryKnowledgeGraph: wrappedQueryKnowledgeGraph,
-      // LSP-based code intelligence tools
-      getTypeInfo: wrappedGetTypeInfo,
-      findDefinition: wrappedFindDefinition,
-      findReferences: wrappedFindReferences,
-      getSymbolsLSP: wrappedGetSymbolsLSP,
-      getCodeCompletion: wrappedGetCodeCompletion,
-      getSignatureHelp: wrappedGetSignatureHelp,
-      getCodeActions: wrappedGetCodeActions,
-      renameSymbol: wrappedRenameSymbol,
-      formatDocument: wrappedFormatDocument,
-      getWorkspaceSymbols: wrappedGetWorkspaceSymbols,
-      // Code context tool for answering questions about code
-      getCodeContext: wrappedGetCodeContext,
-      // Background task management
-      taskList: taskListTool,
-      taskOutput: taskOutputTool,
-      taskStop: taskStopTool,
-      // Web access: provider-native search when available, browser fallback otherwise.
-      webSearch: resolvedWebSearchTool,
-      fetchWebpage: mastraWebFetchTool,
-      ...mcpTools,
-    }),
+    tools: enforceToolCallBudgetForTools(runtimeTools as any),
 
     // Add memory for conversation context with token-aware budgeting.
     // TokenLimiterProcessor moved to inputProcessors (new Mastra API).

@@ -68,6 +68,7 @@ describe("ACP server", () => {
             expect(response.stopReason).toBe("end_turn");
             expect(runtime.stream).toHaveBeenCalledWith("Read the README", {
                 workspaceRoot: "/workspace",
+                signal: expect.any(AbortSignal),
             });
             expect(updates.map((entry) => entry.update.sessionUpdate)).toEqual([
                 "agent_thought_chunk",
@@ -244,5 +245,51 @@ describe("ACP server", () => {
         });
 
         expect(updates).toHaveLength(0);
+    });
+
+    it("passes cancellation to stream startup", async () => {
+        let resolveStream!: (value: {
+            fullStream: ReadableStream<never>;
+            text: Promise<string>;
+        }) => void;
+        const streamResult = new Promise<{
+            fullStream: ReadableStream<never>;
+            text: Promise<string>;
+        }>((resolve) => {
+            resolveStream = resolve;
+        });
+        let receivedSignal!: AbortSignal;
+        const runtime: AcpRuntimeAgent = {
+            stream: jest.fn(async (_input, options) => {
+                receivedSignal = options.signal as AbortSignal;
+                return streamResult;
+            }),
+        };
+        const client = acp.client({ name: "iris-agent-test-client" });
+
+        await client.connectWith(createAcpAgentApp(runtime), async (ctx) => {
+            await ctx.request(acp.methods.agent.initialize, {
+                protocolVersion: acp.PROTOCOL_VERSION,
+                clientCapabilities: {},
+            });
+            const session = await ctx.request(acp.methods.agent.session.new, {
+                cwd: "/workspace",
+                mcpServers: [],
+            });
+            const prompt = ctx.request(acp.methods.agent.session.prompt, {
+                sessionId: session.sessionId,
+                prompt: [{ type: "text", text: "Start" }],
+            });
+            while (!receivedSignal) await Promise.resolve();
+            await ctx.notify(acp.methods.agent.session.cancel, {
+                sessionId: session.sessionId,
+            });
+            expect(receivedSignal.aborted).toBe(true);
+            resolveStream({
+                fullStream: new ReadableStream({ start(controller) { controller.close(); } }),
+                text: Promise.resolve(""),
+            });
+            await expect(prompt).resolves.toEqual({ stopReason: "cancelled" });
+        });
     });
 });
