@@ -134,6 +134,9 @@ export const createAcpAgentApp = (runtimeAgent: AcpRuntimeAgent): acp.AgentApp =
             }
 
             const { value, done } = await reader.read();
+            if (activeTurn.abortController.signal.aborted) {
+              return { stopReason: "cancelled" as const };
+            }
             if (done) break;
             if (!value?.type) continue;
 

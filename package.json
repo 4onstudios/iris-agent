@@ -5,10 +5,21 @@
   "description": "Standalone HTTP coding-agent service and CLI with ACP (Agent Client Protocol) support.",
   "type": "module",
   "bin": {
-    "iris-agent": "./bin/iris-agent.js"
+    "iris-agent": "./dist/cli.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
   "packageManager": "yarn@1.22.22",
   "publishConfig": {
     "access": "public"
@@ -21,7 +32,8 @@
     "dev": "tsx watch server.ts",
     "cli": "tsx cli.ts",
     "cli:dev": "tsx watch cli.ts",
-    "build": "tsc",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
     "test": "jest --config jest.config.cjs",
     "typecheck": "tsc --noEmit"
   },
