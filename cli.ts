@@ -31,17 +31,15 @@ const argv = yargs(hideBin(process.argv))
     description: "Interactive chat mode",
     default: false,
   })
-  .option("port", {
-    alias: "p",
-    type: "number",
-    description: "Port for ACP server",
-    default: 3000,
-  })
   .help()
   .parseSync();
 
 async function main() {
   const workspaceRoot = argv.workspace as string;
+
+  if (argv.acp) {
+    console.log = console.error.bind(console);
+  }
 
   console.log(`🚀 Iris Agent CLI`);
   console.log(`📁 Workspace: ${workspaceRoot}`);
@@ -50,9 +48,8 @@ async function main() {
   const agent = await createCodingAgent("gpt-4", workspaceRoot);
 
   if (argv.acp) {
-    // Start ACP server mode
-    console.log(`🔗 Starting ACP server on port ${argv.port}...`);
-    await startAcpServer(agent, argv.port as number);
+    console.log("🔗 Starting ACP server over stdio...");
+    await startAcpServer(agent);
   } else if (argv.chat) {
     // Interactive chat mode
     console.log(`💬 Entering chat mode (type "exit" to quit)`);

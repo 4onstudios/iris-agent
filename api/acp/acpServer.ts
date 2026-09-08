@@ -1,137 +1,275 @@
-/**
- * ACP (Agent Client Protocol) Server Implementation
- * Enables iris-agent to communicate via ACP protocol via stdio
- */
+import { randomUUID } from "node:crypto";
+import { Readable, Writable } from "node:stream";
+import * as acp from "@agentclientprotocol/sdk";
 
-import { AgentApp } from "@agentclientprotocol/sdk";
+type AgentStreamChunk = {
+  type?: string;
+  payload?: Record<string, unknown>;
+};
 
-/**
- * Simple params parser for custom methods
- */
-function createParamsParser<T = any>() {
-  return {
-    parse: (data: unknown): T => {
-      if (data === null || data === undefined) {
-        return {} as T;
+type AgentStreamResult = {
+  fullStream: {
+    getReader(): {
+      read(): Promise<{ done: boolean; value?: AgentStreamChunk }>;
+      cancel(reason?: unknown): Promise<void>;
+    };
+  };
+  text: Promise<string>;
+};
+
+export type AcpRuntimeAgent = {
+  stream?: (
+    input: string,
+    options: Record<string, unknown>,
+  ) => Promise<unknown>;
+  generate?: (
+    input: string,
+    options?: Record<string, unknown>,
+  ) => Promise<{ text?: string }>;
+  chat?: (request: {
+    messages: Array<{ role: "user"; content: string }>;
+  }) => Promise<unknown>;
+};
+
+type ActiveTurn = {
+  abortController: AbortController;
+  cancelStream?: () => Promise<void>;
+};
+
+type AcpSessionState = {
+  cwd: string;
+  activeTurn?: ActiveTurn;
+};
+
+const toPromptText = (prompt: acp.ContentBlock[]): string =>
+  prompt
+    .map((block) => {
+      if (block.type === "text") return block.text;
+      if (block.type === "resource_link") {
+        return `[Resource: ${block.name || block.uri}](${block.uri})`;
       }
-      return data as T;
-    },
-  };
-}
+      if (block.type === "resource" && "text" in block.resource) {
+        return block.resource.text;
+      }
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n\n");
 
-/**
- * Start ACP server for agent communication via stdio
- */
-export async function startAcpServer(
-  agent: any,
-  _port: number = 3000
-): Promise<void> {
-  // Create ACP agent app
-  const agentApp = new AgentApp({
-    name: "iris-agent",
-  });
+const toToolKind = (toolName: string): acp.ToolKind => {
+  const normalized = toolName.toLowerCase();
+  if (normalized.includes("read") || normalized.includes("view")) return "read";
+  if (normalized.includes("write") || normalized.includes("edit")) return "edit";
+  if (normalized.includes("delete")) return "delete";
+  if (normalized.includes("move") || normalized.includes("rename")) return "move";
+  if (normalized.includes("search") || normalized.includes("grep")) return "search";
+  if (normalized.includes("terminal") || normalized.includes("command")) return "execute";
+  if (normalized.includes("fetch") || normalized.includes("http")) return "fetch";
+  return "other";
+};
 
-  // Handle custom "chat" request
-  agentApp.onRequest(
-    "chat",
-    createParamsParser(),
-    async (params: any) => {
-      return handleChatRequest(agent, params);
-    }
-  );
-
-  // Handle custom "list_tools" request
-  agentApp.onRequest(
-    "list_tools",
-    createParamsParser(),
-    async () => {
-      return handleListToolsRequest(agent);
-    }
-  );
-
-  // Handle custom "list_skills" request
-  agentApp.onRequest(
-    "list_skills",
-    createParamsParser(),
-    async () => {
-      return handleListSkillsRequest(agent);
-    }
-  );
-
-  // Handle custom "workspace_info" request
-  agentApp.onRequest(
-    "workspace_info",
-    createParamsParser(),
-    async () => {
-      return handleWorkspaceInfoRequest(agent);
-    }
-  );
-
-  // Connect using stdio (default ACP transport)
-  const connection = agentApp.connect(process.stdin as any);
-
-  console.error(`✅ ACP Agent ready: iris-agent@0.1.0`);
-  console.error(`📡 Listening via stdio for ACP protocol messages`);
-
-  // Keep process alive until connection closes
-  await connection.closed;
-}
-
-/**
- * Handle chat request
- */
-async function handleChatRequest(agent: any, params: any): Promise<any> {
-  const message = params?.message || params?.text || "";
-
-  if (!message) {
-    throw new Error("Message is required");
+const extractText = (value: unknown): string => {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (typeof record.text === "string") return record.text;
+    if (typeof record.content === "string") return record.content;
   }
+  return value === undefined ? "" : JSON.stringify(value);
+};
 
-  const response = await agent.chat?.({
-    messages: [{ role: "user", content: message }],
-  });
+export const createAcpAgentApp = (runtimeAgent: AcpRuntimeAgent): acp.AgentApp => {
+  const sessions = new Map<string, AcpSessionState>();
 
-  return {
-    success: true,
-    response,
+  const cancelSessionTurn = async (sessionId: string): Promise<void> => {
+    const activeTurn = sessions.get(sessionId)?.activeTurn;
+    if (!activeTurn) return;
+    activeTurn.abortController.abort();
+    await activeTurn.cancelStream?.().catch(() => undefined);
   };
-}
 
-/**
- * List available tools
- */
-async function handleListToolsRequest(agent: any): Promise<any> {
-  const tools = await agent.tools?.getAvailableTools?.();
+  return acp
+    .agent({ name: "iris-agent" })
+    .onRequest(acp.methods.agent.initialize, async () => ({
+      protocolVersion: acp.PROTOCOL_VERSION,
+      agentCapabilities: {
+        loadSession: false,
+        sessionCapabilities: { close: {} },
+      },
+      agentInfo: {
+        name: "iris-agent",
+        version: "0.1.0",
+      },
+    }))
+    .onRequest(acp.methods.agent.session.new, async (ctx) => {
+      const sessionId = randomUUID();
+      sessions.set(sessionId, { cwd: ctx.params.cwd });
+      return { sessionId };
+    })
+    .onRequest(acp.methods.agent.session.prompt, async (ctx) => {
+      const session = sessions.get(ctx.params.sessionId);
+      if (!session) {
+        throw new Error(`Unknown ACP session '${ctx.params.sessionId}'`);
+      }
 
-  return {
-    tools: Array.isArray(tools)
-      ? tools.map((t: any) => ({
-          name: t.name,
-          description: t.description,
-          inputSchema: t.inputSchema,
-        }))
-      : [],
-  };
-}
+      await cancelSessionTurn(ctx.params.sessionId);
+      const activeTurn: ActiveTurn = { abortController: new AbortController() };
+      session.activeTurn = activeTurn;
+      const promptText = toPromptText(ctx.params.prompt);
 
-/**
- * List available skills
- */
-async function handleListSkillsRequest(agent: any): Promise<any> {
-  const skills = await agent.getSkillsList?.();
+      try {
+        if (runtimeAgent.stream) {
+          const streamResult = (await runtimeAgent.stream(promptText, {
+            workspaceRoot: session.cwd,
+          })) as AgentStreamResult;
+          const reader = streamResult.fullStream.getReader();
+          activeTurn.cancelStream = async () => reader.cancel();
+          const knownToolCalls = new Set<string>();
+          let emittedText = false;
 
-  return {
-    skills: Array.isArray(skills) ? skills : [],
-  };
-}
+          while (true) {
+            if (activeTurn.abortController.signal.aborted) {
+              await reader.cancel().catch(() => undefined);
+              return { stopReason: "cancelled" as const };
+            }
 
-/**
- * Get workspace information
- */
-async function handleWorkspaceInfoRequest(agent: any): Promise<any> {
-  return {
-    workspaceRoot: agent.workspaceRoot || "",
-    timestamp: new Date().toISOString(),
-    agentVersion: "0.1.0",
-  };
+            const { value, done } = await reader.read();
+            if (done) break;
+            if (!value?.type) continue;
+
+            if (value.type === "text-delta" || value.type === "reasoning-delta") {
+              const text = String(value.payload?.text || "");
+              if (!text) continue;
+              if (value.type === "text-delta") emittedText = true;
+              await ctx.client.notify(acp.methods.client.session.update, {
+                sessionId: ctx.params.sessionId,
+                update: {
+                  sessionUpdate:
+                    value.type === "reasoning-delta"
+                      ? "agent_thought_chunk"
+                      : "agent_message_chunk",
+                  content: { type: "text", text },
+                },
+              });
+              continue;
+            }
+
+            if (value.type === "tool-call") {
+              const toolName = String(value.payload?.toolName || "tool");
+              const toolCallId = String(value.payload?.toolCallId || randomUUID());
+              knownToolCalls.add(toolCallId);
+              await ctx.client.notify(acp.methods.client.session.update, {
+                sessionId: ctx.params.sessionId,
+                update: {
+                  sessionUpdate: "tool_call",
+                  toolCallId,
+                  title: toolName,
+                  name: toolName,
+                  kind: toToolKind(toolName),
+                  status: "in_progress",
+                  rawInput: value.payload?.args,
+                },
+              });
+              continue;
+            }
+
+            if (value.type === "tool-result") {
+              const toolName = String(value.payload?.toolName || "tool");
+              const toolCallId = String(value.payload?.toolCallId || randomUUID());
+              if (!knownToolCalls.has(toolCallId)) {
+                knownToolCalls.add(toolCallId);
+                await ctx.client.notify(acp.methods.client.session.update, {
+                  sessionId: ctx.params.sessionId,
+                  update: {
+                    sessionUpdate: "tool_call",
+                    toolCallId,
+                    title: toolName,
+                    name: toolName,
+                    kind: toToolKind(toolName),
+                    status: "in_progress",
+                  },
+                });
+              }
+              const output =
+                value.payload?.result ??
+                value.payload?.output ??
+                value.payload?.content ??
+                value.payload?.data;
+              await ctx.client.notify(acp.methods.client.session.update, {
+                sessionId: ctx.params.sessionId,
+                update: {
+                  sessionUpdate: "tool_call_update",
+                  toolCallId,
+                  status: "completed",
+                  rawOutput: output,
+                  content: [
+                    {
+                      type: "content",
+                      content: { type: "text", text: extractText(output) },
+                    },
+                  ],
+                },
+              });
+            }
+          }
+
+          const finalText = await streamResult.text;
+          if (!emittedText && finalText) {
+            await ctx.client.notify(acp.methods.client.session.update, {
+              sessionId: ctx.params.sessionId,
+              update: {
+                sessionUpdate: "agent_message_chunk",
+                content: { type: "text", text: finalText },
+              },
+            });
+          }
+          return { stopReason: "end_turn" as const };
+        }
+
+        const generated = runtimeAgent.generate
+          ? await runtimeAgent.generate(promptText, { workspaceRoot: session.cwd })
+          : await runtimeAgent.chat?.({
+            messages: [{ role: "user", content: promptText }],
+          });
+        const responseText = extractText(generated);
+        if (responseText) {
+          await ctx.client.notify(acp.methods.client.session.update, {
+            sessionId: ctx.params.sessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: responseText },
+            },
+          });
+        }
+        return { stopReason: "end_turn" as const };
+      } catch (error) {
+        if (activeTurn.abortController.signal.aborted) {
+          return { stopReason: "cancelled" as const };
+        }
+        throw error;
+      } finally {
+        if (session.activeTurn === activeTurn) {
+          session.activeTurn = undefined;
+        }
+      }
+    })
+    .onRequest(acp.methods.agent.session.close, async (ctx) => {
+      await cancelSessionTurn(ctx.params.sessionId);
+      sessions.delete(ctx.params.sessionId);
+      return {};
+    })
+    .onNotification(acp.methods.agent.session.cancel, async (ctx) => {
+      await cancelSessionTurn(ctx.params.sessionId);
+    });
+};
+
+export async function startAcpServer(runtimeAgent: AcpRuntimeAgent): Promise<void> {
+  const output = Writable.toWeb(process.stdout) as WritableStream<Uint8Array>;
+  const input = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
+  const connection = createAcpAgentApp(runtimeAgent).connect(
+    acp.ndJsonStream(output, input),
+  );
+
+  console.error("ACP agent ready: iris-agent@0.1.0 (stdio)");
+  await connection.closed;
 }

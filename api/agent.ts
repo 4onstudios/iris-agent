@@ -46,8 +46,13 @@ import { redactToolResult } from "./core/agent/utils/toolResultSafetyProcessor";
 import type { ToolCallBudget } from "./core/agent/utils/toolCallBudget";
 import { serializeToolResultsForContinuation } from "./core/containers/chat/toolResultSerialization";
 import {
+  type AgentRuntime,
+  type AgentStreamEvent,
+  type AgentTurnStreamResult,
+  type HostSessionHandle,
   createDefaultAgentRegistry,
   ExternalAgentLifecycleManager,
+  HostSessionManager,
 } from "./core/agent/host";
 import {
   truncateText,
@@ -152,7 +157,7 @@ type AgentChatRequestBody = {
   enableSlashCommands?: boolean;
   enabledSkills?: string[];
   approvalMode?:
-    "Default Approvals" | "Bypass Approvals" | "Autopilot (Preview)";
+  "Default Approvals" | "Bypass Approvals" | "Autopilot (Preview)";
   preferredAgentId?: string;
   mcpServers?: McpServerConfig[];
   terminalAutoApproveRules?: TerminalAutoApproveRules;
@@ -207,6 +212,29 @@ type AgentGenerateResult = {
   usage?: unknown;
 };
 
+type NativeAgentStreamChunk = {
+  type?: string;
+  payload?: Record<string, unknown>;
+};
+
+type NativeAgentStreamResult = {
+  fullStream: ReadableStream<NativeAgentStreamChunk>;
+  text: Promise<string>;
+  toolCalls: Promise<
+    Array<{
+      toolName?: string;
+      args?: Record<string, unknown>;
+      toolCallId?: string;
+    }>
+  >;
+  usage?: Promise<unknown> | unknown;
+  steps?: Promise<StreamStep[]> | StreamStep[];
+};
+
+type GeneratedAgentTurnStreamResult = AgentTurnStreamResult & {
+  rawStreamResult: NativeAgentStreamResult;
+};
+
 type GeneratedAgent = {
   // eslint-disable-next-line no-unused-vars
   generate: (
@@ -231,6 +259,9 @@ type GeneratedAgent = {
     result: Record<string, unknown>;
   }>;
   clearProcessedWorkspaceResults?: (generationId: string) => void;
+  stream?: (
+    ...args: [string | MultimodalMessage[], Record<string, unknown>]
+  ) => Promise<NativeAgentStreamResult>;
 };
 
 const IMAGE_EXT_TO_MIME: Record<string, string> = {
@@ -540,7 +571,7 @@ const reconcileToolLifecycleSnapshots = (
           !claimedStreamedIndexes.has(index) &&
           (!streamedEntry.toolCallId || !entry.toolCallId) &&
           getToolCallSignature(streamedEntry.name, streamedEntry.args || {}) ===
-            getToolCallSignature(entry.name, entry.args || {}),
+          getToolCallSignature(entry.name, entry.args || {}),
       );
       if (matchingIndex === -1) {
         merged.push(entry);
@@ -878,6 +909,236 @@ const generateWithRetry = async (
   throw lastError;
 };
 
+const asGenerateResultFromTurn = (turnResult: {
+  text: string;
+  raw?: unknown;
+}): AgentGenerateResult => {
+  if (turnResult.raw && typeof turnResult.raw === "object") {
+    return turnResult.raw as AgentGenerateResult;
+  }
+
+  return {
+    text: turnResult.text,
+  };
+};
+
+const createGeneratedAgentRuntimeAdapter = (
+  agent: GeneratedAgent,
+): AgentRuntime => ({
+  descriptor: {
+    id: "generated-agent-runtime",
+    name: "Generated Agent Runtime",
+    version: "0.1.0",
+    source: "external",
+  },
+  async startSession(context) {
+    return {
+      sessionId: context.sessionId,
+      agentId: "generated-agent-runtime",
+      createdAt: Date.now(),
+    };
+  },
+  async runTurn(request) {
+    const metadata =
+      request.metadata && typeof request.metadata === "object"
+        ? (request.metadata as Record<string, unknown>)
+        : {};
+
+    const modelInput =
+      metadata.modelInput !== undefined
+        ? (metadata.modelInput as string | MultimodalMessage[])
+        : request.input;
+    const generateOptions =
+      metadata.generateOptions && typeof metadata.generateOptions === "object"
+        ? (metadata.generateOptions as Record<string, unknown>)
+        : {};
+
+    const result = await agent.generate(modelInput, generateOptions);
+
+    return {
+      text: result.text || "",
+      toolCalls: Array.isArray(result.toolCalls)
+        ? (result.toolCalls as Array<Record<string, unknown>>)
+        : undefined,
+      raw: result,
+    };
+  },
+  async runTurnStream(request) {
+    const metadata =
+      request.metadata && typeof request.metadata === "object"
+        ? (request.metadata as Record<string, unknown>)
+        : {};
+    const modelInput =
+      metadata.modelInput !== undefined
+        ? (metadata.modelInput as string | MultimodalMessage[])
+        : request.input;
+    const generateOptions =
+      metadata.generateOptions && typeof metadata.generateOptions === "object"
+        ? (metadata.generateOptions as Record<string, unknown>)
+        : {};
+
+    if (typeof agent.stream !== "function") {
+      throw new Error("Generated agent runtime does not support streaming");
+    }
+
+    const rawStreamResult = await agent.stream(modelInput, generateOptions);
+    const tee = (
+      rawStreamResult.fullStream as ReadableStream<NativeAgentStreamChunk> & {
+        tee?: () => [
+          ReadableStream<NativeAgentStreamChunk>,
+          ReadableStream<NativeAgentStreamChunk>,
+        ];
+      }
+    ).tee;
+    const [hostEventSource, transportSource] =
+      typeof tee === "function"
+        ? tee.call(rawStreamResult.fullStream)
+        : [
+            new ReadableStream<NativeAgentStreamChunk>({
+              start(controller) {
+                controller.close();
+              },
+            }),
+            rawStreamResult.fullStream,
+          ];
+    const mappedStream = hostEventSource.pipeThrough(
+      new TransformStream<NativeAgentStreamChunk, AgentStreamEvent>({
+        transform(chunk, controller) {
+          if (!chunk?.type) return;
+
+          if (chunk.type === "text-delta" || chunk.type === "reasoning-delta") {
+            const text = String(chunk.payload?.text || "");
+            if (text) controller.enqueue({ type: "text-delta", text });
+            return;
+          }
+
+          if (chunk.type === "tool-call") {
+            const toolName =
+              typeof chunk.payload?.toolName === "string"
+                ? chunk.payload.toolName
+                : "unknown_tool";
+            controller.enqueue({
+              type: "tool-call",
+              name: toolName,
+              args:
+                chunk.payload?.args && typeof chunk.payload.args === "object"
+                  ? (chunk.payload.args as Record<string, unknown>)
+                  : undefined,
+            });
+            return;
+          }
+
+          if (chunk.type === "tool-result") {
+            const toolName =
+              typeof chunk.payload?.toolName === "string"
+                ? chunk.payload.toolName
+                : "unknown_tool";
+            controller.enqueue({
+              type: "tool-result",
+              name: toolName,
+              result:
+                chunk.payload?.result ??
+                chunk.payload?.output ??
+                chunk.payload?.content ??
+                chunk.payload?.data,
+            });
+            return;
+          }
+
+          if (chunk.type === "tool-suspended" || chunk.type === "tool_suspended") {
+            controller.enqueue({
+              type: "approval-required",
+              reason: "Tool suspended and awaiting user input",
+              payload: chunk.payload,
+            });
+          }
+        },
+        flush(controller) {
+          controller.enqueue({ type: "done" });
+        },
+      }),
+    );
+    const transportStreamResult: NativeAgentStreamResult = {
+      ...rawStreamResult,
+      fullStream: transportSource,
+    };
+
+    const result: GeneratedAgentTurnStreamResult = {
+      stream: mappedStream,
+      getFinalResult: async () => {
+        const [text, toolCalls, usage, steps] = await Promise.all([
+          rawStreamResult.text,
+          rawStreamResult.toolCalls,
+          Promise.resolve(rawStreamResult.usage).catch(() => undefined),
+          Promise.resolve(rawStreamResult.steps).catch(() => undefined),
+        ]);
+
+        return {
+          text: text || "",
+          toolCalls: Array.isArray(toolCalls)
+            ? toolCalls
+              .filter((item) => typeof item?.toolName === "string")
+              .map((item) => ({
+                name: item.toolName as string,
+                args: item.args || {},
+                toolCallId: item.toolCallId,
+              }))
+            : undefined,
+          raw: {
+            text,
+            toolCalls,
+            usage,
+            steps,
+            streamResult: rawStreamResult,
+          },
+        };
+      },
+      rawStreamResult: transportStreamResult,
+    };
+    return result;
+  },
+  async endSession() {
+    // No-op: GeneratedAgent lifecycle is managed by agent cache.
+  },
+});
+
+const generateWithSessionRetry = async (
+  session: HostSessionHandle,
+  prompt: string | MultimodalMessage[],
+  generateOptions: Record<string, unknown>,
+  maxAttempts = 3,
+): Promise<AgentGenerateResult> => {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const turnResult = await session.sendAndWait({
+        prompt: typeof prompt === "string" ? prompt : "[multimodal-prompt]",
+        metadata: {
+          modelInput: prompt,
+          generateOptions,
+        },
+      });
+      return asGenerateResultFromTurn(turnResult);
+    } catch (error) {
+      lastError = error;
+      const shouldRetry = isRetryableModelError(error) && attempt < maxAttempts;
+
+      if (!shouldRetry) {
+        throw error;
+      }
+
+      const backoffMs = 600 * 2 ** (attempt - 1);
+      console.warn(
+        `[agent] transient model error (attempt ${attempt}/${maxAttempts}); retrying in ${backoffMs}ms`,
+      );
+      await sleep(backoffMs);
+    }
+  }
+
+  throw lastError;
+};
+
 async function getOrCreateAgent(
   modelId: string,
   workspacePath: string,
@@ -918,11 +1179,11 @@ async function getOrCreateAgent(
   }
   let manifestExternalRegistration:
     | {
-        id?: string;
-        name?: string;
-        description?: string;
-        runtimeFactory: () => Promise<GeneratedAgent>;
-      }
+      id?: string;
+      name?: string;
+      description?: string;
+      runtimeFactory: () => Promise<GeneratedAgent>;
+    }
     | undefined;
 
   const externalManifestPath =
@@ -1357,11 +1618,11 @@ const extractProviderErrorDetails = (
   const providerError = (errorRecord?.data as Record<string, unknown>)
     ?.error as
     | {
-        code?: string | number;
-        type?: string;
-        message?: string;
-        metadata?: { raw?: string };
-      }
+      code?: string | number;
+      type?: string;
+      message?: string;
+      metadata?: { raw?: string };
+    }
     | undefined;
   const code = providerError?.code ?? providerError?.type;
   const message =
@@ -1554,6 +1815,8 @@ router.post(
 
     let requestedModelId = "gpt-4o";
     let activeRunId: string | undefined;
+    let activeHostSession: HostSessionHandle | undefined;
+    let activeHostSessionManager: HostSessionManager<AgentRuntime> | undefined;
 
     // Set longer timeout for this specific route (5 minutes)
     req.setTimeout(5 * 60 * 1000);
@@ -1612,9 +1875,9 @@ router.post(
       const mastraMemoryScope =
         rawUseMastraObservationalMemory === true
           ? {
-              thread: mastraThreadId,
-              resource: `iris-chat:${mastraThreadId}`,
-            }
+            thread: mastraThreadId,
+            resource: `iris-chat:${mastraThreadId}`,
+          }
           : undefined;
       let lifecycleState: RunLifecycleState = "queued";
       let stopReason: RunStopReason = "none";
@@ -1890,7 +2153,7 @@ router.post(
               status,
               taskId:
                 typeof (commandResult as { taskId?: unknown }).taskId ===
-                "string"
+                  "string"
                   ? (commandResult as { taskId?: string }).taskId
                   : undefined,
               toolCalls: [],
@@ -1908,7 +2171,7 @@ router.post(
           const commandSucceeded = status === "completed";
           const commandError =
             (commandResult as { error?: unknown }).error &&
-            typeof (commandResult as { error?: unknown }).error === "string"
+              typeof (commandResult as { error?: unknown }).error === "string"
               ? (commandResult as { error?: string }).error || "Command failed"
               : "Command failed";
           const stdoutText =
@@ -1963,7 +2226,11 @@ router.post(
             snapshot = await getEnvironmentSnapshot(workspacePath);
             // Cache for 5 minutes
             envSnapshotCache.set(cacheKey, snapshot);
-            setTimeout(() => envSnapshotCache.delete(cacheKey), 5 * 60 * 1000);
+            const evictionTimer = setTimeout(
+              () => envSnapshotCache.delete(cacheKey),
+              5 * 60 * 1000,
+            );
+            evictionTimer.unref();
           }
 
           envSnapshotMarkdown = formatSnapshotAsMarkdown(snapshot);
@@ -1992,6 +2259,29 @@ router.post(
         useMastraObservationalMemory,
         observationalMemorySettings,
         effectiveStreamErrorRetry,
+      );
+
+      const hostSessionId = chatSessionId || resolvedRunId;
+      activeHostSessionManager = new HostSessionManager<AgentRuntime>(
+        () => Promise.resolve(createGeneratedAgentRuntimeAdapter(agent)),
+        {
+          workspacePath,
+          modelId,
+          metadata: {
+            runId: resolvedRunId,
+            preferredAgentId: effectivePreferredAgentId || "iris",
+          },
+        },
+      );
+      activeHostSession = await activeHostSessionManager.resumeSession(
+        hostSessionId,
+        {
+          modelId,
+          metadata: {
+            runId: resolvedRunId,
+            threadId: mastraThreadId,
+          },
+        },
       );
 
       // Build workspace context
@@ -2176,26 +2466,26 @@ _You have discovered the following in earlier interactions. Use this to avoid re
 
       const multimodalImageParts = resolveModelSupportsVision(modelId)
         ? await resolveImageMessageParts(
-            safeFilesInContext,
-            workspacePath,
-            isWebWorkspace,
-            hasDesktopAuth(req),
-          )
+          safeFilesInContext,
+          workspacePath,
+          isWebWorkspace,
+          hasDesktopAuth(req),
+        )
         : [];
       const modelInput: string | MultimodalMessage[] =
         multimodalImageParts.length > 0
           ? [
-              {
-                role: "user",
-                content: [
-                  {
-                    type: "text",
-                    text: prompt,
-                  },
-                  ...multimodalImageParts,
-                ],
-              },
-            ]
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: prompt,
+                },
+                ...multimodalImageParts,
+              ],
+            },
+          ]
           : prompt;
 
       console.log("📏 Prompt budget", {
@@ -2324,12 +2614,12 @@ _You have discovered the following in earlier interactions. Use this to avoid re
         const completedResults =
           completedToolResults.length > 0
             ? serializeToolResultsForContinuation(
-                completedToolResults.map(({ name, result }) => ({
-                  name,
-                  result,
-                })),
-                "unknown_tool",
-              )
+              completedToolResults.map(({ name, result }) => ({
+                name,
+                result,
+              })),
+              "unknown_tool",
+            )
             : "No tools completed before the action budget was exhausted.";
         const stopReasonExplanation =
           stopReason === "repeated_call"
@@ -2339,17 +2629,28 @@ _You have discovered the following in earlier interactions. Use this to avoid re
               : "The server-side tool-action budget is exhausted.";
         const synthesisPrompt = `${prompt}\n\n${stopReasonExplanation} Do not call any tools. Produce the final answer now using only the conversation and completed tool results below. Clearly distinguish verified findings from uncertainty.\n\nCompleted tool results:\n${completedResults}`;
 
+        const synthesisOptions = {
+          maxSteps: 1,
+          maxOutputTokens,
+          ...(mastraMemoryScope ? { memory: mastraMemoryScope } : {}),
+          toolChoice: "none" as const,
+          toolCallConcurrency: 1,
+          requestContext: agentRequestContext,
+        };
+
+        if (activeHostSession) {
+          return generateWithSessionRetry(
+            activeHostSession,
+            synthesisPrompt,
+            synthesisOptions,
+            modelProfile.generateRetryAttempts,
+          );
+        }
+
         return generateWithRetry(
           agent,
           synthesisPrompt,
-          {
-            maxSteps: 1,
-            maxOutputTokens,
-            ...(mastraMemoryScope ? { memory: mastraMemoryScope } : {}),
-            toolChoice: "none" as const,
-            toolCallConcurrency: 1,
-            requestContext: agentRequestContext,
-          },
+          synthesisOptions,
           modelProfile.generateRetryAttempts,
         );
       };
@@ -2434,23 +2735,66 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             stopReason,
           });
 
-          const streamResult = await (
-            agent as unknown as {
-              stream: (
-                ...args: [string | MultimodalMessage[], Record<string, unknown>]
-              ) => Promise<{
-                fullStream: ReadableStream<any>;
-                text: Promise<string>;
-                toolCalls: Promise<
-                  Array<{
-                    toolName?: string;
-                    args?: Record<string, unknown>;
-                    toolCallId?: string;
-                  }>
-                >;
-              }>;
-            }
-          ).stream(modelInput, generateOptions);
+          const streamResult = activeHostSession
+            ? await (async () => {
+              const hostStreamResult = await activeHostSession.sendStream({
+                prompt:
+                  typeof modelInput === "string"
+                    ? modelInput
+                    : "[multimodal-prompt]",
+                metadata: {
+                  modelInput,
+                  generateOptions,
+                },
+              });
+
+              const rawFromSession = (hostStreamResult as any)
+                .rawStreamResult as
+                | {
+                  fullStream: ReadableStream<any>;
+                  text: Promise<string>;
+                  toolCalls: Promise<
+                    Array<{
+                      toolName?: string;
+                      args?: Record<string, unknown>;
+                      toolCallId?: string;
+                    }>
+                  >;
+                  usage?: Promise<unknown> | unknown;
+                  steps?: Promise<StreamStep[]> | StreamStep[];
+                }
+                | undefined;
+
+              if (rawFromSession) {
+                return rawFromSession;
+              }
+
+              throw new Error(
+                "Host session stream transport unavailable for SSE chunk pipeline",
+              );
+            })()
+            : await (
+              agent as unknown as {
+                stream: (
+                  ...args: [
+                    string | MultimodalMessage[],
+                    Record<string, unknown>,
+                  ]
+                ) => Promise<{
+                  fullStream: ReadableStream<any>;
+                  text: Promise<string>;
+                  toolCalls: Promise<
+                    Array<{
+                      toolName?: string;
+                      args?: Record<string, unknown>;
+                      toolCallId?: string;
+                    }>
+                  >;
+                  usage?: Promise<unknown> | unknown;
+                  steps?: Promise<StreamStep[]> | StreamStep[];
+                }>;
+              }
+            ).stream(modelInput, generateOptions);
 
           const reader = streamResult.fullStream.getReader();
           const thoughtBuffer: string[] = [];
@@ -2667,7 +3011,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                     : undefined,
                 suspendPayload:
                   chunk.payload?.suspendPayload &&
-                  typeof chunk.payload.suspendPayload === "object"
+                    typeof chunk.payload.suspendPayload === "object"
                     ? (chunk.payload.suspendPayload as Record<string, unknown>)
                     : undefined,
               };
@@ -2707,11 +3051,11 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             : 0;
           const streamToolCallsFromSteps = Array.isArray(streamSteps)
             ? streamSteps.reduce(
-                (total, step) =>
-                  total +
-                  (Array.isArray(step.toolCalls) ? step.toolCalls.length : 0),
-                0,
-              )
+              (total, step) =>
+                total +
+                (Array.isArray(step.toolCalls) ? step.toolCalls.length : 0),
+              0,
+            )
             : undefined;
           const streamLastStep = Array.isArray(streamSteps)
             ? streamSteps[streamSteps.length - 1]
@@ -2741,25 +3085,39 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             usage: streamTokenUsage,
             modelId,
           });
-          const mappedToolCalls: PendingToolCall[] = (
-            streamedToolCalls || []
-          ).reduce<PendingToolCall[]>((calls, call) => {
-            const toolName = call?.toolName;
-            if (typeof toolName !== "string" || toolName.length === 0) {
+          const typedStreamedToolCalls =
+            (streamedToolCalls || []) as Array<{
+              toolName?: string;
+              args?: Record<string, unknown>;
+              toolCallId?: string;
+            }>;
+          const mappedToolCalls: PendingToolCall[] = typedStreamedToolCalls.reduce(
+            (
+              calls: PendingToolCall[],
+              call: {
+                toolName?: string;
+                args?: Record<string, unknown>;
+                toolCallId?: string;
+              },
+            ) => {
+              const toolName = call?.toolName;
+              if (typeof toolName !== "string" || toolName.length === 0) {
+                return calls;
+              }
+
+              calls.push({
+                name: toolName,
+                args: call.args || {},
+                toolCallId:
+                  typeof call.toolCallId === "string"
+                    ? call.toolCallId
+                    : undefined,
+              });
+
               return calls;
-            }
-
-            calls.push({
-              name: toolName,
-              args: call.args || {},
-              toolCallId:
-                typeof call.toolCallId === "string"
-                  ? call.toolCallId
-                  : undefined,
-            });
-
-            return calls;
-          }, []);
+            },
+            [],
+          );
 
           const processedStreamToolResults = Array.isArray(streamSteps)
             ? extractProcessedToolResults(streamSteps)
@@ -2843,9 +3201,9 @@ _You have discovered the following in earlier interactions. Use this to avoid re
           const streamToolCallsUsed =
             typeof streamToolCallsFromSteps === "number"
               ? Math.max(
-                  streamToolCallsFromSteps,
-                  normalizedStreamToolCallsUsed,
-                )
+                streamToolCallsFromSteps,
+                normalizedStreamToolCallsUsed,
+              )
               : normalizedStreamToolCallsUsed;
           const hasStreamToolActivity =
             normalizedStreamToolCalls.length > 0 ||
@@ -2906,8 +3264,8 @@ _You have discovered the following in earlier interactions. Use this to avoid re
           if (shouldSynthesizeAfterCompletedToolWork) {
             const synthesisStopReason =
               streamBudgetReached ||
-              toolCallBudget.stopReason === "repeated_call" ||
-              streamToolCallsUsed >= maxToolCalls
+                toolCallBudget.stopReason === "repeated_call" ||
+                streamToolCallsUsed >= maxToolCalls
                 ? (toolCallBudget.stopReason ?? "limit")
                 : "empty_final_response";
             const synthesisResult = await generateBackendOnlySynthesis(
@@ -2916,7 +3274,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             );
             const synthesizedText =
               typeof synthesisResult.text === "string" &&
-              synthesisResult.text.trim().length > 0
+                synthesisResult.text.trim().length > 0
                 ? synthesisResult.text
                 : null;
             if (!synthesizedText && streamEndedWithoutFinalText) {
@@ -2996,11 +3354,11 @@ _You have discovered the following in earlier interactions. Use this to avoid re
               source: streamUsageSource,
             })
               ? {
-                  tokenUsageDebug: buildTokenUsageDebug({
-                    mode: "stream",
-                    source: streamUsageSource,
-                  }),
-                }
+                tokenUsageDebug: buildTokenUsageDebug({
+                  mode: "stream",
+                  source: streamUsageSource,
+                }),
+              }
               : {}),
           });
           stopKeepAlive();
@@ -3057,12 +3415,19 @@ _You have discovered the following in earlier interactions. Use this to avoid re
 
       let result: AgentGenerateResult;
       try {
-        result = await generateWithRetry(
-          agent,
-          modelInput,
-          generateOptions,
-          modelProfile.generateRetryAttempts,
-        );
+        result = activeHostSession
+          ? await generateWithSessionRetry(
+            activeHostSession,
+            modelInput,
+            generateOptions,
+            modelProfile.generateRetryAttempts,
+          )
+          : await generateWithRetry(
+            agent,
+            modelInput,
+            generateOptions,
+            modelProfile.generateRetryAttempts,
+          );
       } finally {
         agent.clearProcessedWorkspaceResults?.(workspaceMutationGenerationId);
       }
@@ -3496,15 +3861,13 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             })
             .join("\n\n");
 
-          const autoFixPrompt = `${prompt}\n\nA prior attempt produced failures. Perform a targeted repair pass for attempt ${reflectionAttempt}/${reflectionCap}.\n\n${
-            validationFailureReport
-              ? `Validation failures:\n${validationFailureReport}\n\n`
-              : ""
-          }${
-            toolFailureReport
+          const autoFixPrompt = `${prompt}\n\nA prior attempt produced failures. Perform a targeted repair pass for attempt ${reflectionAttempt}/${reflectionCap}.\n\n${validationFailureReport
+            ? `Validation failures:\n${validationFailureReport}\n\n`
+            : ""
+            }${toolFailureReport
               ? `Tool execution failures:\n${toolFailureReport}\n\n`
               : ""
-          }Requirements:\n- Focus only on the listed failures.\n- If patch/tool matching failed, retry with tighter file targeting and explicit paths.\n- Keep edits minimal and reversible.\n- Stop after this repair pass.`;
+            }Requirements:\n- Focus only on the listed failures.\n- If patch/tool matching failed, retry with tighter file targeting and explicit paths.\n- Keep edits minimal and reversible.\n- Stop after this repair pass.`;
 
           const autoFixOptions = {
             maxSteps: Math.min(
@@ -3522,12 +3885,19 @@ _You have discovered the following in earlier interactions. Use this to avoid re
           let autoFixResult: AgentGenerateResult;
           const admittedBeforeReflection = toolCallBudget.admitted;
           try {
-            autoFixResult = await generateWithRetry(
-              agent,
-              autoFixPrompt,
-              autoFixOptions,
-              modelProfile.reflectionRetryAttempts,
-            );
+            autoFixResult = activeHostSession
+              ? await generateWithSessionRetry(
+                activeHostSession,
+                autoFixPrompt,
+                autoFixOptions,
+                modelProfile.reflectionRetryAttempts,
+              )
+              : await generateWithRetry(
+                agent,
+                autoFixPrompt,
+                autoFixOptions,
+                modelProfile.reflectionRetryAttempts,
+              );
           } finally {
             agent.clearProcessedWorkspaceResults?.(
               workspaceMutationGenerationId,
@@ -3750,7 +4120,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
           reflectionStopReason =
             remainingValidationFailures.length +
               remainingToolFailures.length ===
-            0
+              0
               ? "resolved"
               : "max_attempts";
         }
@@ -3845,10 +4215,10 @@ _You have discovered the following in earlier interactions. Use this to avoid re
         const payload = primarySuspension.suspendPayload || {};
         const question =
           typeof payload.question === "string" &&
-          payload.question.trim().length > 0
+            payload.question.trim().length > 0
             ? payload.question
             : typeof payload.prompt === "string" &&
-                payload.prompt.trim().length > 0
+              payload.prompt.trim().length > 0
               ? payload.prompt
               : primarySuspension.name === "submit_plan"
                 ? "A plan requires your review. Please approve, reject, or provide feedback."
@@ -3928,7 +4298,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
         );
         const synthesizedText =
           typeof synthesisResult.text === "string" &&
-          synthesisResult.text.trim().length > 0
+            synthesisResult.text.trim().length > 0
             ? synthesisResult.text
             : null;
         if (!synthesizedText && endedWithoutFinalText) {
@@ -4075,6 +4445,17 @@ _You have discovered the following in earlier interactions. Use this to avoid re
         errorDetails:
           process.env.NODE_ENV === "development" ? err.stack : undefined,
       });
+    } finally {
+      try {
+        if (activeHostSession) {
+          await activeHostSession.disconnect();
+        } else if (activeHostSessionManager) {
+          await activeHostSessionManager.stopAll();
+        }
+      } catch (disconnectError) {
+        const disconnectMessage = getErrorMessage(disconnectError);
+        console.warn("[agent] failed to clean up host session:", disconnectMessage);
+      }
     }
   },
 );
@@ -4122,13 +4503,13 @@ router.get(
       },
       latestCheckpoint: snapshot.latestCheckpoint
         ? {
-            sequence: snapshot.latestCheckpoint.sequence,
-            lifecycleState: snapshot.latestCheckpoint.lifecycle_state,
-            stopReason: snapshot.latestCheckpoint.stop_reason,
-            eventType: snapshot.latestCheckpoint.event_type,
-            payload: parsePayload(snapshot.latestCheckpoint.payload_json),
-            createdAt: snapshot.latestCheckpoint.created_at,
-          }
+          sequence: snapshot.latestCheckpoint.sequence,
+          lifecycleState: snapshot.latestCheckpoint.lifecycle_state,
+          stopReason: snapshot.latestCheckpoint.stop_reason,
+          eventType: snapshot.latestCheckpoint.event_type,
+          payload: parsePayload(snapshot.latestCheckpoint.payload_json),
+          createdAt: snapshot.latestCheckpoint.created_at,
+        }
         : null,
     });
   },
@@ -4244,8 +4625,7 @@ router.post(
       }
 
       console.log(
-        `📋 Command confirmation ${confirmationId}: ${
-          approved ? "✅ Approved" : "❌ Skipped"
+        `📋 Command confirmation ${confirmationId}: ${approved ? "✅ Approved" : "❌ Skipped"
         }`,
       );
 
@@ -4269,7 +4649,7 @@ router.post(
           typeof workspaceRoot === "string" && workspaceRoot.trim().length > 0
             ? workspaceRoot
             : typeof toolArgs?.cwd === "string" &&
-                toolArgs.cwd.trim().length > 0
+              toolArgs.cwd.trim().length > 0
               ? toolArgs.cwd
               : process.cwd(),
         skipConfirmation: true, // Flag to bypass confirmation check
@@ -4619,8 +4999,8 @@ router.post(
       typeof req.body?.toolName === "string" ? req.body.toolName.trim() : "";
     const args =
       req.body?.args &&
-      typeof req.body.args === "object" &&
-      !Array.isArray(req.body.args)
+        typeof req.body.args === "object" &&
+        !Array.isArray(req.body.args)
         ? req.body.args
         : {};
     const workspaceRoot = req.body?.workspaceRoot || process.cwd();

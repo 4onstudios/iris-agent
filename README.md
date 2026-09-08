@@ -21,6 +21,7 @@
 Iris Agent is the standalone coding-agent service used by [AIRIS](https://github.com/4onstudios/iris).
 
 It provides streaming chat, workspace tools, LSP routes, MCP integration, command approvals, and run lifecycle APIs. It can run as:
+
 - **HTTP Service** - RESTful API under `/api/agent`
 - **CLI** - Interactive chat in the terminal
 - **ACP Server** - Agent Client Protocol via stdio for seamless IDE integration
@@ -114,22 +115,23 @@ OPENAI_API_KEY=... npm run cli -- --workspace /path/to/project --acp
 ```
 
 This starts an ACP (Agent Client Protocol) server over stdio, allowing IDE
-integrations and other ACP clients to communicate with the agent. The `--port`
-option is not used by the stdio transport.
+integrations and other ACP clients to communicate with the agent. Standard
+output is reserved for newline-delimited JSON-RPC messages; logs are written to
+standard error.
 
 ## CLI Usage
 
 ```sh
-iris-agent --workspace <path> [--acp | --chat] [--port <port>]
+iris-agent --workspace <path> [--acp | --chat]
 ```
 
 **Options:**
+
 - `--workspace` (required) - Path to the workspace/project root
 - `--acp` - Start ACP protocol server (stdio-based)
 - `--chat` - Start interactive chat mode
-- `--port <port>` - Retained for compatibility; ACP currently uses stdio and does not listen on a TCP port.
 
-Short aliases are also available: `-w`, `-a`, `-c`, and `-p`. Running the CLI
+Short aliases are also available: `-w`, `-a`, and `-c`. Running the CLI
 without `--chat` or `--acp` prints help.
 
 **Examples:**
@@ -230,23 +232,18 @@ Commands that require approval pause until the client submits
 
 ## ACP Protocol
 
-The ACP server supports the following custom RPC methods:
+The stdio server implements the standard ACP v1 lifecycle:
 
-- `chat` - Send a message to the agent
-  - **Params:** `{ message: string }`
-  - **Response:** `{ success: boolean, response: any }`
+- `initialize`
+- `session/new`
+- `session/prompt`
+- `session/cancel`
+- `session/close`
+- `session/update` notifications for assistant text, reasoning, and tool status
 
-- `list_tools` - Get available tools
-  - **Params:** `{}`
-  - **Response:** `{ tools: Tool[] }`
-
-- `list_skills` - Get available skills
-  - **Params:** `{}`
-  - **Response:** `{ skills: string[] }`
-
-- `workspace_info` - Get workspace metadata
-  - **Params:** `{}`
-  - **Response:** `{ workspaceRoot: string, timestamp: string, agentVersion: string }`
+The server currently advertises text and resource-link prompts plus session
+close support. It does not advertise session persistence or unsupported media
+capabilities.
 
 ## Development
 
