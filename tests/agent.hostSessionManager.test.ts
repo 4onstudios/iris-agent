@@ -270,6 +270,44 @@ describe("HostSessionManager", () => {
         );
     });
 
+    it("reapplies a denied tool decision when the runtime retries the same call", async () => {
+        const onPreToolUse = jest.fn(() => ({ permissionDecision: "deny" as const }));
+        const denialMessages: string[] = [];
+        let executed = false;
+        const runtime = createRuntime({
+            runTurn: jest.fn(async (request) => {
+                for (let attempt = 0; attempt < 2; attempt += 1) {
+                    try {
+                        await request.onPreToolUse?.({
+                            toolName: "writeFile",
+                            toolCallId: "call-1",
+                            toolArgs: { path: "README.md" },
+                        });
+                        executed = true;
+                    } catch (error) {
+                        denialMessages.push((error as Error).message);
+                    }
+                }
+                return { text: "blocked" };
+            }),
+        });
+        const manager = new HostSessionManager(() => runtime, {
+            workspacePath: "/workspace",
+        });
+        const session = await manager.createSession({
+            hooks: { onPreToolUse },
+        });
+
+        await session.sendAndWait({ prompt: "retry the tool" });
+
+        expect(executed).toBe(false);
+        expect(denialMessages).toEqual([
+            "Tool 'writeFile' denied by onPreToolUse hook",
+            "Tool 'writeFile' denied by onPreToolUse hook",
+        ]);
+        expect(onPreToolUse).toHaveBeenCalledTimes(2);
+    });
+
     it("deduplicates concurrent opens and delegates cancellation", async () => {
         let releaseStart!: () => void;
         const startGate = new Promise<void>((resolve) => {

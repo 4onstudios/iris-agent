@@ -180,7 +180,6 @@ const createPreToolUseHook = (
   return async ({ toolName, toolCallId, toolArgs }) => {
     const key = toolCallId || `${toolName}:${JSON.stringify(toolArgs || {})}`;
     if (invoked.has(key)) return;
-    invoked.add(key);
     const result = await Promise.resolve(
       hooks?.onPreToolUse?.(
         { toolName, toolCallId, toolArgs, turnRequest },
@@ -193,6 +192,7 @@ const createPreToolUseHook = (
     if (result && result.permissionDecision === "ask") {
       throw new Error(`Tool '${toolName}' requires external approval`);
     }
+    invoked.add(key);
   };
 };
 
