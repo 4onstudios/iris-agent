@@ -1709,6 +1709,7 @@ router.post(
         useMastraObservationalMemory: rawUseMastraObservationalMemory,
         observationalMemorySettings: rawObservationalMemorySettings,
         streamErrorRetry: rawStreamErrorRetry,
+        stream = false,
       } = req.body;
 
       requestedModelId = modelId;
@@ -2577,7 +2578,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
         );
       };
 
-      if (req.body.stream) {
+      if (stream) {
         res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
         res.setHeader("Cache-Control", "no-cache, no-transform");
         res.setHeader("Connection", "keep-alive");
