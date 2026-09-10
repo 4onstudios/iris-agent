@@ -52,7 +52,7 @@ async function main() {
   if (argv.acp) {
     // Start ACP server mode
     console.log(`🔗 Starting ACP server on port ${argv.port}...`);
-    await startAcpServer(agent, argv.port as number);
+    await startAcpServer(agent, argv.port as number, workspaceRoot);
   } else if (argv.chat) {
     // Interactive chat mode
     console.log(`💬 Entering chat mode (type "exit" to quit)`);

@@ -115,7 +115,9 @@ OPENAI_API_KEY=... npm run cli -- --workspace /path/to/project --acp
 
 This starts an ACP (Agent Client Protocol) server over stdio, allowing IDE
 integrations and other ACP clients to communicate with the agent. The `--port`
-option is not used by the stdio transport.
+option is not used by the stdio transport. Each ACP process is bound to the
+workspace supplied at startup. To switch workspaces, close the process and
+respawn `iris-agent` with the new `--workspace` path.
 
 ## CLI Usage
 
@@ -233,8 +235,10 @@ Commands that require approval pause until the client submits
 The ACP server supports the following custom RPC methods:
 
 - `chat` - Send a message to the agent
-  - **Params:** `{ message: string }`
+  - **Params:** `{ message: string, workspaceRoot?: string }`
   - **Response:** `{ success: boolean, response: any }`
+  - If `workspaceRoot` is provided, it must match the workspace used to start
+    the process; workspace changes require closing and respawning the CLI.
 
 - `list_tools` - Get available tools
   - **Params:** `{}`

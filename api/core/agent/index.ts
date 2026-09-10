@@ -2,6 +2,7 @@ import { createCodingAgent as createMastraCodingAgent } from "@mastra/core/codin
 import {
   webFetchTool as mastraWebFetchTool,
   webSearchTool as mastraWebSearchTool,
+  type ToolHooks,
 } from "@mastra/core/tools";
 import { openai, createOpenAI } from "@ai-sdk/openai";
 import { anthropic, createAnthropic } from "@ai-sdk/anthropic";
@@ -14,12 +15,49 @@ import os from "os";
 import { exec } from "child_process";
 import { promisify } from "util";
 
-// Skills are backend-owned assets. Always load from the canonical backend
-// directory, regardless of whether this file runs from source or transpiled CJS.
-export const getSkillsDir = (): string =>
-  typeof __dirname === "string"
-    ? path.resolve(__dirname, "..", "skills")
-    : path.join(process.cwd(), "api", "core", "skills");
+const findPackageRoot = (startPath: string): string | undefined => {
+  let current = path.resolve(startPath);
+  while (true) {
+    const packageJsonPath = path.join(current, "package.json");
+    if (fsNative.existsSync(packageJsonPath)) {
+      try {
+        const packageJson = JSON.parse(
+          fsNative.readFileSync(packageJsonPath, "utf8"),
+        ) as { name?: unknown };
+        if (packageJson.name === "@4onstudios/iris-agent") {
+          return current;
+        }
+      } catch {
+        // Keep walking in case this package.json belongs to a parent project.
+      }
+    }
+
+    const parent = path.dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+};
+
+export const getSkillsDir = (): string => {
+  if (typeof __dirname === "string") {
+    return path.resolve(__dirname, "..", "skills");
+  }
+
+  const entryFile = process.argv[1]
+    ? fsNative.realpathSync(path.resolve(process.argv[1]))
+    : process.cwd();
+  const entryPath = path.dirname(entryFile);
+  const packageRoot =
+    findPackageRoot(entryPath) || findPackageRoot(process.cwd());
+  if (!packageRoot) {
+    throw new Error("Unable to locate the @4onstudios/iris-agent package root");
+  }
+
+  const sourceSkillsDir = path.join(packageRoot, "api", "core", "skills");
+  return fsNative.existsSync(sourceSkillsDir)
+    ? sourceSkillsDir
+    : path.join(packageRoot, "dist", "api", "core", "skills");
+};
 import { LibSQLStore, LibSQLVector } from "@mastra/libsql";
 import { Memory } from "@mastra/memory";
 import {
@@ -113,7 +151,7 @@ export const createIrisWorkspaceToolsConfig = (hooks?: WorkspaceToolHooks) => ({
   [WORKSPACE_TOOLS.SEARCH.SEARCH]: { name: "workspaceSearch" },
 });
 
-type AgentFactoryOptions = {
+export type AgentFactoryOptions = {
   id?: string;
   name?: string;
   enableMemory?: boolean;
@@ -137,6 +175,7 @@ type AgentFactoryOptions = {
   defaultOptions?: Record<string, unknown>;
   mcpServers?: McpServerConfig[];
   terminalAutoApproveRules?: TerminalAutoApproveRules;
+  hooks?: ToolHooks;
   streamErrorRetry?: {
     enabled?: boolean;
     maxRetries?: number;
@@ -1358,6 +1397,7 @@ export const createCodingAgent = async (
 
     model: getModel(modelId),
     workspace,
+    hooks: options.hooks,
     tools: enforceToolCallBudgetForTools({
       // Local workspaces provide these through Mastra Workspace under the
       // established Iris names. Virtual workspaces retain the client-aware tools.

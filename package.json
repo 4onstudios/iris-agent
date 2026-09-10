@@ -5,7 +5,7 @@
   "description": "Standalone HTTP coding-agent service and CLI with ACP (Agent Client Protocol) support.",
   "type": "module",
   "bin": {
-    "iris-agent": "./bin/iris-agent.js"
+    "iris-agent": "./dist/cli.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -21,10 +21,13 @@
     "dev": "tsx watch server.ts",
     "cli": "tsx cli.ts",
     "cli:dev": "tsx watch cli.ts",
-    "build": "tsc",
+    "build": "tsc && node scripts/copy-skill-assets.mjs",
     "test": "jest --config jest.config.cjs",
     "typecheck": "tsc --noEmit"
   },
+  "files": [
+    "dist"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",

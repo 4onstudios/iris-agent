@@ -4,6 +4,7 @@
  */
 
 import { AgentApp } from "@agentclientprotocol/sdk";
+import path from "path";
 
 /**
  * Simple params parser for custom methods
@@ -24,8 +25,10 @@ function createParamsParser<T = any>() {
  */
 export async function startAcpServer(
   agent: any,
-  _port: number = 3000
+  _port: number = 3000,
+  workspaceRoot: string = agent.workspaceRoot || process.cwd(),
 ): Promise<void> {
+  const boundWorkspaceRoot = path.resolve(workspaceRoot);
   // Create ACP agent app
   const agentApp = new AgentApp({
     name: "iris-agent",
@@ -36,6 +39,7 @@ export async function startAcpServer(
     "chat",
     createParamsParser(),
     async (params: any) => {
+      assertAcpWorkspace(params, boundWorkspaceRoot);
       return handleChatRequest(agent, params);
     }
   );
@@ -63,7 +67,7 @@ export async function startAcpServer(
     "workspace_info",
     createParamsParser(),
     async () => {
-      return handleWorkspaceInfoRequest(agent);
+      return handleWorkspaceInfoRequest(boundWorkspaceRoot);
     }
   );
 
@@ -75,6 +79,26 @@ export async function startAcpServer(
 
   // Keep process alive until connection closes
   await connection.closed;
+}
+
+export function assertAcpWorkspace(
+  params: { workspaceRoot?: unknown; cwd?: unknown } | null | undefined,
+  boundWorkspaceRoot: string,
+): void {
+  const requestedWorkspace =
+    typeof params?.workspaceRoot === "string"
+      ? params.workspaceRoot
+      : typeof params?.cwd === "string"
+        ? params.cwd
+        : undefined;
+  if (
+    requestedWorkspace &&
+    path.resolve(requestedWorkspace) !== path.resolve(boundWorkspaceRoot)
+  ) {
+    throw new Error(
+      `This ACP process is bound to '${path.resolve(boundWorkspaceRoot)}'. Close it and respawn iris-agent with --workspace '${path.resolve(requestedWorkspace)}' to switch workspaces.`,
+    );
+  }
 }
 
 /**
@@ -128,9 +152,9 @@ async function handleListSkillsRequest(agent: any): Promise<any> {
 /**
  * Get workspace information
  */
-async function handleWorkspaceInfoRequest(agent: any): Promise<any> {
+async function handleWorkspaceInfoRequest(workspaceRoot: string): Promise<any> {
   return {
-    workspaceRoot: agent.workspaceRoot || "",
+    workspaceRoot,
     timestamp: new Date().toISOString(),
     agentVersion: "0.1.0",
   };
