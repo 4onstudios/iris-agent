@@ -361,7 +361,13 @@ export const createAcpAgentApp = (
                 return { toolCallId: mappedProtocolId };
               }
 
-              return { toolCallId: allocateGeneratedToolCallId(toolName) };
+              return {
+                toolCallId: resolveProtocolToolCallId(
+                  toolName,
+                  suppliedToolCallId,
+                  toolArgs,
+                ),
+              };
             }
 
             if (pending.length > 0) {
@@ -492,6 +498,29 @@ export const createAcpAgentApp = (
               });
             }
           }
+
+          for (const invocations of pendingToolInvocations.values()) {
+            for (const invocation of invocations) {
+              await ctx.client.notify(acp.methods.client.session.update, {
+                sessionId: ctx.params.sessionId,
+                update: {
+                  sessionUpdate: "tool_call_update",
+                  toolCallId: invocation.protocolToolCallId,
+                  status: "failed",
+                  content: [
+                    {
+                      type: "content",
+                      content: {
+                        type: "text",
+                        text: "Tool call did not report a result before the turn ended.",
+                      },
+                    },
+                  ],
+                },
+              });
+            }
+          }
+          pendingToolInvocations.clear();
 
           const finalText = await streamResult.text;
           if (activeTurn.abortController.signal.aborted) {

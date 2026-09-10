@@ -277,14 +277,15 @@ describe("ACP server", () => {
         expect(orphanStart).toEqual(
             expect.objectContaining({
                 sessionUpdate: "tool_call",
+                toolCallId: "orphan-status",
                 status: "in_progress",
             }),
         );
         expect(orphanFinish).toEqual(
             expect.objectContaining({
                 sessionUpdate: "tool_call_update",
+                toolCallId: "orphan-status",
                 status: "failed",
-                toolCallId: readToolCallId(orphanStart as acp.SessionUpdate),
             }),
         );
         expect(mapped.slice(2)).toEqual([
@@ -306,6 +307,60 @@ describe("ACP server", () => {
             expect.objectContaining({
                 sessionUpdate: "tool_call_update",
                 toolCallId: "is-error",
+                status: "failed",
+            }),
+        ]);
+    });
+
+    it("fails pending tool calls when the stream ends without a result", async () => {
+        const runtime: AcpRuntimeAgent = {
+            stream: jest.fn(async () => ({
+                fullStream: createChunkStream([
+                    {
+                        type: "tool-call",
+                        payload: {
+                            toolName: "runCommand",
+                            toolCallId: "interrupted-command",
+                            args: { command: "npm test" },
+                        },
+                    },
+                ]),
+                text: Promise.resolve(""),
+            })),
+        };
+        const updates: acp.SessionNotification[] = [];
+        const client = acp
+            .client({ name: "iris-agent-test-client" })
+            .onNotification(acp.methods.client.session.update, (ctx) => {
+                updates.push(ctx.params);
+            });
+
+        await client.connectWith(createAcpAgentApp(runtime), async (ctx) => {
+            await ctx.request(acp.methods.agent.initialize, {
+                protocolVersion: acp.PROTOCOL_VERSION,
+                clientCapabilities: {},
+            });
+            const session = await ctx.request(acp.methods.agent.session.new, {
+                cwd: "/workspace",
+                mcpServers: [],
+            });
+            await expect(
+                ctx.request(acp.methods.agent.session.prompt, {
+                    sessionId: session.sessionId,
+                    prompt: [{ type: "text", text: "Run the tests" }],
+                }),
+            ).resolves.toEqual({ stopReason: "end_turn" });
+        });
+
+        expect(updates.map((entry) => entry.update)).toEqual([
+            expect.objectContaining({
+                sessionUpdate: "tool_call",
+                toolCallId: "interrupted-command",
+                status: "in_progress",
+            }),
+            expect.objectContaining({
+                sessionUpdate: "tool_call_update",
+                toolCallId: "interrupted-command",
                 status: "failed",
             }),
         ]);
@@ -507,7 +562,7 @@ describe("ACP server", () => {
             (entry) => entry.update.sessionUpdate === "tool_call_update",
         );
         expect(toolCallUpdates).toHaveLength(2);
-        expect(toolResultUpdates).toHaveLength(1);
+        expect(toolResultUpdates).toHaveLength(2);
         const firstProtocolId = readToolCallId(
             toolCallUpdates[0]?.update as acp.SessionUpdate,
         );
@@ -520,5 +575,17 @@ describe("ACP server", () => {
         expect(
             readToolCallId(toolResultUpdates[0]?.update as acp.SessionUpdate),
         ).toBe(secondProtocolId);
+        expect(toolResultUpdates[0]?.update).toEqual(
+            expect.objectContaining({ status: "completed" }),
+        );
+        // The first "reused" invocation (a.txt) never received a matching
+        // tool-result from the runtime, so it must be closed out with a
+        // terminal update when the turn ends rather than staying in_progress.
+        expect(
+            readToolCallId(toolResultUpdates[1]?.update as acp.SessionUpdate),
+        ).toBe(firstProtocolId);
+        expect(toolResultUpdates[1]?.update).toEqual(
+            expect.objectContaining({ status: "failed" }),
+        );
     });
 });
