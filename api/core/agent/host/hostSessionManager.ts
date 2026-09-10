@@ -177,11 +177,36 @@ const createPreToolUseHook = (
   turnRequest: AgentTurnRequest,
   invocation: { sessionId: string },
 ): NonNullable<AgentTurnRequest["onPreToolUse"]> => {
-  const invoked = new Set<string>();
-  return async ({ toolName, toolCallId, toolArgs }) => {
+  const toOperationKey = (
+    toolName: string,
+    toolCallId: string | undefined,
+    toolArgs: Record<string, unknown> | undefined,
+  ): string => {
     const signature = getToolCallSignature(toolName, toolArgs || {});
-    const key = toolCallId ? `${toolCallId}:${signature}` : signature;
-    if (invoked.has(key)) return;
+    return toolCallId ? `${toolCallId}:${signature}` : `anonymous:${signature}`;
+  };
+  const declaredRemainingByKey = new Map<string, number>();
+  for (const declared of getDeclaredToolCalls(turnRequest.metadata)) {
+    const key = toOperationKey(
+      declared.toolName,
+      declared.toolCallId,
+      declared.toolArgs,
+    );
+    declaredRemainingByKey.set(key, (declaredRemainingByKey.get(key) || 0) + 1);
+  }
+  const declaredInvocationsByKey = new Map<string, number>();
+  const reconciledRuntimeInvocationsByKey = new Map<string, number>();
+  const approvedIdentifiedInvocations = new Set<string>();
+
+  const invokeHook = async ({
+    toolName,
+    toolCallId,
+    toolArgs,
+  }: {
+    toolName: string;
+    toolCallId?: string;
+    toolArgs?: Record<string, unknown>;
+  }): Promise<void> => {
     const result = await Promise.resolve(
       hooks?.onPreToolUse?.(
         { toolName, toolCallId, toolArgs, turnRequest },
@@ -194,7 +219,38 @@ const createPreToolUseHook = (
     if (result && result.permissionDecision === "ask") {
       throw new Error(`Tool '${toolName}' requires external approval`);
     }
-    invoked.add(key);
+  };
+
+  return async ({ toolName, toolCallId, toolArgs }) => {
+    const key = toOperationKey(toolName, toolCallId, toolArgs);
+
+    const declaredRemaining = declaredRemainingByKey.get(key) || 0;
+    if (declaredRemaining > 0) {
+      declaredRemainingByKey.set(key, declaredRemaining - 1);
+      await invokeHook({ toolName, toolCallId, toolArgs });
+      declaredInvocationsByKey.set(
+        key,
+        (declaredInvocationsByKey.get(key) || 0) + 1,
+      );
+      return;
+    }
+
+    const declaredInvocations = declaredInvocationsByKey.get(key) || 0;
+    const reconciledInvocations =
+      reconciledRuntimeInvocationsByKey.get(key) || 0;
+    if (reconciledInvocations < declaredInvocations) {
+      reconciledRuntimeInvocationsByKey.set(key, reconciledInvocations + 1);
+      return;
+    }
+
+    if (toolCallId && approvedIdentifiedInvocations.has(key)) {
+      return;
+    }
+
+    await invokeHook({ toolName, toolCallId, toolArgs });
+    if (toolCallId) {
+      approvedIdentifiedInvocations.add(key);
+    }
   };
 };
 

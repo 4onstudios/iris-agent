@@ -134,9 +134,12 @@ const buildDedupKey = (
   name: string,
   args: ToolArgs,
   toolCallId?: string,
+  catalog?: ToolInvocationCatalog,
 ): string => {
-  const signatureKey = buildSignatureKey(name, args);
-  if (toolCallId) return `id:${toolCallId}:${signatureKey}`;
+  const signatureKey = buildSignatureKey(name, args || {});
+  if (toolCallId) {
+    return resolveIdentifiedKey(name, args || {}, toolCallId, catalog);
+  }
   return signatureKey;
 };
 
@@ -145,6 +148,67 @@ const buildSignatureKey = (name: string, args: ToolArgs): string =>
 
 export const getToolCallSignature = (name: string, args: ToolArgs): string =>
   buildSignatureKey(name, args);
+
+type ToolInvocationIdentity = {
+  toolCallId: string;
+  name: string;
+  signatureKey: string;
+  hasArgumentDetails: boolean;
+};
+
+type ToolInvocationCatalog = Map<string, ToolInvocationIdentity[]>;
+
+const hasArgumentDetails = (args: ToolArgs): boolean =>
+  Object.keys(args || {}).length > 0;
+
+const buildToolInvocationCatalog = (
+  entries: Array<{ name: string; args: ToolArgs; toolCallId?: string }>,
+): ToolInvocationCatalog => {
+  const catalog = new Map<string, ToolInvocationIdentity[]>();
+  for (const entry of entries) {
+    if (!entry.toolCallId) continue;
+    const signatureKey = buildSignatureKey(entry.name, entry.args || {});
+    const existing = catalog.get(entry.toolCallId) || [];
+    existing.push({
+      toolCallId: entry.toolCallId,
+      name: entry.name,
+      signatureKey,
+      hasArgumentDetails: hasArgumentDetails(entry.args || {}),
+    });
+    catalog.set(entry.toolCallId, existing);
+  }
+  return catalog;
+};
+
+const resolveIdentifiedKey = (
+  name: string,
+  args: ToolArgs,
+  toolCallId: string,
+  catalog?: ToolInvocationCatalog,
+): string => {
+  const signatureKey = buildSignatureKey(name, args || {});
+  if (!catalog || hasArgumentDetails(args || {})) {
+    return `id:${toolCallId}:${signatureKey}`;
+  }
+
+  const candidates = (catalog.get(toolCallId) || []).filter(
+    (entry) => entry.name === name && entry.hasArgumentDetails,
+  );
+  if (candidates.length === 1) {
+    return `id:${toolCallId}:${candidates[0].signatureKey}`;
+  }
+
+  return `id:${toolCallId}:${signatureKey}`;
+};
+
+const extractSignatureFromIdentifiedKey = (key: string): string => {
+  const marker = ":sig:";
+  const markerIndex = key.indexOf(marker);
+  if (markerIndex === -1) {
+    return key;
+  }
+  return `sig:${key.slice(markerIndex + marker.length)}`;
+};
 
 const hasSameLifecycleStep = (
   current: ExecutedToolResult,
@@ -177,6 +241,10 @@ export const countUniqueToolCalls = (
     toolCallId?: string;
   }>,
 ): number => {
+  const identifiedCatalog = buildToolInvocationCatalog([
+    ...pendingToolCalls,
+    ...executedToolResults,
+  ]);
   const seenIds = new Set<string>();
   const identifiedCounts = new Map<string, number>();
   const pendingAnonymousCounts = new Map<string, number>();
@@ -187,10 +255,15 @@ export const countUniqueToolCalls = (
 
   for (const call of [...pendingToolCalls, ...executedToolResults]) {
     if (call.toolCallId) {
-      const key = buildDedupKey(call.name, call.args || {}, call.toolCallId);
+      const key = buildDedupKey(
+        call.name,
+        call.args || {},
+        call.toolCallId,
+        identifiedCatalog,
+      );
       if (seenIds.has(key)) continue;
       seenIds.add(key);
-      const signatureKey = buildSignatureKey(call.name, call.args || {});
+      const signatureKey = extractSignatureFromIdentifiedKey(key);
       identifiedCounts.set(
         signatureKey,
         (identifiedCounts.get(signatureKey) || 0) + 1,
@@ -258,6 +331,10 @@ export const normalizeToolLifecycle = (
   pendingToolCalls: PendingToolCall[];
   executedToolResults: ExecutedToolResult[];
 } => {
+  const identifiedCatalog = buildToolInvocationCatalog([
+    ...pendingToolCalls,
+    ...executedToolResults,
+  ]);
   const executedByKey = new Map<string, ExecutedToolResult>();
   const anonymousResultKeysBySignature = new Map<string, string[]>();
   // Include identified pending calls when establishing cardinality: an
@@ -328,7 +405,12 @@ export const normalizeToolLifecycle = (
         })
       : undefined;
     const key = item.toolCallId
-      ? buildDedupKey(item.name, item.args || {}, item.toolCallId)
+      ? buildDedupKey(
+          item.name,
+          item.args || {},
+          item.toolCallId,
+          identifiedCatalog,
+        )
       : transitionKey ||
         sameResultKey ||
         sameRankProgressKey ||
@@ -371,6 +453,7 @@ export const normalizeToolLifecycle = (
           result.name,
           result.args || {},
           result.toolCallId,
+          identifiedCatalog,
         );
         return key;
       }),
@@ -392,7 +475,12 @@ export const normalizeToolLifecycle = (
   }
 
   for (const [index, item] of pendingToolCalls.entries()) {
-    const key = buildDedupKey(item.name, item.args || {}, item.toolCallId);
+    const key = buildDedupKey(
+      item.name,
+      item.args || {},
+      item.toolCallId,
+      identifiedCatalog,
+    );
 
     if (item.toolCallId && settledExecutedKeys.has(key)) {
       continue;

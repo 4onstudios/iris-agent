@@ -388,4 +388,102 @@ describe("ACP server", () => {
             await expect(prompt).resolves.toEqual({ stopReason: "cancelled" });
         });
     });
+
+    it("cancels after stream completion but before final text resolves", async () => {
+        let resolveText!: (value: string) => void;
+        const finalText = new Promise<string>((resolve) => {
+            resolveText = resolve;
+        });
+        const runtime: AcpRuntimeAgent = {
+            stream: jest.fn(async () => ({
+                fullStream: new ReadableStream({
+                    start(controller) {
+                        controller.close();
+                    },
+                }),
+                text: finalText,
+            })),
+        };
+        const updates: acp.SessionNotification[] = [];
+        const client = acp
+            .client({ name: "iris-agent-test-client" })
+            .onNotification(acp.methods.client.session.update, (ctx) => {
+                updates.push(ctx.params);
+            });
+
+        await client.connectWith(createAcpAgentApp(runtime), async (ctx) => {
+            await ctx.request(acp.methods.agent.initialize, {
+                protocolVersion: acp.PROTOCOL_VERSION,
+                clientCapabilities: {},
+            });
+            const session = await ctx.request(acp.methods.agent.session.new, {
+                cwd: "/workspace",
+                mcpServers: [],
+            });
+            const prompt = ctx.request(acp.methods.agent.session.prompt, {
+                sessionId: session.sessionId,
+                prompt: [{ type: "text", text: "Wait for final text" }],
+            });
+            await Promise.resolve();
+            await ctx.notify(acp.methods.agent.session.cancel, {
+                sessionId: session.sessionId,
+            });
+            resolveText("late text");
+            await expect(prompt).resolves.toEqual({ stopReason: "cancelled" });
+        });
+
+        expect(updates).toHaveLength(0);
+    });
+
+    it("synthesizes a tool start when a reused id arrives with a different operation signature", async () => {
+        const runtime: AcpRuntimeAgent = {
+            stream: jest.fn(async () => ({
+                fullStream: createChunkStream([
+                    {
+                        type: "tool-call",
+                        payload: {
+                            toolName: "writeFile",
+                            toolCallId: "reused",
+                            args: { path: "a.txt", content: "A" },
+                        },
+                    },
+                    {
+                        type: "tool-result",
+                        payload: {
+                            toolName: "writeFile",
+                            toolCallId: "reused",
+                            args: { path: "b.txt", content: "B" },
+                            result: { status: "completed", ok: true },
+                        },
+                    },
+                ]),
+                text: Promise.resolve(""),
+            })),
+        };
+        const updates: acp.SessionNotification[] = [];
+        const client = acp
+            .client({ name: "iris-agent-test-client" })
+            .onNotification(acp.methods.client.session.update, (ctx) => {
+                updates.push(ctx.params);
+            });
+
+        await client.connectWith(createAcpAgentApp(runtime), async (ctx) => {
+            await ctx.request(acp.methods.agent.initialize, {
+                protocolVersion: acp.PROTOCOL_VERSION,
+                clientCapabilities: {},
+            });
+            const session = await ctx.request(acp.methods.agent.session.new, {
+                cwd: "/workspace",
+                mcpServers: [],
+            });
+            await ctx.request(acp.methods.agent.session.prompt, {
+                sessionId: session.sessionId,
+                prompt: [{ type: "text", text: "Write two files" }],
+            });
+        });
+
+        expect(
+            updates.filter((entry) => entry.update.sessionUpdate === "tool_call"),
+        ).toHaveLength(2);
+    });
 });

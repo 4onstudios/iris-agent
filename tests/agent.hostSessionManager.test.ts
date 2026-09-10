@@ -162,6 +162,65 @@ describe("HostSessionManager", () => {
         expect(onPreToolUse).toHaveBeenCalledTimes(2);
     });
 
+    it("preserves anonymous runtime multiplicity while reconciling declared callbacks", async () => {
+        const onPreToolUse = jest.fn(() => ({ permissionDecision: "allow" as const }));
+        const runtime = createRuntime({
+            runTurn: jest.fn(async (request) => {
+                await request.onPreToolUse?.({
+                    toolName: "readFile",
+                    toolArgs: { path: "README.md" },
+                });
+                await request.onPreToolUse?.({
+                    toolName: "readFile",
+                    toolArgs: { path: "README.md" },
+                });
+                return { text: "done" };
+            }),
+        });
+        const manager = new HostSessionManager(() => runtime, {
+            workspacePath: "/workspace",
+        });
+        const session = await manager.createSession({
+            hooks: { onPreToolUse },
+        });
+
+        await session.sendAndWait({
+            prompt: "read README twice",
+            metadata: {
+                declaredToolCalls: [{ toolName: "readFile", toolArgs: { path: "README.md" } }],
+            },
+        });
+
+        expect(onPreToolUse).toHaveBeenCalledTimes(2);
+    });
+
+    it("invokes pre-tool hooks for each repeated anonymous runtime call", async () => {
+        const onPreToolUse = jest.fn(() => ({ permissionDecision: "allow" as const }));
+        const runtime = createRuntime({
+            runTurn: jest.fn(async (request) => {
+                await request.onPreToolUse?.({
+                    toolName: "readFile",
+                    toolArgs: { path: "README.md" },
+                });
+                await request.onPreToolUse?.({
+                    toolName: "readFile",
+                    toolArgs: { path: "README.md" },
+                });
+                return { text: "done" };
+            }),
+        });
+        const manager = new HostSessionManager(() => runtime, {
+            workspacePath: "/workspace",
+        });
+        const session = await manager.createSession({
+            hooks: { onPreToolUse },
+        });
+
+        await session.sendAndWait({ prompt: "read README twice" });
+
+        expect(onPreToolUse).toHaveBeenCalledTimes(2);
+    });
+
     it("preserves runtime-specific stream fields and runs the post-turn hook", async () => {
         const sourceEvents: AgentStreamEvent[] = [
             { type: "text-delta", text: "hello" },

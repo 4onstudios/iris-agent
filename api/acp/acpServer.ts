@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import path from "path";
-import { resolveToolExecutionStatus } from "../core/agent/utils/toolLifecycle";
+import {
+  getToolCallSignature,
+  resolveToolExecutionStatus,
+} from "../core/agent/utils/toolLifecycle";
 
 type AgentStreamChunk = {
   type?: string;
@@ -42,6 +45,11 @@ type ActiveTurn = {
 type AcpSessionState = {
   cwd: string;
   activeTurn?: ActiveTurn;
+};
+
+type PendingToolInvocation = {
+  toolCallId: string;
+  operationKey: string;
 };
 
 export function assertAcpWorkspace(
@@ -157,32 +165,82 @@ export const createAcpAgentApp = (
           })) as AgentStreamResult;
           const reader = streamResult.fullStream.getReader();
           activeTurn.cancelStream = async () => reader.cancel();
-          const pendingToolCallIds = new Map<string, string[]>();
+          const pendingToolInvocations = new Map<
+            string,
+            PendingToolInvocation[]
+          >();
           const generatedToolCallCounts = new Map<string, number>();
           let emittedText = false;
 
-          const getToolCallId = (
+          const normalizeToolArgs = (
+            rawArgs: unknown,
+          ): Record<string, unknown> => {
+            if (!rawArgs || typeof rawArgs !== "object" || Array.isArray(rawArgs)) {
+              return {};
+            }
+            return rawArgs as Record<string, unknown>;
+          };
+
+          const hasArgumentDetails = (toolArgs: Record<string, unknown>): boolean =>
+            Object.keys(toolArgs).length > 0;
+
+          const buildOperationKey = (
             toolName: string,
-            suppliedId: unknown,
-            consumePending: boolean,
-          ): string => {
-            if (typeof suppliedId === "string" && suppliedId.length > 0) {
-              if (consumePending) {
-                const pending = pendingToolCallIds.get(toolName);
-                const index = pending?.indexOf(suppliedId) ?? -1;
-                if (index >= 0) pending?.splice(index, 1);
-              }
-              return suppliedId;
-            }
+            toolCallId: string,
+            toolArgs: Record<string, unknown>,
+          ): string =>
+            `${toolCallId}:${getToolCallSignature(toolName, toolArgs)}`;
 
-            const pending = pendingToolCallIds.get(toolName);
-            if (consumePending && pending?.length) {
-              return pending.shift() as string;
-            }
-
+          const allocateGeneratedToolCallId = (toolName: string): string => {
             const occurrence = (generatedToolCallCounts.get(toolName) || 0) + 1;
             generatedToolCallCounts.set(toolName, occurrence);
             return `generated-${toolName}-${occurrence}`;
+          };
+
+          const consumePendingInvocation = (
+            toolName: string,
+            suppliedToolCallId: unknown,
+            rawToolArgs: unknown,
+          ): { invocation?: PendingToolInvocation; toolCallId: string } => {
+            const pending = pendingToolInvocations.get(toolName) || [];
+            const toolArgs = normalizeToolArgs(rawToolArgs);
+            const hasArgs = hasArgumentDetails(toolArgs);
+
+            if (
+              typeof suppliedToolCallId === "string" &&
+              suppliedToolCallId.length > 0
+            ) {
+              const exactOperationKey = buildOperationKey(
+                toolName,
+                suppliedToolCallId,
+                toolArgs,
+              );
+              let matchIndex = pending.findIndex(
+                (entry) => entry.operationKey === exactOperationKey,
+              );
+              if (matchIndex < 0 && !hasArgs) {
+                const sameIdEntries = pending.filter(
+                  (entry) => entry.toolCallId === suppliedToolCallId,
+                );
+                if (sameIdEntries.length === 1) {
+                  matchIndex = pending.findIndex(
+                    (entry) => entry.toolCallId === suppliedToolCallId,
+                  );
+                }
+              }
+              if (matchIndex >= 0) {
+                const [invocation] = pending.splice(matchIndex, 1);
+                return { invocation, toolCallId: invocation.toolCallId };
+              }
+              return { toolCallId: suppliedToolCallId };
+            }
+
+            if (pending.length > 0) {
+              const invocation = pending.shift() as PendingToolInvocation;
+              return { invocation, toolCallId: invocation.toolCallId };
+            }
+
+            return { toolCallId: allocateGeneratedToolCallId(toolName) };
           };
 
           while (true) {
@@ -217,14 +275,19 @@ export const createAcpAgentApp = (
 
             if (value.type === "tool-call") {
               const toolName = String(value.payload?.toolName || "tool");
-              const toolCallId = getToolCallId(
-                toolName,
-                value.payload?.toolCallId,
-                false,
-              );
-              const pending = pendingToolCallIds.get(toolName) || [];
-              pending.push(toolCallId);
-              pendingToolCallIds.set(toolName, pending);
+              const toolArgs = normalizeToolArgs(value.payload?.args);
+              const suppliedToolCallId = value.payload?.toolCallId;
+              const toolCallId =
+                typeof suppliedToolCallId === "string" &&
+                suppliedToolCallId.length > 0
+                  ? suppliedToolCallId
+                  : allocateGeneratedToolCallId(toolName);
+              const pending = pendingToolInvocations.get(toolName) || [];
+              pending.push({
+                toolCallId,
+                operationKey: buildOperationKey(toolName, toolCallId, toolArgs),
+              });
+              pendingToolInvocations.set(toolName, pending);
               await ctx.client.notify(acp.methods.client.session.update, {
                 sessionId: ctx.params.sessionId,
                 update: {
@@ -243,17 +306,13 @@ export const createAcpAgentApp = (
             if (value.type === "tool-result") {
               const toolName = String(value.payload?.toolName || "tool");
               const suppliedToolCallId = value.payload?.toolCallId;
-              const pending = pendingToolCallIds.get(toolName);
-              const hadPendingCall = Boolean(pending?.length);
-              const hasMatchingCall =
-                typeof suppliedToolCallId === "string"
-                  ? pending?.includes(suppliedToolCallId) === true
-                  : hadPendingCall;
-              const toolCallId = getToolCallId(
+              const consumed = consumePendingInvocation(
                 toolName,
                 suppliedToolCallId,
-                true,
+                value.payload?.args,
               );
+              const toolCallId = consumed.toolCallId;
+              const hasMatchingCall = Boolean(consumed.invocation);
               if (!hasMatchingCall) {
                 await ctx.client.notify(acp.methods.client.session.update, {
                   sessionId: ctx.params.sessionId,
@@ -294,6 +353,9 @@ export const createAcpAgentApp = (
           }
 
           const finalText = await streamResult.text;
+          if (activeTurn.abortController.signal.aborted) {
+            return { stopReason: "cancelled" as const };
+          }
           if (!emittedText && finalText) {
             await ctx.client.notify(acp.methods.client.session.update, {
               sessionId: ctx.params.sessionId,
@@ -302,6 +364,9 @@ export const createAcpAgentApp = (
                 content: { type: "text", text: finalText },
               },
             });
+          }
+          if (activeTurn.abortController.signal.aborted) {
+            return { stopReason: "cancelled" as const };
           }
           return { stopReason: "end_turn" as const };
         }

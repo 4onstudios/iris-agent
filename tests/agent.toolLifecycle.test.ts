@@ -324,6 +324,29 @@ describe("normalizeToolLifecycle", () => {
     expect(countUniqueToolCalls([], normalized.executedToolResults)).toBe(2);
   });
 
+  it("reconciles identified calls when one side omits argument details", () => {
+    const pending: PendingToolCall[] = [
+      {
+        name: "readFile",
+        args: { filePath: "src/index.ts" },
+        toolCallId: "shared-id",
+      },
+    ];
+    const executed: ExecutedToolResult[] = [
+      {
+        name: "readFile",
+        args: {},
+        toolCallId: "shared-id",
+        result: { status: "completed", content: "ok" },
+      },
+    ];
+
+    const normalized = normalizeToolLifecycle(pending, executed);
+
+    expect(normalized.pendingToolCalls).toEqual([]);
+    expect(countUniqueToolCalls(pending, executed)).toBe(1);
+  });
+
   it("preserves anonymous result multiplicity when counting pre-normalized results", () => {
     const executed: ExecutedToolResult[] = [
       {
