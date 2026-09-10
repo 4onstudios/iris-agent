@@ -129,8 +129,9 @@ const buildDedupKey = (
   args: ToolArgs,
   toolCallId?: string,
 ): string => {
-  if (toolCallId) return `id:${toolCallId}`;
-  return buildSignatureKey(name, args);
+  const signatureKey = buildSignatureKey(name, args);
+  if (toolCallId) return `id:${toolCallId}:${signatureKey}`;
+  return signatureKey;
 };
 
 const buildSignatureKey = (name: string, args: ToolArgs): string =>
