@@ -1965,6 +1965,41 @@ router.post(
           return true;
         }
       };
+      type CancelledDuringWait = { __cancelledDuringWait: true };
+      const cancelledDuringWait: CancelledDuringWait = {
+        __cancelledDuringWait: true,
+      };
+      const isCancelledWaitResult = (
+        value: unknown,
+      ): value is CancelledDuringWait =>
+        Boolean(
+          value &&
+          typeof value === "object" &&
+          "__cancelledDuringWait" in value &&
+          (value as { __cancelledDuringWait?: unknown })
+            .__cancelledDuringWait === true,
+        );
+      const waitForResultOrCancellation = async <T>(
+        work: Promise<T>,
+      ): Promise<T | CancelledDuringWait> => {
+        let stopped = false;
+        const waitForCancellation: Promise<CancelledDuringWait> = (async () => {
+          while (!stopped) {
+            if (await isCancelled()) {
+              return cancelledDuringWait;
+            }
+            await sleep(75);
+          }
+          return cancelledDuringWait;
+        })();
+
+        try {
+          const settled = await Promise.race([work, waitForCancellation]);
+          return settled;
+        } finally {
+          stopped = true;
+        }
+      };
 
       await persistLifecycle("queued", "none", "request_received", {
         hasConversationHistory:
@@ -2776,8 +2811,8 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             stopReason,
           });
 
-          const streamResult = activeHostSession
-            ? await (async () => {
+          const streamResultPromise = activeHostSession
+            ? (async () => {
               const hostStreamResult = await activeHostSession.sendStream({
                 prompt:
                   typeof modelInput === "string"
@@ -2817,7 +2852,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                 "Host session stream transport unavailable for SSE chunk pipeline",
               );
             })()
-            : await (
+            : (
               agent as unknown as {
                 stream: (
                   ...args: [
@@ -2839,6 +2874,39 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                 }>;
               }
             ).stream(modelInput, generateOptions);
+          const streamResultOrCancellation = await waitForResultOrCancellation(
+            streamResultPromise,
+          );
+          if (isCancelledWaitResult(streamResultOrCancellation)) {
+            await transitionToCancelled("before_stream_reader");
+            writeEvent("lifecycle", {
+              runId: resolvedRunId,
+              lifecycleState,
+              stopReason,
+            });
+            writeEvent("done", {
+              success: false,
+              runId: resolvedRunId,
+              lifecycleState,
+              stopReason,
+              cancelled: true,
+              response: "Run cancelled",
+              toolCalls: [],
+              executedToolResults: [],
+              suspendedTools: [],
+              thoughtSteps: [],
+              model: modelId,
+              autoFixAttempted: false,
+              autoFixFailureCount: 0,
+              maxStepsReached: false,
+              stepsUsed: 0,
+              maxSteps,
+            });
+            stopKeepAlive();
+            res.end();
+            return;
+          }
+          const streamResult = streamResultOrCancellation;
 
           const reader = streamResult.fullStream.getReader();
           const thoughtBuffer: string[] = [];
@@ -3099,15 +3167,113 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             }
           }
 
-          const finalText = await streamResult.text;
-          const streamedToolCalls = await streamResult.toolCalls;
-          const streamSteps = await Promise.resolve(
-            (
-              streamResult as unknown as {
-                steps?: Promise<StreamStep[]>;
-              }
-            ).steps,
-          ).catch(() => undefined);
+          const finalTextOrCancellation = await waitForResultOrCancellation(
+            streamResult.text,
+          );
+          if (isCancelledWaitResult(finalTextOrCancellation)) {
+            await transitionToCancelled("before_stream_final_text");
+            writeEvent("lifecycle", {
+              runId: resolvedRunId,
+              lifecycleState,
+              stopReason,
+            });
+            writeEvent("done", {
+              success: false,
+              runId: resolvedRunId,
+              lifecycleState,
+              stopReason,
+              cancelled: true,
+              response: "Run cancelled",
+              toolCalls: [],
+              executedToolResults: [],
+              suspendedTools: streamedSuspendedTools,
+              thoughtSteps:
+                thoughtBuffer.length > 0 ? [thoughtBuffer.join("")] : [],
+              model: modelId,
+              autoFixAttempted: false,
+              autoFixFailureCount: 0,
+              maxStepsReached: false,
+              stepsUsed: 0,
+              maxSteps,
+            });
+            stopKeepAlive();
+            res.end();
+            return;
+          }
+          const finalText = finalTextOrCancellation;
+          const streamedToolCallsOrCancellation =
+            await waitForResultOrCancellation(streamResult.toolCalls);
+          if (isCancelledWaitResult(streamedToolCallsOrCancellation)) {
+            await transitionToCancelled("before_stream_tool_calls");
+            writeEvent("lifecycle", {
+              runId: resolvedRunId,
+              lifecycleState,
+              stopReason,
+            });
+            writeEvent("done", {
+              success: false,
+              runId: resolvedRunId,
+              lifecycleState,
+              stopReason,
+              cancelled: true,
+              response: "Run cancelled",
+              toolCalls: [],
+              executedToolResults: [],
+              suspendedTools: streamedSuspendedTools,
+              thoughtSteps:
+                thoughtBuffer.length > 0 ? [thoughtBuffer.join("")] : [],
+              model: modelId,
+              autoFixAttempted: false,
+              autoFixFailureCount: 0,
+              maxStepsReached: false,
+              stepsUsed: 0,
+              maxSteps,
+            });
+            stopKeepAlive();
+            res.end();
+            return;
+          }
+          const streamedToolCalls = streamedToolCallsOrCancellation;
+          const streamStepsOrCancellation = await waitForResultOrCancellation(
+            Promise.resolve(
+              (
+                streamResult as unknown as {
+                  steps?: Promise<StreamStep[]>;
+                }
+              ).steps,
+            ).catch(() => undefined),
+          );
+          if (isCancelledWaitResult(streamStepsOrCancellation)) {
+            await transitionToCancelled("before_stream_steps");
+            writeEvent("lifecycle", {
+              runId: resolvedRunId,
+              lifecycleState,
+              stopReason,
+            });
+            writeEvent("done", {
+              success: false,
+              runId: resolvedRunId,
+              lifecycleState,
+              stopReason,
+              cancelled: true,
+              response: "Run cancelled",
+              toolCalls: [],
+              executedToolResults: [],
+              suspendedTools: streamedSuspendedTools,
+              thoughtSteps:
+                thoughtBuffer.length > 0 ? [thoughtBuffer.join("")] : [],
+              model: modelId,
+              autoFixAttempted: false,
+              autoFixFailureCount: 0,
+              maxStepsReached: false,
+              stepsUsed: 0,
+              maxSteps,
+            });
+            stopKeepAlive();
+            res.end();
+            return;
+          }
+          const streamSteps = streamStepsOrCancellation;
           const streamStepsUsed = Array.isArray(streamSteps)
             ? streamSteps.length
             : 0;
@@ -3125,10 +3291,43 @@ _You have discovered the following in earlier interactions. Use this to avoid re
           const streamLastStepHadToolCalls =
             Array.isArray(streamLastStep?.toolCalls) &&
             streamLastStep.toolCalls.length > 0;
-          const streamUsageFromResult = normalizeTokenUsage(
-            await Promise.resolve(
+          const streamUsageRawOrCancellation = await waitForResultOrCancellation(
+            Promise.resolve(
               (streamResult as unknown as { usage?: unknown }).usage,
             ).catch(() => undefined),
+          );
+          if (isCancelledWaitResult(streamUsageRawOrCancellation)) {
+            await transitionToCancelled("before_stream_usage");
+            writeEvent("lifecycle", {
+              runId: resolvedRunId,
+              lifecycleState,
+              stopReason,
+            });
+            writeEvent("done", {
+              success: false,
+              runId: resolvedRunId,
+              lifecycleState,
+              stopReason,
+              cancelled: true,
+              response: "Run cancelled",
+              toolCalls: [],
+              executedToolResults: [],
+              suspendedTools: streamedSuspendedTools,
+              thoughtSteps:
+                thoughtBuffer.length > 0 ? [thoughtBuffer.join("")] : [],
+              model: modelId,
+              autoFixAttempted: false,
+              autoFixFailureCount: 0,
+              maxStepsReached: false,
+              stepsUsed: 0,
+              maxSteps,
+            });
+            stopKeepAlive();
+            res.end();
+            return;
+          }
+          const streamUsageFromResult = normalizeTokenUsage(
+            streamUsageRawOrCancellation,
           );
           const streamUsageSeenInFinal = Boolean(streamUsageFromResult);
           streamTokenUsage = mergeTokenUsage(
@@ -3477,19 +3676,32 @@ _You have discovered the following in earlier interactions. Use this to avoid re
 
       let result: AgentGenerateResult;
       try {
-        result = activeHostSession
-          ? await generateWithSessionRetry(
-            activeHostSession,
-            modelInput,
-            generateOptions,
-            modelProfile.generateRetryAttempts,
-          )
-          : await generateWithRetry(
-            agent,
-            modelInput,
-            generateOptions,
-            modelProfile.generateRetryAttempts,
-          );
+        const resultOrCancellation = await waitForResultOrCancellation(
+          activeHostSession
+            ? generateWithSessionRetry(
+              activeHostSession,
+              modelInput,
+              generateOptions,
+              modelProfile.generateRetryAttempts,
+            )
+            : generateWithRetry(
+              agent,
+              modelInput,
+              generateOptions,
+              modelProfile.generateRetryAttempts,
+            ),
+        );
+        if (isCancelledWaitResult(resultOrCancellation)) {
+          await transitionToCancelled("during_model_request");
+          return res.status(409).json({
+            success: false,
+            runId: resolvedRunId,
+            lifecycleState,
+            stopReason,
+            error: "Run was cancelled",
+          });
+        }
+        result = resultOrCancellation;
       } finally {
         agent.clearProcessedWorkspaceResults?.(workspaceMutationGenerationId);
       }

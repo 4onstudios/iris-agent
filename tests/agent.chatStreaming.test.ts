@@ -276,6 +276,60 @@ describe("agent chat streaming", () => {
     }
   }, 30000);
 
+  it("settles an SSE stream when cancellation is requested after chunks finish but final text stalls", async () => {
+    mockAgentStream.mockResolvedValueOnce({
+      fullStream: createMockFullStream([]),
+      text: new Promise<string>(() => undefined),
+      toolCalls: Promise.resolve([]),
+    });
+
+    const { server, baseUrl } = await startServer();
+
+    try {
+      const runId = "stream-cancel-after-chunks";
+      const streamResponsePromise = postStreaming(baseUrl, "/api/agent/chat", {
+        runId,
+        message: "hello",
+        modelId: "gpt-4o-mini",
+        workspaceRoot: "/tmp/stream-cancel-after-chunks",
+        isTauri: false,
+        stream: true,
+      });
+
+      let cancelResponse: JsonResponse | undefined;
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        cancelResponse = await postJson(
+          baseUrl,
+          `/api/agent/runs/${runId}/cancel`,
+          {},
+        );
+        if (cancelResponse.status !== 404) break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+
+      expect(cancelResponse?.status).toBe(200);
+      expect(cancelResponse?.body.success).toBe(true);
+
+      const streamResponse = await Promise.race([
+        streamResponsePromise,
+        new Promise<StreamingResponse>((_, reject) =>
+          setTimeout(
+            () => reject(new Error("Streaming response did not settle after cancellation")),
+            1200,
+          ),
+        ),
+      ]);
+
+      expect(streamResponse.status).toBe(200);
+      expect(streamResponse.contentType).toContain("text/event-stream");
+      expect(streamResponse.body).toContain("event: done");
+      expect(streamResponse.body).toContain("\"stopReason\":\"cancelled\"");
+      expect(streamResponse.body).toContain("\"cancelled\":true");
+    } finally {
+      await stopServer(server);
+    }
+  }, 30000);
+
   it("disables tools for final synthesis continuations", async () => {
     const stream = jest.fn(async () => ({
       fullStream: createMockFullStream([

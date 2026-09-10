@@ -293,6 +293,60 @@ describe("agent run lifecycle APIs", () => {
     }
   });
 
+  it("settles a non-stream prompt when cancellation is requested during a stalled model response", async () => {
+    const { server, baseUrl } = await startServer();
+
+    try {
+      const runId = "run-cancel-stalled-model";
+      mockGenerate.mockImplementation(
+        async () => await new Promise<never>(() => undefined),
+      );
+
+      const pendingChatResponse = requestJson(baseUrl, "POST", "/api/agent/chat", {
+        runId,
+        message: "wait for model forever",
+        modelId: "gpt-4o",
+        workspaceRoot: "/tmp/run-lifecycle",
+        isTauri: false,
+      });
+
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const snapshot = await getRunSnapshot(runId);
+        if (snapshot) break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+
+      const cancelResponse = await requestJson(
+        baseUrl,
+        "POST",
+        `/api/agent/runs/${runId}/cancel`,
+      );
+      expect(cancelResponse.status).toBe(200);
+      expect(cancelResponse.body.success).toBe(true);
+
+      const timedResponse = await Promise.race([
+        pendingChatResponse,
+        new Promise<RequestResult>((_, reject) =>
+          setTimeout(
+            () => reject(new Error("Chat request did not settle after cancellation")),
+            600,
+          ),
+        ),
+      ]);
+
+      expect(timedResponse.status).toBe(409);
+      expect(timedResponse.body).toMatchObject({
+        success: false,
+        runId,
+        lifecycleState: "cancelled",
+        stopReason: "cancelled",
+        error: "Run was cancelled",
+      });
+    } finally {
+      await stopServer(server);
+    }
+  });
+
   it("deleting a chat session also deletes related run lifecycle data", async () => {
     const { server, baseUrl } = await startServer();
     const previousTauriBundled = process.env.TAURI_BUNDLED;
