@@ -101,6 +101,7 @@ import {
 } from "./data/runStore";
 
 const router = express.Router();
+const activeChatSessionTurns = new Set<string>();
 
 type ChatRole = "user" | "assistant" | "system" | "tool";
 
@@ -566,10 +567,17 @@ const reconcileToolLifecycleSnapshots = (
         }
       }
 
+      // An anonymous pending call has no stable identity. Matching it only by
+      // name and arguments can discard a distinct invocation (and, in turn,
+      // skip its approval/audit hook). Anonymous results can still be
+      // reconciled because the result payload is runtime evidence that the
+      // snapshot describes an invocation already observed in the stream.
+      const canReconcileAnonymousEntry = "result" in entry;
       const matchingIndex = streamed.findIndex(
         (streamedEntry, index) =>
           !claimedStreamedIndexes.has(index) &&
           (!streamedEntry.toolCallId || !entry.toolCallId) &&
+          canReconcileAnonymousEntry &&
           getToolCallSignature(streamedEntry.name, streamedEntry.args || {}) ===
           getToolCallSignature(entry.name, entry.args || {}),
       );
@@ -1881,6 +1889,25 @@ router.post(
       const workspaceMutationGenerationId = randomUUID();
       activeRunId = resolvedRunId;
       const mastraThreadId = chatSessionId || resolvedRunId;
+      if (chatSessionId) {
+        const activeTurnKey = `chat:${mastraThreadId}`;
+        if (activeChatSessionTurns.has(activeTurnKey)) {
+          return res.status(409).json({
+            success: false,
+            runId: resolvedRunId,
+            lifecycleState: "queued",
+            stopReason: "none",
+            error:
+              "Another prompt is already running for this chat session. Wait for it to finish before starting a new turn.",
+          });
+        }
+        activeChatSessionTurns.add(activeTurnKey);
+        const releaseActiveTurn = () => {
+          activeChatSessionTurns.delete(activeTurnKey);
+        };
+        res.once("finish", releaseActiveTurn);
+        res.once("close", releaseActiveTurn);
+      }
       const mastraMemoryScope =
         rawUseMastraObservationalMemory === true
           ? {
@@ -2815,9 +2842,11 @@ _You have discovered the following in earlier interactions. Use this to avoid re
           let streamUsageSeenInChunks = false;
 
           const getPendingKey = (call: PendingToolCall): string => {
-            if (call.toolCallId) return `id:${call.toolCallId}`;
-            return `sig:${call.name}:${JSON.stringify(call.args || {})}`;
+            const signature = getToolCallSignature(call.name, call.args || {});
+            if (call.toolCallId) return `id:${call.toolCallId}:${signature}`;
+            return signature;
           };
+          const emittedToolCallIds = new Set<string>();
 
           while (true) {
             const { value, done } = await reader.read();
@@ -2928,6 +2957,9 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                 pendingCountsInSnapshot.set(key, occurrence);
                 if (occurrence <= (emittedPendingCounts.get(key) || 0)) continue;
                 emittedPendingCounts.set(key, occurrence);
+                if (call.toolCallId) {
+                  emittedToolCallIds.add(call.toolCallId);
+                }
                 writeEvent("tool_call", {
                   name: call.name,
                   args: call.args,
@@ -2974,14 +3006,27 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                     : undefined,
               });
 
+              const toolCallId =
+                typeof chunk.payload?.toolCallId === "string"
+                  ? (chunk.payload.toolCallId as string)
+                  : undefined;
+              const resultArgs =
+                (chunk.payload?.args as Record<string, unknown>) || {};
+              if (toolCallId && !emittedToolCallIds.has(toolCallId)) {
+                emittedToolCallIds.add(toolCallId);
+                writeEvent("tool_call", {
+                  name: toolName,
+                  args: resultArgs,
+                  toolCallId,
+                  status: "pending",
+                });
+              }
+
               writeEvent("tool_result", {
                 name: toolName,
-                args: (chunk.payload?.args as Record<string, unknown>) || {},
+                args: resultArgs,
                 result: safeToolResult,
-                toolCallId:
-                  typeof chunk.payload?.toolCallId === "string"
-                    ? (chunk.payload.toolCallId as string)
-                    : undefined,
+                toolCallId,
                 status: resolveToolExecutionStatus(safeToolResult),
               });
 
@@ -3610,7 +3655,9 @@ _You have discovered the following in earlier interactions. Use this to avoid re
           args: Record<string, unknown>,
           toolCallId?: string,
         ): string =>
-          toolCallId ? `id:${toolCallId}` : getToolCallSignature(name, args);
+          toolCallId
+            ? `id:${toolCallId}:${getToolCallSignature(name, args)}`
+            : getToolCallSignature(name, args);
 
         if (lastStep.content && Array.isArray(lastStep.content)) {
           lastStep.content.forEach((item) => {

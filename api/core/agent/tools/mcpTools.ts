@@ -76,6 +76,14 @@ const summarizeStructuredError = (structuredContent: unknown): string | undefine
   return undefined;
 };
 
+const toMcpToolParams = (params: unknown): Record<string, unknown> | null => {
+  if (params === null || params === undefined) return {};
+  if (typeof params === "object" && !Array.isArray(params)) {
+    return params as Record<string, unknown>;
+  }
+  return null;
+};
+
 export const validateMcpToolInput = (
   toolName: string,
   inputSchema: Record<string, unknown> | undefined,
@@ -563,8 +571,18 @@ export const buildMcpTools = async (
           `Pass the tool arguments directly as fields in the input object and match the declared schema exactly.` +
           `\n\nDeclared input schema:\n${schemaPreview}`,
         inputSchema: toolInputSchema,
-        execute: async (params: Record<string, unknown>) => {
-          const input = params || {};
+        execute: async (params: unknown) => {
+          const input = toMcpToolParams(params);
+          if (!input) {
+            return {
+              success: false,
+              server: server.name,
+              tool: tool.name,
+              isError: true,
+              error: `Invalid arguments for MCP tool '${tool.name}'. Expected an object.`,
+            };
+          }
+
           const validationError = validateMcpToolInput(
             tool.name,
             tool.inputSchema,

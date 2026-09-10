@@ -295,6 +295,28 @@ describe("normalizeToolLifecycle", () => {
     expect(countUniqueToolCalls([], executed)).toBe(2);
   });
 
+  it("treats a reused tool call ID with different operation details as a distinct invocation", () => {
+    const executed: ExecutedToolResult[] = [
+      {
+        name: "readFile",
+        args: { filePath: "src/index.ts" },
+        toolCallId: "reused-id",
+        result: { status: "completed" },
+      },
+      {
+        name: "writeFile",
+        args: { filePath: "src/index.ts", content: "updated" },
+        toolCallId: "reused-id",
+        result: { status: "completed" },
+      },
+    ];
+
+    const normalized = normalizeToolLifecycle([], executed);
+
+    expect(normalized.executedToolResults).toHaveLength(2);
+    expect(countUniqueToolCalls([], normalized.executedToolResults)).toBe(2);
+  });
+
   it("preserves anonymous result multiplicity when counting pre-normalized results", () => {
     const executed: ExecutedToolResult[] = [
       {

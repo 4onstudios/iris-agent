@@ -1927,6 +1927,54 @@ describe("agent chat streaming", () => {
     }
   }, 30000);
 
+  it("emits a synthetic tool_call before an orphan identified tool_result", async () => {
+    const args = { filePath: "README.md" };
+    mockCreateCodingAgent.mockResolvedValueOnce({
+      generate: jest.fn(async () => ({
+        text: "fallback",
+        steps: [],
+        toolCalls: [],
+      })),
+      stream: jest.fn(async () => ({
+        fullStream: createMockFullStream([
+          {
+            type: "tool-result",
+            payload: {
+              toolName: "read_file",
+              args,
+              toolCallId: "orphan-result-id",
+              result: { status: "completed", content: "README contents" },
+            },
+          },
+        ]),
+        text: Promise.resolve("Read it."),
+        toolCalls: Promise.resolve([]),
+        steps: Promise.resolve([]),
+      })),
+    });
+
+    const { server, baseUrl } = await startServer();
+
+    try {
+      const response = await postStreaming(baseUrl, "/api/agent/chat", {
+        message: "read the README",
+        modelId: "gpt-4o-mini",
+        workspaceRoot: "/tmp/stream-orphan-identified-result",
+        isTauri: false,
+        stream: true,
+      });
+
+      expect(response.status).toBe(200);
+      const toolCallIndex = response.body.indexOf("event: tool_call");
+      const toolResultIndex = response.body.indexOf("event: tool_result");
+      expect(toolCallIndex).toBeGreaterThanOrEqual(0);
+      expect(toolResultIndex).toBeGreaterThan(toolCallIndex);
+      expect(response.body).toContain('"toolCallId":"orphan-result-id"');
+    } finally {
+      await stopServer(server);
+    }
+  }, 30000);
+
   it("reports budget reached when an exact-budget step leaves a pending call", async () => {
     mockCreateCodingAgent.mockResolvedValueOnce({
       generate: jest.fn(async () => ({
