@@ -37,6 +37,9 @@
     "test": "jest --config jest.config.cjs",
     "typecheck": "tsc --noEmit"
   },
+  "files": [
+    "dist"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
