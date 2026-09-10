@@ -414,17 +414,10 @@ const reconcileToolLifecycleSnapshots = (
         }
       }
 
-      // An anonymous pending call has no stable identity. Matching it only by
-      // name and arguments can discard a distinct invocation (and, in turn,
-      // skip its approval/audit hook). Anonymous results can still be
-      // reconciled because the result payload is runtime evidence that the
-      // snapshot describes an invocation already observed in the stream.
-      const canReconcileAnonymousEntry = "result" in entry;
       const matchingIndex = streamed.findIndex(
         (streamedEntry, index) =>
           !claimedStreamedIndexes.has(index) &&
           (!streamedEntry.toolCallId || !entry.toolCallId) &&
-          canReconcileAnonymousEntry &&
           getToolCallSignature(streamedEntry.name, streamedEntry.args || {}) ===
           getToolCallSignature(entry.name, entry.args || {}),
       );
