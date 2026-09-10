@@ -194,6 +194,37 @@ describe("HostSessionManager", () => {
         expect(onPreToolUse).toHaveBeenCalledTimes(2);
     });
 
+    it("reconciles identified declared/runtime callbacks when one side omits arguments", async () => {
+        const onPreToolUse = jest.fn(() => ({ permissionDecision: "allow" as const }));
+        const runtime = createRuntime({
+            runTurn: jest.fn(async (request) => {
+                await request.onPreToolUse?.({
+                    toolName: "readFile",
+                    toolCallId: "tool-omitted-args",
+                    toolArgs: { path: "README.md" },
+                });
+                return { text: "done" };
+            }),
+        });
+        const manager = new HostSessionManager(() => runtime, {
+            workspacePath: "/workspace",
+        });
+        const session = await manager.createSession({
+            hooks: { onPreToolUse },
+        });
+
+        await session.sendAndWait({
+            prompt: "read file",
+            metadata: {
+                declaredToolCalls: [
+                    { toolName: "readFile", toolCallId: "tool-omitted-args" },
+                ],
+            },
+        });
+
+        expect(onPreToolUse).toHaveBeenCalledTimes(1);
+    });
+
     it("invokes pre-tool hooks for each repeated anonymous runtime call", async () => {
         const onPreToolUse = jest.fn(() => ({ permissionDecision: "allow" as const }));
         const runtime = createRuntime({

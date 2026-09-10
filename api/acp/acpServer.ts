@@ -48,7 +48,8 @@ type AcpSessionState = {
 };
 
 type PendingToolInvocation = {
-  toolCallId: string;
+  protocolToolCallId: string;
+  runtimeToolCallId?: string;
   operationKey: string;
 };
 
@@ -170,6 +171,9 @@ export const createAcpAgentApp = (
             PendingToolInvocation[]
           >();
           const generatedToolCallCounts = new Map<string, number>();
+          const usedProtocolToolCallIds = new Set<string>();
+          const runtimeSignaturesByToolCall = new Map<string, Set<string>>();
+          const runtimeProtocolIdByOperation = new Map<string, string>();
           let emittedText = false;
 
           const normalizeToolArgs = (
@@ -184,17 +188,91 @@ export const createAcpAgentApp = (
           const hasArgumentDetails = (toolArgs: Record<string, unknown>): boolean =>
             Object.keys(toolArgs).length > 0;
 
-          const buildOperationKey = (
+          const buildRuntimeCallKey = (
             toolName: string,
-            toolCallId: string,
-            toolArgs: Record<string, unknown>,
+            runtimeToolCallId: string,
           ): string =>
-            `${toolCallId}:${getToolCallSignature(toolName, toolArgs)}`;
+            `${toolName}:${runtimeToolCallId}`;
+
+          const buildRuntimeOperationKey = (
+            toolName: string,
+            runtimeToolCallId: string,
+            signature: string,
+          ): string =>
+            `${buildRuntimeCallKey(toolName, runtimeToolCallId)}:${signature}`;
 
           const allocateGeneratedToolCallId = (toolName: string): string => {
-            const occurrence = (generatedToolCallCounts.get(toolName) || 0) + 1;
-            generatedToolCallCounts.set(toolName, occurrence);
-            return `generated-${toolName}-${occurrence}`;
+            let occurrence = generatedToolCallCounts.get(toolName) || 0;
+            while (true) {
+              occurrence += 1;
+              const candidate = `generated-${toolName}-${occurrence}`;
+              if (!usedProtocolToolCallIds.has(candidate)) {
+                generatedToolCallCounts.set(toolName, occurrence);
+                usedProtocolToolCallIds.add(candidate);
+                return candidate;
+              }
+            }
+          };
+
+          const resolveProtocolToolCallId = (
+            toolName: string,
+            runtimeToolCallId: string | undefined,
+            toolArgs: Record<string, unknown>,
+          ): string => {
+            if (!runtimeToolCallId) {
+              return allocateGeneratedToolCallId(toolName);
+            }
+
+            const signature = getToolCallSignature(toolName, toolArgs);
+            const runtimeOperationKey = buildRuntimeOperationKey(
+              toolName,
+              runtimeToolCallId,
+              signature,
+            );
+            const existingProtocolId =
+              runtimeProtocolIdByOperation.get(runtimeOperationKey);
+            if (existingProtocolId) {
+              usedProtocolToolCallIds.add(existingProtocolId);
+              return existingProtocolId;
+            }
+
+            const runtimeCallKey = buildRuntimeCallKey(toolName, runtimeToolCallId);
+            const signatures =
+              runtimeSignaturesByToolCall.get(runtimeCallKey) || new Set<string>();
+            runtimeSignaturesByToolCall.set(runtimeCallKey, signatures);
+
+            const protocolToolCallId =
+              signatures.size > 0 && !signatures.has(signature)
+                ? allocateGeneratedToolCallId(toolName)
+                : runtimeToolCallId;
+
+            signatures.add(signature);
+            runtimeProtocolIdByOperation.set(
+              runtimeOperationKey,
+              protocolToolCallId,
+            );
+            usedProtocolToolCallIds.add(protocolToolCallId);
+            return protocolToolCallId;
+          };
+
+          const resolveMappedProtocolIdForOmittedArgs = (
+            toolName: string,
+            runtimeToolCallId: string,
+          ): string | undefined => {
+            const runtimeCallKey = buildRuntimeCallKey(toolName, runtimeToolCallId);
+            const signatures = runtimeSignaturesByToolCall.get(runtimeCallKey);
+            if (!signatures || signatures.size !== 1) {
+              return undefined;
+            }
+
+            const [signature] = Array.from(signatures);
+            if (!signature) {
+              return undefined;
+            }
+
+            return runtimeProtocolIdByOperation.get(
+              buildRuntimeOperationKey(toolName, runtimeToolCallId, signature),
+            );
           };
 
           const consumePendingInvocation = (
@@ -210,34 +288,88 @@ export const createAcpAgentApp = (
               typeof suppliedToolCallId === "string" &&
               suppliedToolCallId.length > 0
             ) {
-              const exactOperationKey = buildOperationKey(
+              if (hasArgs) {
+                const signature = getToolCallSignature(toolName, toolArgs);
+                const runtimeOperationKey = buildRuntimeOperationKey(
+                  toolName,
+                  suppliedToolCallId,
+                  signature,
+                );
+                const matchIndex = pending.findIndex(
+                  (entry) =>
+                    entry.runtimeToolCallId === suppliedToolCallId &&
+                    entry.operationKey === runtimeOperationKey,
+                );
+                if (matchIndex >= 0) {
+                  const [invocation] = pending.splice(matchIndex, 1);
+                  return {
+                    invocation,
+                    toolCallId: invocation.protocolToolCallId,
+                  };
+                }
+
+                const mappedProtocolId =
+                  runtimeProtocolIdByOperation.get(runtimeOperationKey);
+                if (mappedProtocolId) {
+                  return { toolCallId: mappedProtocolId };
+                }
+
+                return {
+                  toolCallId: resolveProtocolToolCallId(
+                    toolName,
+                    suppliedToolCallId,
+                    toolArgs,
+                  ),
+                };
+              }
+
+              const sameIdEntries = pending.filter(
+                (entry) => entry.runtimeToolCallId === suppliedToolCallId,
+              );
+              if (sameIdEntries.length === 1) {
+                const [invocation] = sameIdEntries;
+                const matchIndex = pending.findIndex(
+                  (entry) => entry === invocation,
+                );
+                if (matchIndex >= 0) {
+                  pending.splice(matchIndex, 1);
+                }
+                return {
+                  invocation,
+                  toolCallId: invocation.protocolToolCallId,
+                };
+              }
+
+              const mappedProtocolId = resolveMappedProtocolIdForOmittedArgs(
                 toolName,
                 suppliedToolCallId,
-                toolArgs,
               );
-              let matchIndex = pending.findIndex(
-                (entry) => entry.operationKey === exactOperationKey,
-              );
-              if (matchIndex < 0 && !hasArgs) {
-                const sameIdEntries = pending.filter(
-                  (entry) => entry.toolCallId === suppliedToolCallId,
+              if (mappedProtocolId) {
+                const matchIndex = pending.findIndex(
+                  (entry) =>
+                    entry.runtimeToolCallId === suppliedToolCallId &&
+                    entry.protocolToolCallId === mappedProtocolId,
                 );
-                if (sameIdEntries.length === 1) {
-                  matchIndex = pending.findIndex(
-                    (entry) => entry.toolCallId === suppliedToolCallId,
-                  );
+                if (matchIndex >= 0) {
+                  const [invocation] = pending.splice(matchIndex, 1);
+                  return {
+                    invocation,
+                    toolCallId: invocation.protocolToolCallId,
+                  };
                 }
+
+                return { toolCallId: mappedProtocolId };
               }
-              if (matchIndex >= 0) {
-                const [invocation] = pending.splice(matchIndex, 1);
-                return { invocation, toolCallId: invocation.toolCallId };
-              }
-              return { toolCallId: suppliedToolCallId };
+
+              return { toolCallId: allocateGeneratedToolCallId(toolName) };
             }
 
             if (pending.length > 0) {
               const invocation = pending.shift() as PendingToolInvocation;
-              return { invocation, toolCallId: invocation.toolCallId };
+              return {
+                invocation,
+                toolCallId: invocation.protocolToolCallId,
+              };
             }
 
             return { toolCallId: allocateGeneratedToolCallId(toolName) };
@@ -277,15 +409,24 @@ export const createAcpAgentApp = (
               const toolName = String(value.payload?.toolName || "tool");
               const toolArgs = normalizeToolArgs(value.payload?.args);
               const suppliedToolCallId = value.payload?.toolCallId;
-              const toolCallId =
+              const runtimeToolCallId =
                 typeof suppliedToolCallId === "string" &&
                 suppliedToolCallId.length > 0
                   ? suppliedToolCallId
-                  : allocateGeneratedToolCallId(toolName);
+                  : undefined;
+              const toolCallId = resolveProtocolToolCallId(
+                toolName,
+                runtimeToolCallId,
+                toolArgs,
+              );
               const pending = pendingToolInvocations.get(toolName) || [];
+              const signature = getToolCallSignature(toolName, toolArgs);
               pending.push({
-                toolCallId,
-                operationKey: buildOperationKey(toolName, toolCallId, toolArgs),
+                protocolToolCallId: toolCallId,
+                runtimeToolCallId,
+                operationKey: runtimeToolCallId
+                  ? buildRuntimeOperationKey(toolName, runtimeToolCallId, signature)
+                  : `${toolCallId}:${signature}`,
               });
               pendingToolInvocations.set(toolName, pending);
               await ctx.client.notify(acp.methods.client.session.update, {

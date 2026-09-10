@@ -347,6 +347,35 @@ describe("normalizeToolLifecycle", () => {
     expect(countUniqueToolCalls(pending, executed)).toBe(1);
   });
 
+  it("treats repeated detailed snapshots as one signature when reconciling an omitted-args identified result", () => {
+    const pending: PendingToolCall[] = [
+      {
+        name: "readFile",
+        args: { filePath: "src/index.ts" },
+        toolCallId: "shared-id",
+      },
+    ];
+    const executed: ExecutedToolResult[] = [
+      {
+        name: "readFile",
+        args: { filePath: "src/index.ts" },
+        toolCallId: "shared-id",
+        result: { status: "in_progress" },
+      },
+      {
+        name: "readFile",
+        args: {},
+        toolCallId: "shared-id",
+        result: { status: "completed" },
+      },
+    ];
+
+    const normalized = normalizeToolLifecycle(pending, executed);
+
+    expect(normalized.pendingToolCalls).toEqual([]);
+    expect(countUniqueToolCalls(pending, executed)).toBe(1);
+  });
+
   it("preserves anonymous result multiplicity when counting pre-normalized results", () => {
     const executed: ExecutedToolResult[] = [
       {

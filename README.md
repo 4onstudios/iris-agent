@@ -278,6 +278,10 @@ npm install
 npm run build
 ```
 
+When installing from a Git branch or commit, npm runs this package's
+`prepare` script to build `dist/` during installation, so root exports such as
+`IrisClient` are available without manually committing generated artifacts.
+
 The ACP subprocess writes protocol messages to stdout and diagnostic logs to
 stderr. Never merge logs into stdout or pipe stdout through a text logger;
 doing so corrupts the ACP stream.

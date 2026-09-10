@@ -14,6 +14,9 @@ const createChunkStream = (
         },
     });
 
+const readToolCallId = (update: acp.SessionUpdate): string | undefined =>
+    "toolCallId" in update ? update.toolCallId : undefined;
+
 describe("ACP server", () => {
     it("supports the standard initialize, session, prompt, update, and close flow", async () => {
         const runtime: AcpRuntimeAgent = {
@@ -267,17 +270,24 @@ describe("ACP server", () => {
             });
         });
 
-        expect(updates.map((entry) => entry.update)).toEqual([
+        const mapped = updates.map((entry) => entry.update);
+        const orphanStart = mapped[0];
+        const orphanFinish = mapped[1];
+
+        expect(orphanStart).toEqual(
             expect.objectContaining({
                 sessionUpdate: "tool_call",
-                toolCallId: "orphan-status",
                 status: "in_progress",
             }),
+        );
+        expect(orphanFinish).toEqual(
             expect.objectContaining({
                 sessionUpdate: "tool_call_update",
-                toolCallId: "orphan-status",
                 status: "failed",
+                toolCallId: readToolCallId(orphanStart as acp.SessionUpdate),
             }),
+        );
+        expect(mapped.slice(2)).toEqual([
             expect.objectContaining({
                 sessionUpdate: "tool_call",
                 toolCallId: "success-false",
@@ -435,7 +445,7 @@ describe("ACP server", () => {
         expect(updates).toHaveLength(0);
     });
 
-    it("synthesizes a tool start when a reused id arrives with a different operation signature", async () => {
+    it("allocates a unique protocol id when a runtime call id is reused for a different signature", async () => {
         const runtime: AcpRuntimeAgent = {
             stream: jest.fn(async () => ({
                 fullStream: createChunkStream([
@@ -445,6 +455,14 @@ describe("ACP server", () => {
                             toolName: "writeFile",
                             toolCallId: "reused",
                             args: { path: "a.txt", content: "A" },
+                        },
+                    },
+                    {
+                        type: "tool-call",
+                        payload: {
+                            toolName: "writeFile",
+                            toolCallId: "reused",
+                            args: { path: "b.txt", content: "B" },
                         },
                     },
                     {
@@ -482,8 +500,25 @@ describe("ACP server", () => {
             });
         });
 
+        const toolCallUpdates = updates.filter(
+            (entry) => entry.update.sessionUpdate === "tool_call",
+        );
+        const toolResultUpdates = updates.filter(
+            (entry) => entry.update.sessionUpdate === "tool_call_update",
+        );
+        expect(toolCallUpdates).toHaveLength(2);
+        expect(toolResultUpdates).toHaveLength(1);
+        const firstProtocolId = readToolCallId(
+            toolCallUpdates[0]?.update as acp.SessionUpdate,
+        );
+        const secondProtocolId = readToolCallId(
+            toolCallUpdates[1]?.update as acp.SessionUpdate,
+        );
+        expect(firstProtocolId).toBe("reused");
+        expect(secondProtocolId).toBeDefined();
+        expect(secondProtocolId).not.toBe(firstProtocolId);
         expect(
-            updates.filter((entry) => entry.update.sessionUpdate === "tool_call"),
-        ).toHaveLength(2);
+            readToolCallId(toolResultUpdates[0]?.update as acp.SessionUpdate),
+        ).toBe(secondProtocolId);
     });
 });

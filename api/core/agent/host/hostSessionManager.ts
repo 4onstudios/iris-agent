@@ -177,17 +177,62 @@ const createPreToolUseHook = (
   turnRequest: AgentTurnRequest,
   invocation: { sessionId: string },
 ): NonNullable<AgentTurnRequest["onPreToolUse"]> => {
-  const toOperationKey = (
+  const hasArgumentDetails = (toolArgs: Record<string, unknown> | undefined): boolean =>
+    Object.keys(toolArgs || {}).length > 0;
+  const identifiedSignaturesByTool = new Map<string, Set<string>>();
+  const getIdentifiedToolKey = (toolCallId: string, toolName: string): string =>
+    `${toolCallId}:${toolName}`;
+  const registerIdentifiedSignature = (
+    toolName: string,
+    toolCallId: string,
+    toolArgs: Record<string, unknown> | undefined,
+  ): void => {
+    if (!hasArgumentDetails(toolArgs)) return;
+    const toolKey = getIdentifiedToolKey(toolCallId, toolName);
+    const signatures = identifiedSignaturesByTool.get(toolKey) || new Set<string>();
+    signatures.add(getToolCallSignature(toolName, toolArgs || {}));
+    identifiedSignaturesByTool.set(toolKey, signatures);
+  };
+  const getResolutionKeys = (
     toolName: string,
     toolCallId: string | undefined,
     toolArgs: Record<string, unknown> | undefined,
-  ): string => {
+  ): string[] => {
     const signature = getToolCallSignature(toolName, toolArgs || {});
-    return toolCallId ? `${toolCallId}:${signature}` : `anonymous:${signature}`;
+    if (!toolCallId) {
+      return [`anonymous:${signature}`];
+    }
+
+    const genericKey = `${toolCallId}:generic`;
+    if (hasArgumentDetails(toolArgs)) {
+      registerIdentifiedSignature(toolName, toolCallId, toolArgs);
+      return [`${toolCallId}:${signature}`, genericKey];
+    }
+
+    const signatures = identifiedSignaturesByTool.get(
+      getIdentifiedToolKey(toolCallId, toolName),
+    );
+    if (signatures && signatures.size === 1) {
+      const [onlySignature] = Array.from(signatures);
+      return [`${toolCallId}:${onlySignature}`, genericKey];
+    }
+
+    return [genericKey];
   };
+
+  for (const declared of getDeclaredToolCalls(turnRequest.metadata)) {
+    if (declared.toolCallId) {
+      registerIdentifiedSignature(
+        declared.toolName,
+        declared.toolCallId,
+        declared.toolArgs,
+      );
+    }
+  }
+
   const declaredRemainingByKey = new Map<string, number>();
   for (const declared of getDeclaredToolCalls(turnRequest.metadata)) {
-    const key = toOperationKey(
+    const [key] = getResolutionKeys(
       declared.toolName,
       declared.toolCallId,
       declared.toolArgs,
@@ -222,34 +267,46 @@ const createPreToolUseHook = (
   };
 
   return async ({ toolName, toolCallId, toolArgs }) => {
-    const key = toOperationKey(toolName, toolCallId, toolArgs);
+    const keys = getResolutionKeys(toolName, toolCallId, toolArgs);
+    const primaryKey = keys[0] as string;
 
-    const declaredRemaining = declaredRemainingByKey.get(key) || 0;
-    if (declaredRemaining > 0) {
-      declaredRemainingByKey.set(key, declaredRemaining - 1);
+    const declaredKeyToConsume = keys.find(
+      (key) => (declaredRemainingByKey.get(key) || 0) > 0,
+    );
+    if (declaredKeyToConsume) {
+      const declaredRemaining = declaredRemainingByKey.get(declaredKeyToConsume) || 0;
+      declaredRemainingByKey.set(declaredKeyToConsume, declaredRemaining - 1);
       await invokeHook({ toolName, toolCallId, toolArgs });
       declaredInvocationsByKey.set(
-        key,
-        (declaredInvocationsByKey.get(key) || 0) + 1,
+        declaredKeyToConsume,
+        (declaredInvocationsByKey.get(declaredKeyToConsume) || 0) + 1,
       );
       return;
     }
 
-    const declaredInvocations = declaredInvocationsByKey.get(key) || 0;
-    const reconciledInvocations =
-      reconciledRuntimeInvocationsByKey.get(key) || 0;
-    if (reconciledInvocations < declaredInvocations) {
-      reconciledRuntimeInvocationsByKey.set(key, reconciledInvocations + 1);
+    const keyToReconcile = keys.find((key) => {
+      const declaredInvocations = declaredInvocationsByKey.get(key) || 0;
+      const reconciledInvocations =
+        reconciledRuntimeInvocationsByKey.get(key) || 0;
+      return reconciledInvocations < declaredInvocations;
+    });
+    if (keyToReconcile) {
+      const reconciledInvocations =
+        reconciledRuntimeInvocationsByKey.get(keyToReconcile) || 0;
+      reconciledRuntimeInvocationsByKey.set(
+        keyToReconcile,
+        reconciledInvocations + 1,
+      );
       return;
     }
 
-    if (toolCallId && approvedIdentifiedInvocations.has(key)) {
+    if (toolCallId && approvedIdentifiedInvocations.has(primaryKey)) {
       return;
     }
 
     await invokeHook({ toolName, toolCallId, toolArgs });
     if (toolCallId) {
-      approvedIdentifiedInvocations.add(key);
+      approvedIdentifiedInvocations.add(primaryKey);
     }
   };
 };

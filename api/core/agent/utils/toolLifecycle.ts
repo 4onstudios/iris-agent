@@ -194,8 +194,12 @@ const resolveIdentifiedKey = (
   const candidates = (catalog.get(toolCallId) || []).filter(
     (entry) => entry.name === name && entry.hasArgumentDetails,
   );
-  if (candidates.length === 1) {
-    return `id:${toolCallId}:${candidates[0].signatureKey}`;
+  const candidateSignatures = new Set(
+    candidates.map((entry) => entry.signatureKey),
+  );
+  if (candidateSignatures.size === 1) {
+    const [resolvedSignatureKey] = Array.from(candidateSignatures);
+    return `id:${toolCallId}:${resolvedSignatureKey}`;
   }
 
   return `id:${toolCallId}:${signatureKey}`;
