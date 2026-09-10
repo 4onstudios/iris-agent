@@ -1951,14 +1951,16 @@ router.post(
       });
 
       if (await isCancelled()) {
-        await transitionToCancelled("run_started");
-        return res.status(409).json({
-          success: false,
-          runId: resolvedRunId,
-          lifecycleState,
-          stopReason,
-          error: "Run was cancelled",
-        });
+        if (!stream) {
+          await transitionToCancelled("run_started");
+          return res.status(409).json({
+            success: false,
+            runId: resolvedRunId,
+            lifecycleState,
+            stopReason,
+            error: "Run was cancelled",
+          });
+        }
       }
 
       const modelProfile = getModelExecutionProfile(modelId);
