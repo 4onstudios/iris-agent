@@ -124,6 +124,44 @@ describe("HostSessionManager", () => {
         await manager.stopAll();
     });
 
+    it("generates an id when createSession receives whitespace-only input", async () => {
+        const manager = new HostSessionManager(() => createRuntime(), {
+            workspacePath: "/workspace",
+        });
+
+        const session = await manager.createSession({ sessionId: "   " });
+
+        expect(session.sessionId).not.toBe("");
+        await session.disconnect();
+    });
+
+    it("runs pre-tool hooks for reused ids with different operations", async () => {
+        const onPreToolUse = jest.fn(() => ({ permissionDecision: "allow" as const }));
+        const runtime = createRuntime({
+            runTurn: jest.fn(async (request) => {
+                await request.onPreToolUse?.({
+                    toolName: "readFile",
+                    toolCallId: "reused-id",
+                    toolArgs: { path: "README.md" },
+                });
+                await request.onPreToolUse?.({
+                    toolName: "writeFile",
+                    toolCallId: "reused-id",
+                    toolArgs: { path: "README.md", content: "updated" },
+                });
+                return { text: "done" };
+            }),
+        });
+        const manager = new HostSessionManager(() => runtime, {
+            workspacePath: "/workspace",
+        });
+        const session = await manager.createSession({ hooks: { onPreToolUse } });
+
+        await session.sendAndWait({ prompt: "update README" });
+
+        expect(onPreToolUse).toHaveBeenCalledTimes(2);
+    });
+
     it("preserves runtime-specific stream fields and runs the post-turn hook", async () => {
         const sourceEvents: AgentStreamEvent[] = [
             { type: "text-delta", text: "hello" },
@@ -337,6 +375,30 @@ describe("HostSessionManager", () => {
 
         await firstHandle.cancel();
         expect(cancelTurn).toHaveBeenCalledWith("concurrent-session");
+    });
+
+    it("cleans up a pending session after stopAll returns", async () => {
+        let releaseStart!: () => void;
+        const startGate = new Promise<void>((resolve) => {
+            releaseStart = resolve;
+        });
+        const runtime = createRuntime({
+            startSession: jest.fn(async ({ sessionId }) => {
+                await startGate;
+                return { sessionId, agentId: "test-runtime", createdAt: 1 };
+            }),
+        });
+        const manager = new HostSessionManager(() => runtime, {
+            workspacePath: "/workspace",
+        });
+
+        const opening = manager.createSession({ sessionId: "pending-session" });
+        await manager.stopAll();
+        releaseStart();
+        await opening;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(runtime.endSession).toHaveBeenCalledWith("pending-session");
     });
 
     it("ends and removes a session even when the end hook fails", async () => {

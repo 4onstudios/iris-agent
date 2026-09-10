@@ -7,6 +7,13 @@ import {
 } from "../api/core/agent/utils/toolLifecycle";
 
 describe("normalizeToolLifecycle", () => {
+  it("recognizes camel-case isError results as failures", () => {
+    expect(resolveToolExecutionStatus({ isError: true })).toBe("failed");
+    expect(resolveToolExecutionStatus({ value: { isError: true } })).toBe(
+      "failed",
+    );
+  });
+
   it("keeps only terminal executed result for the same tool call", () => {
     const pending: PendingToolCall[] = [];
     const executed: ExecutedToolResult[] = [

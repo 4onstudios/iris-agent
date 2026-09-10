@@ -205,6 +205,102 @@ describe("ACP server", () => {
         );
     });
 
+    it("reports failed tool results and synthesizes the missing start for orphaned results", async () => {
+        const runtime: AcpRuntimeAgent = {
+            stream: jest.fn(async () => ({
+                fullStream: createChunkStream([
+                    {
+                        type: "tool-result",
+                        payload: {
+                            toolName: "runCommand",
+                            toolCallId: "orphan-status",
+                            result: { status: "failed" },
+                        },
+                    },
+                    {
+                        type: "tool-call",
+                        payload: { toolName: "runCommand", toolCallId: "success-false" },
+                    },
+                    {
+                        type: "tool-result",
+                        payload: {
+                            toolName: "runCommand",
+                            toolCallId: "success-false",
+                            result: { success: false },
+                        },
+                    },
+                    {
+                        type: "tool-call",
+                        payload: { toolName: "runCommand", toolCallId: "is-error" },
+                    },
+                    {
+                        type: "tool-result",
+                        payload: {
+                            toolName: "runCommand",
+                            toolCallId: "is-error",
+                            result: { isError: true },
+                        },
+                    },
+                ]),
+                text: Promise.resolve(""),
+            })),
+        };
+        const updates: acp.SessionNotification[] = [];
+        const client = acp
+            .client({ name: "iris-agent-test-client" })
+            .onNotification(acp.methods.client.session.update, (ctx) => {
+                updates.push(ctx.params);
+            });
+
+        await client.connectWith(createAcpAgentApp(runtime), async (ctx) => {
+            await ctx.request(acp.methods.agent.initialize, {
+                protocolVersion: acp.PROTOCOL_VERSION,
+                clientCapabilities: {},
+            });
+            const session = await ctx.request(acp.methods.agent.session.new, {
+                cwd: "/workspace",
+                mcpServers: [],
+            });
+            await ctx.request(acp.methods.agent.session.prompt, {
+                sessionId: session.sessionId,
+                prompt: [{ type: "text", text: "Run commands" }],
+            });
+        });
+
+        expect(updates.map((entry) => entry.update)).toEqual([
+            expect.objectContaining({
+                sessionUpdate: "tool_call",
+                toolCallId: "orphan-status",
+                status: "in_progress",
+            }),
+            expect.objectContaining({
+                sessionUpdate: "tool_call_update",
+                toolCallId: "orphan-status",
+                status: "failed",
+            }),
+            expect.objectContaining({
+                sessionUpdate: "tool_call",
+                toolCallId: "success-false",
+                status: "in_progress",
+            }),
+            expect.objectContaining({
+                sessionUpdate: "tool_call_update",
+                toolCallId: "success-false",
+                status: "failed",
+            }),
+            expect.objectContaining({
+                sessionUpdate: "tool_call",
+                toolCallId: "is-error",
+                status: "in_progress",
+            }),
+            expect.objectContaining({
+                sessionUpdate: "tool_call_update",
+                toolCallId: "is-error",
+                status: "failed",
+            }),
+        ]);
+    });
+
     it("cancels a fallback turn before it emits the generated response", async () => {
         let resolveGenerate!: (value: { text: string }) => void;
         const generateResult = new Promise<{ text: string }>((resolve) => {

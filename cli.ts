@@ -3,8 +3,8 @@
 /**
  * iris-agent CLI with ACP (Agent Client Protocol) support
  * Usage:
- *   iris-agent --workspace /path/to/workspace --acp
- *   iris-agent --chat --workspace /path/to/workspace
+ *   iris-agent --workspace /path/to/workspace --modelId gpt-4o --acp
+ *   iris-agent --workspace /path/to/workspace --modelId gpt-4o --chat
  */
 
 import yargs from "yargs";
@@ -31,11 +31,17 @@ const argv = yargs(hideBin(process.argv))
     description: "Interactive chat mode",
     default: false,
   })
+  .option("modelId", {
+    type: "string",
+    description: "Language model identifier",
+    default: "gpt-4o",
+  })
   .help()
   .parseSync();
 
 async function main() {
   const workspaceRoot = argv.workspace as string;
+  const modelId = argv.modelId;
 
   if (argv.acp) {
     const stderrLog = console.error.bind(console);
@@ -53,9 +59,10 @@ async function main() {
 
   console.log(`🚀 Iris Agent CLI`);
   console.log(`📁 Workspace: ${workspaceRoot}`);
+  console.log(`🤖 Model: ${modelId}`);
 
   // Create agent instance
-  const agent = await createCodingAgent("gpt-4", workspaceRoot);
+  const agent = await createCodingAgent(modelId, workspaceRoot);
 
   if (argv.acp) {
     console.log("🔗 Starting ACP server over stdio...");

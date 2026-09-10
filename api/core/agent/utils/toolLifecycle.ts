@@ -66,11 +66,13 @@ export const resolveToolExecutionStatus = (
   const direct = result as {
     status?: unknown;
     success?: unknown;
+    isError?: unknown;
     is_error?: unknown;
     error?: unknown;
     value?: {
       status?: unknown;
       success?: unknown;
+      isError?: unknown;
       is_error?: unknown;
       error?: unknown;
     };
@@ -99,7 +101,11 @@ export const resolveToolExecutionStatus = (
   if (rawStatus && ["failed", "error", "rejected"].includes(rawStatus))
     return "failed";
 
-  const hasErrorFlag = direct.is_error === true || nested?.is_error === true;
+  const hasErrorFlag =
+    direct.isError === true ||
+    direct.is_error === true ||
+    nested?.isError === true ||
+    nested?.is_error === true;
   const hasErrorMessage = Boolean(direct.error || nested?.error);
 
   if (hasErrorFlag || hasErrorMessage) return "failed";

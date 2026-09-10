@@ -1080,7 +1080,6 @@ const createGeneratedAgentRuntimeAdapter = (
         },
       }),
     );
-    void hostEventSource.cancel().catch(() => undefined);
     const transportStreamResult: NativeAgentStreamResult = {
       ...rawStreamResult,
       fullStream: transportSource,
@@ -2808,6 +2807,9 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                 | undefined;
 
               if (rawFromSession) {
+                void hostStreamResult.stream.cancel().catch((error: unknown) => {
+                  console.error("Failed to cancel host stream adapter:", error);
+                });
                 return rawFromSession;
               }
 

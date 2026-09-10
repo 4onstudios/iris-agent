@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import path from "path";
+import { resolveToolExecutionStatus } from "../core/agent/utils/toolLifecycle";
 
 type AgentStreamChunk = {
   type?: string;
@@ -244,14 +245,15 @@ export const createAcpAgentApp = (
               const suppliedToolCallId = value.payload?.toolCallId;
               const pending = pendingToolCallIds.get(toolName);
               const hadPendingCall = Boolean(pending?.length);
+              const hasMatchingCall =
+                typeof suppliedToolCallId === "string"
+                  ? pending?.includes(suppliedToolCallId) === true
+                  : hadPendingCall;
               const toolCallId = getToolCallId(
                 toolName,
                 suppliedToolCallId,
                 true,
               );
-              const hasMatchingCall =
-                typeof suppliedToolCallId === "string" ||
-                hadPendingCall;
               if (!hasMatchingCall) {
                 await ctx.client.notify(acp.methods.client.session.update, {
                   sessionId: ctx.params.sessionId,
@@ -275,7 +277,10 @@ export const createAcpAgentApp = (
                 update: {
                   sessionUpdate: "tool_call_update",
                   toolCallId,
-                  status: "completed",
+                  status:
+                    resolveToolExecutionStatus(output) === "failed"
+                      ? "failed"
+                      : "completed",
                   rawOutput: output,
                   content: [
                     {

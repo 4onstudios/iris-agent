@@ -320,9 +320,11 @@ const { client } = await IrisClient.spawn({
 ```
 
 One `IrisClient` owns one active ACP session. Call `openSession()` before
-`prompt()`, use `cancel()` to stop the active turn, call `closeSession()` when
-switching workspaces, and call `close()` during IDE shutdown. `close()` also
-terminates a process created by `spawn()` and is safe to call repeatedly.
+`prompt()`, use `cancel()` to stop the active turn, and call `closeSession()`
+to end a session in the current workspace. An ACP process is bound to its
+startup workspace: to switch workspaces, call `close()` and use `spawn()` to
+create a new client for the new workspace. `close()` also terminates a process
+created by `spawn()` and is safe to call repeatedly.
 
 `IrisClient.connect()` accepts an existing ACP stream or in-process ACP agent
 when the IDE manages the process or transport itself. Use this for IDEs that
@@ -351,8 +353,9 @@ events and commands your IDE UI needs.
 - An initialization failure usually means the subprocess exited early, the
   provider key is missing, or stdout contains non-ACP output. Inspect stderr
   and verify the provider environment passed through `env`.
-- A prompt requires an open session. Call `openSession()` once per workspace,
-  then call `closeSession()` before switching workspaces.
+- A prompt requires an open session. Call `openSession()` once per workspace.
+  To switch workspaces, call `close()` to terminate the current ACP process,
+  then use `spawn()` to create a client bound to the new workspace.
 - `IrisClient` requires a Node.js desktop/backend process. Browser-only IDE
   clients should call their backend over HTTPS/WebSocket/IPC instead of
   spawning the agent in the renderer.

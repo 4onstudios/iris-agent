@@ -8,6 +8,7 @@ import type {
   AgentTurnResult,
   AgentTurnStreamResult,
 } from "./AgentContract";
+import { getToolCallSignature } from "../utils/toolLifecycle";
 
 export type HostPermissionRequestKind =
   | "shell"
@@ -178,7 +179,8 @@ const createPreToolUseHook = (
 ): NonNullable<AgentTurnRequest["onPreToolUse"]> => {
   const invoked = new Set<string>();
   return async ({ toolName, toolCallId, toolArgs }) => {
-    const key = toolCallId || `${toolName}:${JSON.stringify(toolArgs || {})}`;
+    const signature = getToolCallSignature(toolName, toolArgs || {});
+    const key = toolCallId ? `${toolCallId}:${signature}` : signature;
     if (invoked.has(key)) return;
     const result = await Promise.resolve(
       hooks?.onPreToolUse?.(
@@ -231,6 +233,7 @@ export class HostSessionManager<TRuntime extends AgentRuntime> {
   private readonly baseContext: Omit<AgentSessionContext, "sessionId">;
   private readonly sessions = new Map<string, ManagedSession<TRuntime>>();
   private readonly pendingSessions = new Map<string, Promise<HostSessionHandle>>();
+  private stopping = false;
 
   constructor(
     runtimeFactory: AgentRuntimeFactory<TRuntime>,
@@ -241,7 +244,7 @@ export class HostSessionManager<TRuntime extends AgentRuntime> {
   }
 
   async createSession(config: HostSessionConfig = {}): Promise<HostSessionHandle> {
-    const sessionId = (config.sessionId || randomUUID()).trim();
+    const sessionId = config.sessionId?.trim() || randomUUID();
     return this.openSession(sessionId, config);
   }
 
@@ -265,6 +268,10 @@ export class HostSessionManager<TRuntime extends AgentRuntime> {
     sessionId: string,
     config: HostSessionConfig,
   ): Promise<HostSessionHandle> {
+    if (this.stopping) {
+      throw new Error("Host session manager is stopping");
+    }
+
     if (this.sessions.has(sessionId)) {
       return this.toHandle(sessionId);
     }
@@ -446,6 +453,18 @@ export class HostSessionManager<TRuntime extends AgentRuntime> {
   }
 
   async stopAll(): Promise<void> {
+    this.stopping = true;
+    for (const [sessionId, pending] of this.pendingSessions) {
+      void pending
+        .then(() => this.disconnectSession(sessionId))
+        .catch((error: unknown) => {
+          console.error(
+            `Failed to clean up host session '${sessionId}' during shutdown:`,
+            error,
+          );
+        });
+    }
+
     const sessionIds = Array.from(this.sessions.keys());
     const results = await Promise.allSettled(
       sessionIds.map((sessionId) => this.disconnectSession(sessionId)),
