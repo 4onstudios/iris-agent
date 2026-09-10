@@ -121,7 +121,9 @@ OPENAI_API_KEY=... npm run cli -- --workspace /path/to/project --acp
 This starts an ACP (Agent Client Protocol) server over stdio, allowing IDE
 integrations and other ACP clients to communicate with the agent. Standard
 output is reserved for newline-delimited JSON-RPC messages; logs are written to
-standard error.
+standard error. Each ACP process is bound to the workspace supplied at startup.
+To switch workspaces, close the process and respawn `iris-agent` with the new
+`--workspace` path.
 
 ## CLI Usage
 
@@ -248,6 +250,9 @@ The stdio server implements the standard ACP v1 lifecycle:
 The server currently advertises text and resource-link prompts plus session
 close support. It does not advertise session persistence or unsupported media
 capabilities.
+
+Each ACP session must use the workspace supplied when starting the process.
+Close and respawn the CLI to use another workspace.
 
 ### IrisClient SDK
 

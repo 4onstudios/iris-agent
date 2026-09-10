@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
+import path from "path";
 
 type AgentStreamChunk = {
   type?: string;
@@ -42,6 +43,26 @@ type AcpSessionState = {
   activeTurn?: ActiveTurn;
 };
 
+export function assertAcpWorkspace(
+  params: { workspaceRoot?: unknown; cwd?: unknown } | null | undefined,
+  boundWorkspaceRoot: string,
+): void {
+  const requestedWorkspace =
+    typeof params?.workspaceRoot === "string"
+      ? params.workspaceRoot
+      : typeof params?.cwd === "string"
+        ? params.cwd
+        : undefined;
+  if (
+    requestedWorkspace &&
+    path.resolve(requestedWorkspace) !== path.resolve(boundWorkspaceRoot)
+  ) {
+    throw new Error(
+      `This ACP process is bound to '${path.resolve(boundWorkspaceRoot)}'. Close it and respawn iris-agent with --workspace '${path.resolve(requestedWorkspace)}' to switch workspaces.`,
+    );
+  }
+}
+
 const toPromptText = (prompt: acp.ContentBlock[]): string =>
   prompt
     .map((block) => {
@@ -79,7 +100,13 @@ const extractText = (value: unknown): string => {
   return value === undefined ? "" : JSON.stringify(value);
 };
 
-export const createAcpAgentApp = (runtimeAgent: AcpRuntimeAgent): acp.AgentApp => {
+export const createAcpAgentApp = (
+  runtimeAgent: AcpRuntimeAgent,
+  workspaceRoot?: string,
+): acp.AgentApp => {
+  const boundWorkspaceRoot = workspaceRoot
+    ? path.resolve(workspaceRoot)
+    : undefined;
   const sessions = new Map<string, AcpSessionState>();
 
   const cancelSessionTurn = async (sessionId: string): Promise<void> => {
@@ -103,8 +130,11 @@ export const createAcpAgentApp = (runtimeAgent: AcpRuntimeAgent): acp.AgentApp =
       },
     }))
     .onRequest(acp.methods.agent.session.new, async (ctx) => {
+      if (boundWorkspaceRoot) {
+        assertAcpWorkspace({ cwd: ctx.params.cwd }, boundWorkspaceRoot);
+      }
       const sessionId = randomUUID();
-      sessions.set(sessionId, { cwd: ctx.params.cwd });
+      sessions.set(sessionId, { cwd: boundWorkspaceRoot || ctx.params.cwd });
       return { sessionId };
     })
     .onRequest(acp.methods.agent.session.prompt, async (ctx) => {
@@ -318,10 +348,13 @@ export const createAcpAgentApp = (runtimeAgent: AcpRuntimeAgent): acp.AgentApp =
     });
 };
 
-export async function startAcpServer(runtimeAgent: AcpRuntimeAgent): Promise<void> {
+export async function startAcpServer(
+  runtimeAgent: AcpRuntimeAgent,
+  workspaceRoot?: string,
+): Promise<void> {
   const output = Writable.toWeb(process.stdout) as WritableStream<Uint8Array>;
   const input = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
-  const connection = createAcpAgentApp(runtimeAgent).connect(
+  const connection = createAcpAgentApp(runtimeAgent, workspaceRoot).connect(
     acp.ndJsonStream(output, input),
   );
 

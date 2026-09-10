@@ -59,7 +59,7 @@ async function main() {
 
   if (argv.acp) {
     console.log("🔗 Starting ACP server over stdio...");
-    await startAcpServer(agent);
+    await startAcpServer(agent, workspaceRoot);
   } else if (argv.chat) {
     // Interactive chat mode
     console.log(`💬 Entering chat mode (type "exit" to quit)`);

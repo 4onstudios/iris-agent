@@ -1486,6 +1486,7 @@ export const createCodingAgent = async (
 
     model: getModel(modelId),
     workspace,
+    hooks: options.hooks,
     tools: enforceToolCallBudgetForTools(runtimeTools as any),
 
     // Add memory for conversation context with token-aware budgeting.

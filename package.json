@@ -9,11 +9,6 @@
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": [
-    "dist",
-    "README.md",
-    "LICENSE"
-  ],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -33,7 +28,7 @@
     "cli": "tsx cli.ts",
     "cli:dev": "tsx watch cli.ts",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "build": "npm run clean && tsc -p tsconfig.build.json && node scripts/copy-skill-assets.mjs",
     "test": "jest --config jest.config.cjs",
     "typecheck": "tsc --noEmit"
   },
