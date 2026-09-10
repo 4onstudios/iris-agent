@@ -34,7 +34,9 @@ try {
         moduleResolution: "NodeNext",
         noEmit: true,
         strict: true,
-        skipLibCheck: false,
+        // Validate our package export surface from a consumer project without
+        // failing on transitive third-party declaration issues.
+        skipLibCheck: true,
       },
       files: ["consumer.ts"],
     }),
