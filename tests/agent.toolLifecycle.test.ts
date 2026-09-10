@@ -344,6 +344,13 @@ describe("normalizeToolLifecycle", () => {
     const normalized = normalizeToolLifecycle(pending, executed);
 
     expect(normalized.pendingToolCalls).toEqual([]);
+    expect(normalized.executedToolResults).toEqual([
+      expect.objectContaining({
+        name: "readFile",
+        args: { filePath: "src/index.ts" },
+        toolCallId: "shared-id",
+      }),
+    ]);
     expect(countUniqueToolCalls(pending, executed)).toBe(1);
   });
 
@@ -373,6 +380,13 @@ describe("normalizeToolLifecycle", () => {
     const normalized = normalizeToolLifecycle(pending, executed);
 
     expect(normalized.pendingToolCalls).toEqual([]);
+    expect(normalized.executedToolResults).toEqual([
+      expect.objectContaining({
+        name: "readFile",
+        args: { filePath: "src/index.ts" },
+        toolCallId: "shared-id",
+      }),
+    ]);
     expect(countUniqueToolCalls(pending, executed)).toBe(1);
   });
 

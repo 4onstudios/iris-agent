@@ -143,10 +143,13 @@ export class IrisClient {
     async closeSession(): Promise<void> {
         this.assertOpen();
         if (!this.activeSession) return;
-        const sessionId = this.activeSession.sessionId;
-        this.activeSession.dispose();
-        this.activeSession = undefined;
+        const activeSession = this.activeSession;
+        const sessionId = activeSession.sessionId;
         await this.context.request(acp.methods.agent.session.close, { sessionId });
+        activeSession.dispose();
+        if (this.activeSession === activeSession) {
+            this.activeSession = undefined;
+        }
     }
 
     async close(): Promise<void> {

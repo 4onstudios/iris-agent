@@ -408,6 +408,56 @@ describe("ACP server", () => {
         expect(updates).toHaveLength(0);
     });
 
+    it("cancels a fallback turn even when generation never resolves", async () => {
+        const runtime: AcpRuntimeAgent = {
+            generate: jest.fn(async (_input, options) => {
+                expect(options?.signal).toBeInstanceOf(AbortSignal);
+                return new Promise<{ text: string }>(() => undefined);
+            }),
+        };
+        const client = acp.client({ name: "iris-agent-test-client" });
+
+        await client.connectWith(createAcpAgentApp(runtime), async (ctx) => {
+            await ctx.request(acp.methods.agent.initialize, {
+                protocolVersion: acp.PROTOCOL_VERSION,
+                clientCapabilities: {},
+            });
+            const session = await ctx.request(acp.methods.agent.session.new, {
+                cwd: "/workspace",
+                mcpServers: [],
+            });
+            const prompt = ctx.request(acp.methods.agent.session.prompt, {
+                sessionId: session.sessionId,
+                prompt: [{ type: "text", text: "Wait forever" }],
+            });
+            await ctx.notify(acp.methods.agent.session.cancel, {
+                sessionId: session.sessionId,
+            });
+
+            const promptWithTimeout = new Promise<acp.PromptResponse>(
+                (resolve, reject) => {
+                    const timer = setTimeout(
+                        () => reject(new Error("Prompt did not cancel in time")),
+                        200,
+                    );
+                    prompt.then(
+                        (value) => {
+                            clearTimeout(timer);
+                            resolve(value);
+                        },
+                        (error) => {
+                            clearTimeout(timer);
+                            reject(error);
+                        },
+                    );
+                },
+            );
+            await expect(promptWithTimeout).resolves.toEqual({
+                stopReason: "cancelled",
+            });
+        });
+    });
+
     it("passes cancellation to stream startup", async () => {
         let resolveStream!: (value: {
             fullStream: ReadableStream<never>;
@@ -498,6 +548,61 @@ describe("ACP server", () => {
         });
 
         expect(updates).toHaveLength(0);
+    });
+
+    it("cancels after stream completion even when final text never resolves", async () => {
+        const runtime: AcpRuntimeAgent = {
+            stream: jest.fn(async () => ({
+                fullStream: new ReadableStream({
+                    start(controller) {
+                        controller.close();
+                    },
+                }),
+                text: new Promise<string>(() => undefined),
+            })),
+        };
+        const client = acp.client({ name: "iris-agent-test-client" });
+
+        await client.connectWith(createAcpAgentApp(runtime), async (ctx) => {
+            await ctx.request(acp.methods.agent.initialize, {
+                protocolVersion: acp.PROTOCOL_VERSION,
+                clientCapabilities: {},
+            });
+            const session = await ctx.request(acp.methods.agent.session.new, {
+                cwd: "/workspace",
+                mcpServers: [],
+            });
+            const prompt = ctx.request(acp.methods.agent.session.prompt, {
+                sessionId: session.sessionId,
+                prompt: [{ type: "text", text: "Wait for final text" }],
+            });
+            await Promise.resolve();
+            await ctx.notify(acp.methods.agent.session.cancel, {
+                sessionId: session.sessionId,
+            });
+
+            const promptWithTimeout = new Promise<acp.PromptResponse>(
+                (resolve, reject) => {
+                    const timer = setTimeout(
+                        () => reject(new Error("Prompt did not cancel in time")),
+                        200,
+                    );
+                    prompt.then(
+                        (value) => {
+                            clearTimeout(timer);
+                            resolve(value);
+                        },
+                        (error) => {
+                            clearTimeout(timer);
+                            reject(error);
+                        },
+                    );
+                },
+            );
+            await expect(promptWithTimeout).resolves.toEqual({
+                stopReason: "cancelled",
+            });
+        });
     });
 
     it("allocates a unique protocol id when a runtime call id is reused for a different signature", async () => {

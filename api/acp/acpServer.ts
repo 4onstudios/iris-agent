@@ -157,13 +157,37 @@ export const createAcpAgentApp = (
       const activeTurn: ActiveTurn = { abortController: new AbortController() };
       session.activeTurn = activeTurn;
       const promptText = toPromptText(ctx.params.prompt);
+      const turnSignal = activeTurn.abortController.signal;
+      const abortedMarker = Symbol("aborted");
+      const raceWithAbort = async <T>(work: Promise<T>): Promise<T> => {
+        if (turnSignal.aborted) {
+          throw new Error("ACP session turn cancelled");
+        }
+
+        const abortWait = new Promise<T | typeof abortedMarker>((resolve) => {
+          const onAbort = () => resolve(abortedMarker);
+          turnSignal.addEventListener("abort", onAbort, { once: true });
+          work.finally(() => turnSignal.removeEventListener("abort", onAbort));
+        });
+
+        const result = await Promise.race<T | typeof abortedMarker>([
+          work,
+          abortWait,
+        ]);
+        if (result === abortedMarker) {
+          throw new Error("ACP session turn cancelled");
+        }
+        return result;
+      };
 
       try {
         if (runtimeAgent.stream) {
-          const streamResult = (await runtimeAgent.stream(promptText, {
-            workspaceRoot: session.cwd,
-            signal: activeTurn.abortController.signal,
-          })) as AgentStreamResult;
+          const streamResult = await raceWithAbort(
+            runtimeAgent.stream(promptText, {
+              workspaceRoot: session.cwd,
+              signal: turnSignal,
+            }) as Promise<AgentStreamResult>,
+          );
           const reader = streamResult.fullStream.getReader();
           activeTurn.cancelStream = async () => reader.cancel();
           const pendingToolInvocations = new Map<
@@ -523,7 +547,7 @@ export const createAcpAgentApp = (
           }
           pendingToolInvocations.clear();
 
-          const finalText = await streamResult.text;
+          const finalText = await raceWithAbort(streamResult.text);
           if (activeTurn.abortController.signal.aborted) {
             return { stopReason: "cancelled" as const };
           }
@@ -542,15 +566,19 @@ export const createAcpAgentApp = (
           return { stopReason: "end_turn" as const };
         }
 
-        const generated = runtimeAgent.generate
-          ? await runtimeAgent.generate(promptText, {
-            workspaceRoot: session.cwd,
-            signal: activeTurn.abortController.signal,
-          })
-          : await runtimeAgent.chat?.({
-            messages: [{ role: "user", content: promptText }],
-            signal: activeTurn.abortController.signal,
-          });
+        const generated = await raceWithAbort(
+          runtimeAgent.generate
+            ? runtimeAgent.generate(promptText, {
+              workspaceRoot: session.cwd,
+              signal: turnSignal,
+            })
+            : runtimeAgent.chat
+              ? runtimeAgent.chat({
+                messages: [{ role: "user", content: promptText }],
+                signal: turnSignal,
+              })
+              : Promise.resolve(undefined),
+        );
         if (activeTurn.abortController.signal.aborted) {
           return { stopReason: "cancelled" as const };
         }

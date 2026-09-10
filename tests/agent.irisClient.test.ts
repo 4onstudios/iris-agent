@@ -52,6 +52,41 @@ describe("IrisClient", () => {
         await client.close();
     });
 
+    it("retains the active session when closeSession fails and allows retry", async () => {
+        let closeAttempts = 0;
+        const agent = acp
+            .agent({ name: "close-retry-agent" })
+            .onRequest(acp.methods.agent.initialize, async () => ({
+                protocolVersion: acp.PROTOCOL_VERSION,
+                agentCapabilities: { sessionCapabilities: { close: {} } },
+            }))
+            .onRequest(acp.methods.agent.session.new, async () => ({
+                sessionId: "session-close-retry",
+            }))
+            .onRequest(acp.methods.agent.session.prompt, async () => ({
+                stopReason: "end_turn" as const,
+            }))
+            .onRequest(acp.methods.agent.session.close, async () => {
+                closeAttempts += 1;
+                if (closeAttempts === 1) {
+                    throw new Error("temporary close failure");
+                }
+                return {};
+            });
+        const client = await IrisClient.connect(agent);
+        await client.openSession("/workspace");
+
+        await expect(client.closeSession()).rejects.toThrow();
+        await expect(client.prompt("Still open")).resolves.toEqual({
+            stopReason: "end_turn",
+        });
+        await expect(client.closeSession()).resolves.toBeUndefined();
+        await expect(client.prompt("After close")).rejects.toThrow(
+            "Open an ACP session before prompting",
+        );
+        await client.close();
+    });
+
     it("cancels an active prompt and can be closed repeatedly", async () => {
         let markStreamStarted: () => void = () => undefined;
         const streamStarted = new Promise<void>((resolve) => {

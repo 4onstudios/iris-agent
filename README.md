@@ -136,6 +136,7 @@ iris-agent --workspace <path> [--acp | --chat]
 - `--workspace` (required) - Path to the workspace/project root
 - `--acp` - Start ACP protocol server (stdio-based)
 - `--chat` - Start interactive chat mode
+- `--modelId` - Model identifier used for chat/ACP sessions (default: `gpt-4o`)
 
 Short aliases are also available: `-w`, `-a`, and `-c`. Running the CLI
 without `--chat` or `--acp` prints help.

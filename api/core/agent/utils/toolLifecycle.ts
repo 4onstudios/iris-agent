@@ -152,6 +152,7 @@ export const getToolCallSignature = (name: string, args: ToolArgs): string =>
 type ToolInvocationIdentity = {
   toolCallId: string;
   name: string;
+  args: ToolArgs;
   signatureKey: string;
   hasArgumentDetails: boolean;
 };
@@ -172,12 +173,33 @@ const buildToolInvocationCatalog = (
     existing.push({
       toolCallId: entry.toolCallId,
       name: entry.name,
+      args: entry.args || {},
       signatureKey,
       hasArgumentDetails: hasArgumentDetails(entry.args || {}),
     });
     catalog.set(entry.toolCallId, existing);
   }
   return catalog;
+};
+
+const resolveUniqueDetailedInvocation = (
+  name: string,
+  toolCallId: string,
+  catalog?: ToolInvocationCatalog,
+): ToolInvocationIdentity | undefined => {
+  if (!catalog) return undefined;
+
+  const candidates = (catalog.get(toolCallId) || []).filter(
+    (entry) => entry.name === name && entry.hasArgumentDetails,
+  );
+  const candidateSignatures = new Set(
+    candidates.map((entry) => entry.signatureKey),
+  );
+  if (candidateSignatures.size !== 1) {
+    return undefined;
+  }
+
+  return candidates[0];
 };
 
 const resolveIdentifiedKey = (
@@ -191,18 +213,34 @@ const resolveIdentifiedKey = (
     return `id:${toolCallId}:${signatureKey}`;
   }
 
-  const candidates = (catalog.get(toolCallId) || []).filter(
-    (entry) => entry.name === name && entry.hasArgumentDetails,
+  const resolvedInvocation = resolveUniqueDetailedInvocation(
+    name,
+    toolCallId,
+    catalog,
   );
-  const candidateSignatures = new Set(
-    candidates.map((entry) => entry.signatureKey),
-  );
-  if (candidateSignatures.size === 1) {
-    const [resolvedSignatureKey] = Array.from(candidateSignatures);
-    return `id:${toolCallId}:${resolvedSignatureKey}`;
+  if (resolvedInvocation) {
+    return `id:${toolCallId}:${resolvedInvocation.signatureKey}`;
   }
 
   return `id:${toolCallId}:${signatureKey}`;
+};
+
+const resolveIdentifiedArgs = (
+  name: string,
+  args: ToolArgs,
+  toolCallId: string | undefined,
+  catalog?: ToolInvocationCatalog,
+): ToolArgs => {
+  if (!toolCallId || hasArgumentDetails(args || {})) {
+    return args || {};
+  }
+
+  const resolvedInvocation = resolveUniqueDetailedInvocation(
+    name,
+    toolCallId,
+    catalog,
+  );
+  return resolvedInvocation?.args || (args || {});
 };
 
 const extractSignatureFromIdentifiedKey = (key: string): string => {
@@ -355,7 +393,20 @@ export const normalizeToolLifecycle = (
   }
 
   for (const item of executedToolResults) {
-    const signatureKey = buildSignatureKey(item.name, item.args || {});
+    const resolvedArgs = resolveIdentifiedArgs(
+      item.name,
+      item.args || {},
+      item.toolCallId,
+      identifiedCatalog,
+    );
+    const normalizedItem =
+      resolvedArgs === (item.args || {})
+        ? item
+        : { ...item, args: resolvedArgs };
+    const signatureKey = buildSignatureKey(
+      normalizedItem.name,
+      normalizedItem.args || {},
+    );
     const anonymousKeys =
       anonymousResultKeysBySignature.get(signatureKey) || [];
     const pendingCount = pendingSignatureCounts.get(signatureKey) || 0;
@@ -373,7 +424,8 @@ export const normalizeToolLifecycle = (
     const transitionKey = anonymousKeys.find((candidateKey) => {
       const previous = executedByKey.get(candidateKey);
       return (
-        previous && getResultRank(item.result) > getResultRank(previous.result)
+        previous &&
+        getResultRank(normalizedItem.result) > getResultRank(previous.result)
       );
     });
     const sameResultKey = hasEstablishedCardinality
@@ -381,8 +433,9 @@ export const normalizeToolLifecycle = (
           const previous = executedByKey.get(candidateKey);
           return (
             previous &&
-            canReuseSameResultKey(item, previous) &&
-            stableStringify(previous.result) === stableStringify(item.result)
+            canReuseSameResultKey(normalizedItem, previous) &&
+            stableStringify(previous.result) ===
+              stableStringify(normalizedItem.result)
           );
         })
       : undefined;
@@ -392,7 +445,7 @@ export const normalizeToolLifecycle = (
           return (
             previous &&
             resolveToolExecutionStatus(previous.result) === "in_progress" &&
-            resolveToolExecutionStatus(item.result) === "in_progress"
+            resolveToolExecutionStatus(normalizedItem.result) === "in_progress"
           );
         })
       : undefined;
@@ -401,18 +454,19 @@ export const normalizeToolLifecycle = (
           const previous = executedByKey.get(candidateKey);
           return (
             previous &&
-            hasSameLifecycleStep(item, previous) &&
+            hasSameLifecycleStep(normalizedItem, previous) &&
             isTerminalResult(previous.result) &&
-            isTerminalResult(item.result) &&
-            getResultRank(item.result) === getResultRank(previous.result)
+            isTerminalResult(normalizedItem.result) &&
+            getResultRank(normalizedItem.result) ===
+              getResultRank(previous.result)
           );
         })
       : undefined;
-    const key = item.toolCallId
+    const key = normalizedItem.toolCallId
       ? buildDedupKey(
-          item.name,
-          item.args || {},
-          item.toolCallId,
+          normalizedItem.name,
+          normalizedItem.args || {},
+          normalizedItem.toolCallId,
           identifiedCatalog,
         )
       : transitionKey ||
@@ -423,8 +477,8 @@ export const normalizeToolLifecycle = (
     const previous = executedByKey.get(key);
 
     if (!previous) {
-      executedByKey.set(key, item);
-      if (!item.toolCallId) {
+      executedByKey.set(key, normalizedItem);
+      if (!normalizedItem.toolCallId) {
         const keys = anonymousResultKeysBySignature.get(signatureKey) || [];
         keys.push(key);
         anonymousResultKeysBySignature.set(signatureKey, keys);
@@ -433,10 +487,10 @@ export const normalizeToolLifecycle = (
     }
 
     const prevRank = getResultRank(previous.result);
-    const nextRank = getResultRank(item.result);
+    const nextRank = getResultRank(normalizedItem.result);
     const isInProgressUpdate =
       resolveToolExecutionStatus(previous.result) === "in_progress" &&
-      resolveToolExecutionStatus(item.result) === "in_progress";
+      resolveToolExecutionStatus(normalizedItem.result) === "in_progress";
 
     // Once two results share this key, they are already confirmed to be the
     // same invocation (via toolCallId, or via transitionKey/sameResultKey/
@@ -444,7 +498,7 @@ export const normalizeToolLifecycle = (
     // equal-rank update should always replace the prior snapshot with the
     // latest one, even when the payloads differ (e.g. failed -> completed).
     if (nextRank >= prevRank || isInProgressUpdate) {
-      executedByKey.set(key, item);
+      executedByKey.set(key, normalizedItem);
     }
   }
 
