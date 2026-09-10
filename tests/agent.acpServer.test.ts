@@ -588,4 +588,82 @@ describe("ACP server", () => {
             expect.objectContaining({ status: "failed" }),
         );
     });
+
+    it("allocates unique protocol ids when different tools reuse a runtime id", async () => {
+        const runtime: AcpRuntimeAgent = {
+            stream: jest.fn(async () => ({
+                fullStream: createChunkStream([
+                    {
+                        type: "tool-call",
+                        payload: {
+                            toolName: "readFile",
+                            toolCallId: "reused",
+                            args: { path: "README.md" },
+                        },
+                    },
+                    {
+                        type: "tool-call",
+                        payload: {
+                            toolName: "runCommand",
+                            toolCallId: "reused",
+                            args: { command: "npm test" },
+                        },
+                    },
+                    {
+                        type: "tool-result",
+                        payload: {
+                            toolName: "readFile",
+                            toolCallId: "reused",
+                            result: { content: "readme" },
+                        },
+                    },
+                    {
+                        type: "tool-result",
+                        payload: {
+                            toolName: "runCommand",
+                            toolCallId: "reused",
+                            result: { exitCode: 0 },
+                        },
+                    },
+                ]),
+                text: Promise.resolve(""),
+            })),
+        };
+        const updates: acp.SessionNotification[] = [];
+        const client = acp
+            .client({ name: "iris-agent-test-client" })
+            .onNotification(acp.methods.client.session.update, (ctx) => {
+                updates.push(ctx.params);
+            });
+
+        await client.connectWith(createAcpAgentApp(runtime), async (ctx) => {
+            await ctx.request(acp.methods.agent.initialize, {
+                protocolVersion: acp.PROTOCOL_VERSION,
+                clientCapabilities: {},
+            });
+            const session = await ctx.request(acp.methods.agent.session.new, {
+                cwd: "/workspace",
+                mcpServers: [],
+            });
+            await ctx.request(acp.methods.agent.session.prompt, {
+                sessionId: session.sessionId,
+                prompt: [{ type: "text", text: "Read then test" }],
+            });
+        });
+
+        const starts = updates
+            .map((entry) => entry.update)
+            .filter((update) => update.sessionUpdate === "tool_call");
+        const finishes = updates
+            .map((entry) => entry.update)
+            .filter((update) => update.sessionUpdate === "tool_call_update");
+        const firstId = readToolCallId(starts[0] as acp.SessionUpdate);
+        const secondId = readToolCallId(starts[1] as acp.SessionUpdate);
+
+        expect(firstId).toBe("reused");
+        expect(secondId).toBeDefined();
+        expect(secondId).not.toBe(firstId);
+        expect(readToolCallId(finishes[0] as acp.SessionUpdate)).toBe(firstId);
+        expect(readToolCallId(finishes[1] as acp.SessionUpdate)).toBe(secondId);
+    });
 });

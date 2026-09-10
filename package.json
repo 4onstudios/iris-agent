@@ -43,6 +43,7 @@
     "build": "npm run clean && tsc -p tsconfig.build.json && node scripts/fix-esm-import-specifiers.mjs && node scripts/copy-skill-assets.mjs",
     "prepare": "npm run build",
     "test": "jest --config jest.config.cjs",
+    "test:package-consumer": "npm run build && node scripts/test-package-consumer.mjs",
     "typecheck": "tsc --noEmit"
   },
   "files": [

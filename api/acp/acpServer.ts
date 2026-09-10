@@ -242,7 +242,8 @@ export const createAcpAgentApp = (
             runtimeSignaturesByToolCall.set(runtimeCallKey, signatures);
 
             const protocolToolCallId =
-              signatures.size > 0 && !signatures.has(signature)
+              usedProtocolToolCallIds.has(runtimeToolCallId) ||
+              (signatures.size > 0 && !signatures.has(signature))
                 ? allocateGeneratedToolCallId(toolName)
                 : runtimeToolCallId;
 

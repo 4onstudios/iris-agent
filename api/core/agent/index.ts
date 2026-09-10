@@ -13,50 +13,15 @@ import fs from "fs/promises";
 import path from "path";
 import os from "os";
 import { exec } from "child_process";
+import { fileURLToPath } from "url";
 import { promisify } from "util";
-
-const findPackageRoot = (startPath: string): string | undefined => {
-  let current = path.resolve(startPath);
-  while (true) {
-    const packageJsonPath = path.join(current, "package.json");
-    if (fsNative.existsSync(packageJsonPath)) {
-      try {
-        const packageJson = JSON.parse(
-          fsNative.readFileSync(packageJsonPath, "utf8"),
-        ) as { name?: unknown };
-        if (packageJson.name === "@4onstudios/iris-agent") {
-          return current;
-        }
-      } catch {
-        // Keep walking in case this package.json belongs to a parent project.
-      }
-    }
-
-    const parent = path.dirname(current);
-    if (parent === current) return undefined;
-    current = parent;
-  }
-};
 
 export const getSkillsDir = (): string => {
   if (typeof __dirname === "string") {
     return path.resolve(__dirname, "..", "skills");
   }
 
-  const entryFile = process.argv[1]
-    ? fsNative.realpathSync(path.resolve(process.argv[1]))
-    : process.cwd();
-  const entryPath = path.dirname(entryFile);
-  const packageRoot =
-    findPackageRoot(entryPath) || findPackageRoot(process.cwd());
-  if (!packageRoot) {
-    throw new Error("Unable to locate the @4onstudios/iris-agent package root");
-  }
-
-  const sourceSkillsDir = path.join(packageRoot, "api", "core", "skills");
-  return fsNative.existsSync(sourceSkillsDir)
-    ? sourceSkillsDir
-    : path.join(packageRoot, "dist", "api", "core", "skills");
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "skills");
 };
 import { LibSQLStore, LibSQLVector } from "@mastra/libsql";
 import { Memory } from "@mastra/memory";

@@ -52,7 +52,10 @@ const walk = async (dirPath) => {
       files.push(...(await walk(absolutePath)));
       continue;
     }
-    if (entry.isFile() && JS_EXTENSIONS.has(path.extname(entry.name))) {
+    if (
+      entry.isFile() &&
+      (JS_EXTENSIONS.has(path.extname(entry.name)) || entry.name.endsWith(".d.ts"))
+    ) {
       files.push(absolutePath);
     }
   }
@@ -66,7 +69,11 @@ const main = async () => {
 
   const files = await walk(DIST_ROOT);
   for (const filePath of files) {
-    if (!filePath.endsWith(".js") && !filePath.endsWith(".mjs")) {
+    if (
+      !filePath.endsWith(".js") &&
+      !filePath.endsWith(".mjs") &&
+      !filePath.endsWith(".d.ts")
+    ) {
       continue;
     }
 
