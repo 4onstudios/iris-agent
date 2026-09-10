@@ -1,7 +1,7 @@
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
-import { resolveImageMessageParts } from "../api/agent";
+import { resolveImageMessageParts } from "../api/helpers/resolveImageMessageParts";
 
 describe("resolveImageMessageParts", () => {
   let workspaceRoot: string;

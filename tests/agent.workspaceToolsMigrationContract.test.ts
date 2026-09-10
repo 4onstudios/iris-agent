@@ -3,7 +3,7 @@ import {
   LocalFilesystem,
   Workspace,
 } from "@mastra/core/workspace";
-import { createIrisWorkspaceToolsConfig } from "../api/core/agent/index";
+import { createIrisWorkspaceToolsConfig } from "../api/core/agent/publicContracts";
 
 describe("Iris Mastra Workspace tool migration", () => {
   it("reserves rich mutations for the AIRIS agent tool surface", async () => {

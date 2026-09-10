@@ -2,11 +2,6 @@ import express from "express";
 import type { Request, Response, NextFunction } from "express";
 import os from "os";
 import { randomUUID } from "node:crypto";
-import {
-  createCodingAgent,
-  createAgentRequestContext,
-  getSkillsList,
-} from "./core/agent/index";
 import fsNative from "fs";
 import fs from "fs/promises";
 import path from "path";
@@ -60,6 +55,10 @@ import {
   resolveModelInputTokenLimit,
   resolveModelSupportsVision,
 } from "./helpers/promptBudget";
+import {
+  isLikelyImageFile,
+  resolveImageMessageParts,
+} from "./helpers/resolveImageMessageParts";
 import {
   parseSlashCommandRequest,
   getSlashCommandDescriptors,
@@ -265,50 +264,6 @@ type GeneratedAgent = {
   ) => Promise<NativeAgentStreamResult>;
 };
 
-const IMAGE_EXT_TO_MIME: Record<string, string> = {
-  png: "image/png",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  webp: "image/webp",
-  gif: "image/gif",
-  bmp: "image/bmp",
-  svg: "image/svg+xml",
-  avif: "image/avif",
-};
-
-const MAX_IMAGE_FILE_SIZE_BYTES = 5 * 1024 * 1024;
-const MAX_IMAGES_PER_REQUEST = 1;
-
-const resolveImageMediaType = (
-  file: Record<string, any>,
-): string | undefined => {
-  const rawType =
-    typeof file?.type === "string" ? file.type.trim().toLowerCase() : "";
-  if (rawType.startsWith("image/")) {
-    return rawType;
-  }
-
-  const ext =
-    typeof file?.name === "string"
-      ? file.name.split(".").pop()?.toLowerCase() || ""
-      : "";
-  return IMAGE_EXT_TO_MIME[ext] || undefined;
-};
-
-const isLikelyImageFile = (file: Record<string, any>): boolean => {
-  const mediaType = resolveImageMediaType(file);
-  if (mediaType) {
-    return true;
-  }
-
-  const pathValue =
-    typeof file?.path === "string" ? file.path.toLowerCase() : "";
-  return /\.(png|jpe?g|webp|gif|bmp|svg|avif)$/.test(pathValue);
-};
-
-const toDataUrlFromBuffer = (bytes: Buffer, mediaType: string): string =>
-  `data:${mediaType};base64,${bytes.toString("base64")}`;
-
 /**
  * Safely extract error message from any thrown value.
  * Handles Error objects, strings, null/undefined, and other values.
@@ -339,127 +294,6 @@ const sanitizeToolArgsForWorkspace = (
   const sanitizedArgs = { ...normalizedArgs };
   delete sanitizedArgs.workspacePath;
   return sanitizedArgs;
-};
-
-export const resolveImageMessageParts = async (
-  filesInContext: Array<Record<string, any>>,
-  workspacePath: string,
-  isWebWorkspace: boolean,
-  allowOutOfWorkspace = false,
-): Promise<MultimodalContentPart[]> => {
-  const parts: MultimodalContentPart[] = [];
-  const resolvedWorkspace = path.resolve(workspacePath);
-  let imagesIncluded = 0;
-
-  for (const file of filesInContext) {
-    if (!isLikelyImageFile(file)) {
-      continue;
-    }
-
-    // Limit to 1 image per request to prevent token budget exhaustion
-    if (imagesIncluded >= MAX_IMAGES_PER_REQUEST) {
-      console.warn("Skipping image: reached maximum images per request limit");
-      continue;
-    }
-
-    const mediaType = resolveImageMediaType(file) || "image/png";
-    const encodedFromClient =
-      typeof file?.imageDataUrl === "string" ? file.imageDataUrl.trim() : "";
-    if (encodedFromClient.startsWith("data:image/")) {
-      parts.push({
-        type: "image",
-        image: encodedFromClient,
-        mediaType,
-      });
-      imagesIncluded++;
-      continue;
-    }
-
-    const directUrlCandidates = [file?.imageUrl, file?.previewUrl, file?.path]
-      .filter(
-        (value): value is string =>
-          typeof value === "string" && value.trim().length > 0,
-      )
-      .map((value) => value.trim());
-    const httpsUrl = directUrlCandidates.find((value) =>
-      /^https?:\/\//i.test(value),
-    );
-    if (httpsUrl) {
-      parts.push({
-        type: "image",
-        image: httpsUrl,
-        mediaType,
-      });
-      imagesIncluded++;
-      continue;
-    }
-
-    if (isWebWorkspace) {
-      continue;
-    }
-
-    const filePathValue =
-      typeof file?.path === "string" && file.path.trim().length > 0
-        ? file.path.trim()
-        : "";
-    if (!filePathValue || /^blob:/i.test(filePathValue)) {
-      continue;
-    }
-
-    const absolutePath = path.isAbsolute(filePathValue)
-      ? path.resolve(filePathValue)
-      : path.resolve(path.join(resolvedWorkspace, filePathValue));
-
-    if (!path.isAbsolute(filePathValue)) {
-      if (!absolutePath.startsWith(resolvedWorkspace + path.sep)) {
-        console.warn(
-          "Skipping path-traversing relative image path:",
-          filePathValue,
-        );
-        continue;
-      }
-    } else if (
-      !allowOutOfWorkspace &&
-      !absolutePath.startsWith(resolvedWorkspace + path.sep)
-    ) {
-      console.warn(
-        "Skipping out-of-workspace absolute image path:",
-        filePathValue,
-      );
-      continue;
-    }
-
-    try {
-      const stats = await fs.stat(absolutePath);
-      if (!stats.isFile()) {
-        continue;
-      }
-      if (stats.size > MAX_IMAGE_FILE_SIZE_BYTES) {
-        console.warn(
-          "Skipping oversized image:",
-          filePathValue,
-          `${stats.size} bytes exceeds limit of ${MAX_IMAGE_FILE_SIZE_BYTES} bytes`,
-        );
-        continue;
-      }
-      const bytes = await fs.readFile(absolutePath);
-      parts.push({
-        type: "image",
-        image: toDataUrlFromBuffer(bytes, mediaType),
-        mediaType,
-      });
-      imagesIncluded++;
-    } catch (err) {
-      // Skip unreadable image paths and continue with other context files.
-      console.warn(
-        "Failed to read image:",
-        filePathValue,
-        getErrorMessage(err),
-      );
-    }
-  }
-
-  return parts;
 };
 
 type ExecutedToolResult = {
@@ -710,6 +544,14 @@ const DEFAULT_PROMPT_TOKEN_BUDGET_RATIO = 0.55;
 const MIN_PROMPT_TOKEN_BUDGET = 4096;
 const PROMPT_TOKEN_RESERVE = 6144;
 const agentCache = new Map<string, GeneratedAgent>();
+type AgentCoreModule = typeof import("./core/agent/index");
+let agentCoreModulePromise: Promise<AgentCoreModule> | undefined;
+const loadAgentCoreModule = (): Promise<AgentCoreModule> => {
+  if (!agentCoreModulePromise) {
+    agentCoreModulePromise = import("./core/agent/index");
+  }
+  return agentCoreModulePromise;
+};
 const REMOTE_CHAT_SESSIONS_DIR = path.join(
   os.homedir(),
   ".iris",
@@ -1237,10 +1079,11 @@ async function getOrCreateAgent(
       );
     }
   }
+  const agentCore = await loadAgentCoreModule();
 
   const registry = createDefaultAgentRegistry<GeneratedAgent>({
     irisFactory: () =>
-      createCodingAgent(modelId, workspacePath, {
+      agentCore.createCodingAgent(modelId, workspacePath, {
         mcpServers,
         terminalAutoApproveRules,
         // Non-observational requests already include the bounded conversation
@@ -2652,6 +2495,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             total + (Array.isArray(step.toolCalls) ? step.toolCalls.length : 0),
           0,
         ) >= maxToolCalls;
+      const { createAgentRequestContext } = await loadAgentCoreModule();
       const agentRequestContext = createAgentRequestContext(enabledSkills, {
         workspaceMutationGenerationId,
         toolCallBudget,
@@ -5327,6 +5171,7 @@ router.post(
 
 router.get("/skills", async (_req: Request, res: Response) => {
   try {
+    const { getSkillsList } = await loadAgentCoreModule();
     const skills = await getSkillsList();
     res.json({ success: true, skills });
   } catch {

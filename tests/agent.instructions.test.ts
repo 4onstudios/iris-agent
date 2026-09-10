@@ -1,4 +1,4 @@
-import { CODING_AGENT_INSTRUCTIONS } from "../api/core/agent/index";
+import { CODING_AGENT_INSTRUCTIONS } from "../api/core/agent/publicContracts";
 
 describe("coding agent instructions", () => {
   it("remain concise and free of contradictory legacy mandates", () => {
