@@ -203,7 +203,7 @@ const createPreToolUseHook = (
       return [`anonymous:${signature}`];
     }
 
-    const genericKey = `${toolCallId}:generic`;
+    const genericKey = `${toolCallId}:${toolName}:generic`;
     if (hasArgumentDetails(toolArgs)) {
       registerIdentifiedSignature(toolName, toolCallId, toolArgs);
       return [`${toolCallId}:${signature}`, genericKey];
