@@ -521,14 +521,27 @@ const reconcileToolLifecycleSnapshots = (
     const streamedById = new Map(
       streamed
         .map((entry, index) =>
-          entry.toolCallId ? [entry.toolCallId, index] : undefined,
+          entry.toolCallId
+            ? [
+                `${entry.toolCallId}:${getToolCallSignature(
+                  entry.name,
+                  entry.args || {},
+                )}`,
+                index,
+              ]
+            : undefined,
         )
         .filter((entry): entry is [string, number] => entry !== undefined),
     );
 
     for (const entry of snapshot) {
       if (entry.toolCallId) {
-        const matchingIndex = streamedById.get(entry.toolCallId);
+        const matchingIndex = streamedById.get(
+          `${entry.toolCallId}:${getToolCallSignature(
+            entry.name,
+            entry.args || {},
+          )}`,
+        );
         if (matchingIndex !== undefined) {
           merged[matchingIndex] = entry;
           claimedStreamedIndexes.add(matchingIndex);
@@ -536,17 +549,10 @@ const reconcileToolLifecycleSnapshots = (
         }
       }
 
-      // An anonymous pending call has no stable identity. Matching it only by
-      // name and arguments can discard a distinct invocation (and, in turn,
-      // skip its approval/audit hook). Anonymous results can still be
-      // reconciled because the result payload is runtime evidence that the
-      // snapshot describes an invocation already observed in the stream.
-      const canReconcileAnonymousEntry = "result" in entry;
       const matchingIndex = streamed.findIndex(
         (streamedEntry, index) =>
           !claimedStreamedIndexes.has(index) &&
           (!streamedEntry.toolCallId || !entry.toolCallId) &&
-          canReconcileAnonymousEntry &&
           getToolCallSignature(streamedEntry.name, streamedEntry.args || {}) ===
             getToolCallSignature(entry.name, entry.args || {}),
       );
@@ -3640,7 +3646,11 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                 ) {
                   autoFixToolCallArgs.set(
                     item.toolCallId,
-                    item.args || item.input || {},
+                    sanitizeToolArgsForWorkspace(
+                      item.toolName,
+                      item.input || item.args,
+                      isWebWorkspace,
+                    ),
                   );
                 }
               });
@@ -3662,14 +3672,9 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                   }
 
                   const safeToolResult = redactToolResult(toolResult).result;
-                  const safeArgs = redactToolResult(args).result as Record<
-                    string,
-                    unknown
-                  >;
-
                   autoFixExecutedToolResults.push({
                     name: item.toolName,
-                    args: safeArgs,
+                    args,
                     result: safeToolResult,
                     toolCallId: item.toolCallId,
                     lifecycleStepIndex: index,
@@ -3727,7 +3732,10 @@ _You have discovered the following in earlier interactions. Use this to avoid re
           const autoFixNormalizedToolCalls =
             autoFixNormalizedLifecycle.pendingToolCalls.map((call) => ({
               name: call.name,
-              args: call.args,
+              args: redactToolResult(call.args).result as Record<
+                string,
+                unknown
+              >,
               toolCallId: call.toolCallId,
               status: "pending" as ToolExecutionStatus,
             }));
@@ -3736,7 +3744,10 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             autoFixNormalizedLifecycle.executedToolResults.map(
               (toolResult) => ({
                 name: toolResult.name,
-                args: toolResult.args,
+                args: redactToolResult(toolResult.args).result as Record<
+                  string,
+                  unknown
+                >,
                 result: toolResult.result,
                 toolCallId: toolResult.toolCallId,
                 status: resolveToolExecutionStatus(toolResult.result),
