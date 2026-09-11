@@ -706,11 +706,18 @@ const supportsMastraProviderWebSearch = (modelId: string): boolean => {
     return false;
   }
 
+  // OpenAI models are intentionally excluded here even though Mastra's
+  // built-in webSearchTool documents OpenAI support: `@ai-sdk/openai`
+  // (as of 2.x) always tags the models it constructs with a suffixed
+  // provider id (`openai.chat`, `openai.completion`, or, since `openai()`
+  // now defaults to the Responses API, `openai.responses`). Mastra's
+  // `normalizeWebSearchProvider` only recognizes the bare `"openai"`
+  // string (or `provider/model` router-style ids), so it throws
+  // WEB_SEARCH_UNSUPPORTED_PROVIDER for every OpenAI model resolved via
+  // `resolveModel` above. Until that's fixed upstream in @mastra/core,
+  // fall back to the browser-based web search tool for OpenAI so the
+  // agent doesn't crash when preparing its toolset.
   return (
-    normalizedModelId.startsWith("gpt") ||
-    normalizedModelId.startsWith("o1") ||
-    normalizedModelId.startsWith("o3") ||
-    normalizedModelId.startsWith("openai/") ||
     normalizedModelId.startsWith("claude") ||
     normalizedModelId.startsWith("anthropic/") ||
     normalizedModelId.startsWith("gemini") ||
