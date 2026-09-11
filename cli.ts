@@ -66,14 +66,19 @@ async function main() {
   console.log(`📁 Workspace: ${workspaceRoot}`);
   console.log(`🤖 Model: ${modelId}`);
 
-  // Create agent instance
-  const agent = await createCodingAgent(modelId, workspaceRoot);
-
   if (argv.acp) {
     console.log("🔗 Starting ACP server over stdio...");
-    await startAcpServer(agent, workspaceRoot);
+    await startAcpServer(
+      (requestedModelId, targetWorkspace) =>
+        createCodingAgent(
+          requestedModelId || modelId,
+          targetWorkspace || workspaceRoot,
+        ),
+      workspaceRoot,
+    );
   } else if (argv.chat) {
     // Interactive chat mode
+    const agent = await createCodingAgent(modelId, workspaceRoot);
     console.log(`💬 Entering chat mode (type "exit" to quit)`);
     await startChatMode(agent, workspaceRoot);
   } else {

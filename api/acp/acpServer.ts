@@ -85,23 +85,59 @@ const savePersistedChatSession = async (
 type IrisMetaExtension = {
   chatSessionId?: string;
   maxSteps?: number;
+  modelId?: string;
+  model?: string;
 };
 
 const readIrisMeta = (
   meta: { [key: string]: unknown } | null | undefined,
+  params?: Record<string, unknown>,
 ): IrisMetaExtension => {
   const iris = meta && typeof meta === "object" ? meta.iris : undefined;
-  if (!iris || typeof iris !== "object") return {};
-  const record = iris as Record<string, unknown>;
+  const irisRecord =
+    iris && typeof iris === "object"
+      ? (iris as Record<string, unknown>)
+      : undefined;
+  const metaRecord = meta && typeof meta === "object" ? meta : undefined;
+  const paramsRecord =
+    params && typeof params === "object" ? params : undefined;
+
+  const chatSessionId =
+    (typeof irisRecord?.chatSessionId === "string"
+      ? irisRecord.chatSessionId
+      : undefined) ||
+    (typeof metaRecord?.chatSessionId === "string"
+      ? metaRecord.chatSessionId
+      : undefined) ||
+    (typeof paramsRecord?.chatSessionId === "string"
+      ? paramsRecord.chatSessionId
+      : undefined);
+
+  const rawMaxSteps =
+    irisRecord?.maxSteps ?? metaRecord?.maxSteps ?? paramsRecord?.maxSteps;
+  const maxSteps =
+    typeof rawMaxSteps === "number" && Number.isFinite(rawMaxSteps)
+      ? Math.max(1, Math.floor(rawMaxSteps))
+      : undefined;
+
+  const rawModelId =
+    irisRecord?.modelId ??
+    irisRecord?.model ??
+    metaRecord?.modelId ??
+    metaRecord?.model ??
+    paramsRecord?.modelId ??
+    paramsRecord?.model;
+
+  const modelId =
+    typeof rawModelId === "string" && rawModelId.trim()
+      ? rawModelId.trim()
+      : undefined;
+
   return {
-    chatSessionId:
-      typeof record.chatSessionId === "string"
-        ? record.chatSessionId
-        : undefined,
-    maxSteps:
-      typeof record.maxSteps === "number" && Number.isFinite(record.maxSteps)
-        ? Math.max(1, Math.floor(record.maxSteps))
-        : undefined,
+    chatSessionId,
+    maxSteps,
+    modelId,
+    model: modelId,
   };
 };
 
@@ -136,6 +172,13 @@ export type AcpRuntimeAgent = {
   }) => Promise<unknown>;
 };
 
+export type AcpAgentFactory = (
+  modelId?: string,
+  workspaceRoot?: string,
+) => Promise<AcpRuntimeAgent> | AcpRuntimeAgent;
+
+export type AcpAgentProvider = AcpRuntimeAgent | AcpAgentFactory;
+
 type ActiveTurn = {
   abortController: AbortController;
   cancelStream?: () => Promise<void>;
@@ -143,6 +186,7 @@ type ActiveTurn = {
 
 type AcpSessionState = {
   cwd: string;
+  modelId?: string;
   activeTurn?: ActiveTurn;
   history: PersistedChatMessage[];
 };
@@ -211,13 +255,31 @@ const extractText = (value: unknown): string => {
 };
 
 export const createAcpAgentApp = (
-  runtimeAgent: AcpRuntimeAgent,
+  agentProvider: AcpAgentProvider,
   workspaceRoot?: string,
 ): acp.AgentApp => {
   const boundWorkspaceRoot = workspaceRoot
     ? path.resolve(workspaceRoot)
     : undefined;
   const sessions = new Map<string, AcpSessionState>();
+  const agentCache = new Map<string, Promise<AcpRuntimeAgent> | AcpRuntimeAgent>();
+
+  const resolveAgent = async (
+    modelId?: string,
+    sessionCwd?: string,
+  ): Promise<AcpRuntimeAgent> => {
+    if (typeof agentProvider !== "function") {
+      return agentProvider;
+    }
+    const targetWorkspace = sessionCwd || boundWorkspaceRoot;
+    const cacheKey = `${modelId || "default"}::${targetWorkspace || ""}`;
+    let cached = agentCache.get(cacheKey);
+    if (!cached) {
+      cached = agentProvider(modelId, targetWorkspace);
+      agentCache.set(cacheKey, cached);
+    }
+    return Promise.resolve(cached);
+  };
 
   const cancelActiveTurn = async (
     activeTurn: ActiveTurn | undefined,
@@ -275,12 +337,18 @@ export const createAcpAgentApp = (
         assertAcpWorkspace({ cwd: ctx.params.cwd }, boundWorkspaceRoot);
       }
       const irisMeta = readIrisMeta(ctx.params._meta);
+      const requestedModel =
+        irisMeta.modelId ||
+        (typeof (ctx.params as Record<string, unknown>).modelId === "string"
+          ? ((ctx.params as Record<string, unknown>).modelId as string)
+          : undefined);
       const sessionId =
         irisMeta.chatSessionId && isSafeChatSessionId(irisMeta.chatSessionId)
           ? irisMeta.chatSessionId
           : randomUUID();
       sessions.set(sessionId, {
         cwd: boundWorkspaceRoot || ctx.params.cwd,
+        modelId: requestedModel,
         history: [],
       });
       await notifyAvailableCommands(ctx, sessionId);
@@ -291,6 +359,12 @@ export const createAcpAgentApp = (
       if (boundWorkspaceRoot) {
         assertAcpWorkspace({ cwd: ctx.params.cwd }, boundWorkspaceRoot);
       }
+      const irisMeta = readIrisMeta(ctx.params._meta);
+      const requestedModel =
+        irisMeta.modelId ||
+        (typeof (ctx.params as Record<string, unknown>).modelId === "string"
+          ? ((ctx.params as Record<string, unknown>).modelId as string)
+          : undefined);
       const persisted = await loadPersistedChatSession(sessionId);
       if (!persisted) {
         throw new Error(`No persisted chat session found for '${sessionId}'`);
@@ -298,6 +372,7 @@ export const createAcpAgentApp = (
       const history = persisted.messages.slice();
       sessions.set(sessionId, {
         cwd: boundWorkspaceRoot || ctx.params.cwd,
+        modelId: requestedModel,
         history,
       });
       for (const message of history) {
@@ -313,6 +388,36 @@ export const createAcpAgentApp = (
       await notifyAvailableCommands(ctx, sessionId);
       return {};
     })
+    .onRequest(acp.methods.agent.session.setConfigOption, async (ctx) => {
+      const sessionId = ctx.params.sessionId;
+      const session = sessions.get(sessionId);
+      if (!session) {
+        throw new Error(`Unknown ACP session '${sessionId}'`);
+      }
+      const configId = ctx.params.configId;
+      const value = ctx.params.value;
+      if (configId === "model" || configId === "modelId") {
+        if (typeof value === "string" && value.trim()) {
+          session.modelId = value.trim();
+        } else {
+          session.modelId = undefined;
+        }
+      }
+      const currentModel = session.modelId || "default";
+      const configOptions: acp.SessionConfigOption[] = [
+        {
+          id: "model",
+          name: "Model",
+          type: "select",
+          category: "model",
+          currentValue: currentModel,
+          options: [
+            { value: currentModel, name: currentModel },
+          ],
+        },
+      ];
+      return { configOptions };
+    })
     .onRequest(acp.methods.agent.session.prompt, async (ctx) => {
       const sessionId = ctx.params.sessionId;
       const session = sessions.get(sessionId);
@@ -327,6 +432,13 @@ export const createAcpAgentApp = (
       const promptText = toPromptText(ctx.params.prompt);
       const irisMeta = readIrisMeta(ctx.params._meta);
       const effectiveMaxSteps = irisMeta.maxSteps ?? DEFAULT_MAX_STEPS;
+      const turnModelId =
+        irisMeta.modelId ||
+        (typeof (ctx.params as Record<string, unknown>).modelId === "string"
+          ? ((ctx.params as Record<string, unknown>).modelId as string)
+          : undefined) ||
+        session.modelId;
+      const runtimeAgent = await resolveAgent(turnModelId, session.cwd);
       let stepsUsed = 0;
       let usage: TokenUsageSummary | undefined;
       if (promptText) {
@@ -389,6 +501,7 @@ export const createAcpAgentApp = (
                   workspaceRoot: session.cwd,
                   abortSignal: turnSignal,
                   maxSteps: effectiveMaxSteps,
+                  modelId: turnModelId,
                 },
               ) as Promise<AgentStreamResult>,
           );
@@ -930,6 +1043,7 @@ export const createAcpAgentApp = (
               workspaceRoot: session.cwd,
               abortSignal: turnSignal,
               maxSteps: effectiveMaxSteps,
+              modelId: turnModelId,
             })
             : runtimeAgent.chat
               ? runtimeAgent.chat({
@@ -979,14 +1093,15 @@ export const createAcpAgentApp = (
 };
 
 export async function startAcpServer(
-  runtimeAgent: AcpRuntimeAgent,
+  runtimeAgentOrFactory: AcpAgentProvider,
   workspaceRoot?: string,
 ): Promise<void> {
   const output = Writable.toWeb(process.stdout) as WritableStream<Uint8Array>;
   const input = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
-  const connection = createAcpAgentApp(runtimeAgent, workspaceRoot).connect(
-    acp.ndJsonStream(output, input),
-  );
+  const connection = createAcpAgentApp(
+    runtimeAgentOrFactory,
+    workspaceRoot,
+  ).connect(acp.ndJsonStream(output, input));
 
   console.error("ACP agent ready: iris-agent@0.1.0 (stdio)");
   await connection.closed;

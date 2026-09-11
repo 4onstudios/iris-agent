@@ -26,6 +26,20 @@ export type SpawnIrisClientOptions = IrisClientOptions & {
 
 export type IrisClientTransport = acp.Stream | acp.AgentApp;
 
+export type OpenSessionOptions = {
+    modelId?: string;
+    chatSessionId?: string;
+    mcpServers?: acp.McpServer[];
+    additionalDirectories?: string[];
+    meta?: Record<string, unknown>;
+};
+
+export type PromptOptions = {
+    modelId?: string;
+    maxSteps?: number;
+    meta?: Record<string, unknown>;
+};
+
 export class IrisClient {
     private readonly connection: acp.ClientConnection;
     private readonly context: acp.ClientContext;
@@ -116,7 +130,10 @@ export class IrisClient {
         }
     }
 
-    async openSession(cwd: string): Promise<string> {
+    async openSession(
+        cwd: string,
+        options?: OpenSessionOptions,
+    ): Promise<string> {
         this.assertOpen();
         if (this.activeSession) {
             throw new Error("An ACP session is already open");
@@ -125,10 +142,37 @@ export class IrisClient {
             throw new Error("An ACP session is already opening");
         }
 
-        const openingSession = this.context.buildSession(cwd).start().then((session) => {
+        const openingSession = (async () => {
+            let builder = this.context.buildSession(cwd);
+            if (options?.additionalDirectories) {
+                builder = builder.withAdditionalDirectories(options.additionalDirectories);
+            }
+            if (options?.mcpServers) {
+                for (const server of options.mcpServers) {
+                    builder = builder.withMcpServer(server);
+                }
+            }
+            if (options?.modelId || options?.chatSessionId || options?.meta) {
+                const req = (builder as unknown as { request: Record<string, unknown> }).request;
+                req._meta = {
+                    ...(options?.meta ?? {}),
+                    iris: {
+                        ...(typeof options?.meta?.iris === "object"
+                            ? (options.meta.iris as Record<string, unknown>)
+                            : {}),
+                        ...(options?.modelId ? { modelId: options.modelId } : {}),
+                        ...(options?.chatSessionId
+                            ? { chatSessionId: options.chatSessionId }
+                            : {}),
+                    },
+                    ...(options?.modelId ? { modelId: options.modelId } : {}),
+                };
+            }
+            const session = await builder.start();
             this.activeSession = session;
             return session.sessionId;
-        });
+        })();
+
         this.openingSession = openingSession;
         try {
             return await openingSession;
@@ -139,10 +183,50 @@ export class IrisClient {
         }
     }
 
-    async prompt(prompt: string | acp.ContentBlock[]): Promise<acp.PromptResponse> {
+    async setModel(modelId: string): Promise<void> {
+        this.assertOpen();
+        if (!this.activeSession) {
+            throw new Error("Open an ACP session before setting configuration options");
+        }
+        await this.context.request(acp.methods.agent.session.setConfigOption, {
+            sessionId: this.activeSession.sessionId,
+            configId: "model",
+            value: modelId,
+        });
+    }
+
+    async prompt(
+        prompt: string | acp.ContentBlock[],
+        options?: PromptOptions,
+    ): Promise<acp.PromptResponse> {
         this.assertOpen();
         if (!this.activeSession) {
             throw new Error("Open an ACP session before prompting");
+        }
+        if (options?.modelId || options?.maxSteps || options?.meta) {
+            const promptBlocks =
+                typeof prompt === "string"
+                    ? [{ type: "text" as const, text: prompt }]
+                    : Array.isArray(prompt)
+                    ? prompt
+                    : [prompt];
+            return this.context.request(acp.methods.agent.session.prompt, {
+                sessionId: this.activeSession.sessionId,
+                prompt: promptBlocks,
+                _meta: {
+                    ...(options?.meta ?? {}),
+                    iris: {
+                        ...(typeof options?.meta?.iris === "object"
+                            ? (options.meta.iris as Record<string, unknown>)
+                            : {}),
+                        ...(options?.modelId ? { modelId: options.modelId } : {}),
+                        ...(typeof options?.maxSteps === "number"
+                            ? { maxSteps: options.maxSteps }
+                            : {}),
+                    },
+                    ...(options?.modelId ? { modelId: options.modelId } : {}),
+                },
+            });
         }
         return this.activeSession.prompt(prompt);
     }
