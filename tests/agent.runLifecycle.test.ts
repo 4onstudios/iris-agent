@@ -555,6 +555,129 @@ describe("agent run lifecycle APIs", () => {
     }
   });
 
+  it("bounds persisted tool arguments while preserving useful metadata", async () => {
+    const runId = `run-large-args-${Date.now()}`;
+    mockGenerate.mockResolvedValueOnce({
+      text: "Wrote file.",
+      steps: [
+        {
+          content: [
+            {
+              type: "tool-call",
+              toolName: "writeFile",
+              toolCallId: "write-large-args-1",
+              args: {
+                filePath: "src/large.ts",
+                content: "x".repeat(128 * 1024),
+              },
+            },
+          ],
+          toolCalls: [],
+        },
+      ],
+      toolCalls: [],
+    });
+
+    const { server, baseUrl } = await startServer();
+
+    try {
+      const chatResponse = await requestJson(baseUrl, "POST", "/api/agent/chat", {
+        runId,
+        message: "Write a large file",
+        modelId: "gpt-4o",
+        workspaceRoot: `/tmp/large-args-${runId}`,
+        isTauri: false,
+      });
+      expect(chatResponse.status).toBe(200);
+
+      const eventsResponse = await requestJson(
+        baseUrl,
+        "GET",
+        `/api/agent/runs/${runId}/events`,
+      );
+      expect(eventsResponse.status).toBe(200);
+      const toolCall = eventsResponse.body.events.find(
+        (event: { eventType: string }) => event.eventType === "tool_call",
+      );
+      expect(toolCall.payload.args).toEqual(
+        expect.objectContaining({
+          truncated: true,
+          originalByteLength: expect.any(Number),
+          filePath: "src/large.ts",
+        }),
+      );
+      expect(
+        Buffer.byteLength(JSON.stringify(toolCall.payload.args), "utf8"),
+      ).toBeLessThanOrEqual(16 * 1024);
+    } finally {
+      await stopServer(server);
+    }
+  });
+
+  it("recovers anonymous non-stream result arguments one-for-one", async () => {
+    const runId = `run-anonymous-non-stream-results-${Date.now()}`;
+    mockGenerate.mockResolvedValueOnce({
+      text: "Read both files.",
+      steps: [
+        {
+          content: [
+            {
+              type: "tool-call",
+              toolName: "readFile",
+              args: { filePath: "src/first.ts" },
+            },
+            {
+              type: "tool-call",
+              toolName: "readFile",
+              args: { filePath: "src/second.ts" },
+            },
+            {
+              type: "tool-result",
+              toolName: "readFile",
+              result: { success: true, content: "first" },
+            },
+            {
+              type: "tool-result",
+              toolName: "readFile",
+              result: { success: true, content: "second" },
+            },
+          ],
+          toolCalls: [],
+        },
+      ],
+      toolCalls: [],
+    });
+
+    const { server, baseUrl } = await startServer();
+
+    try {
+      const chatResponse = await requestJson(baseUrl, "POST", "/api/agent/chat", {
+        runId,
+        message: "Read both files",
+        modelId: "gpt-4o",
+        workspaceRoot: `/tmp/anonymous-non-stream-${runId}`,
+        isTauri: false,
+      });
+      expect(chatResponse.status).toBe(200);
+
+      const eventsResponse = await requestJson(
+        baseUrl,
+        "GET",
+        `/api/agent/runs/${runId}/events`,
+      );
+      expect(eventsResponse.status).toBe(200);
+      const persistedResults = eventsResponse.body.events
+        .filter((event: { eventType: string }) => event.eventType === "tool_result")
+        .map((event: { payload: { args: unknown } }) => event.payload.args);
+      expect(persistedResults).toEqual([
+        { filePath: "src/first.ts" },
+        { filePath: "src/second.ts" },
+      ]);
+    } finally {
+      await stopServer(server);
+    }
+  });
+
   it("consumes anonymous streaming call arguments for each omitted-args result", async () => {
     const runId = `run-anonymous-stream-results-${Date.now()}`;
     mockCreateCodingAgent.mockResolvedValueOnce({
@@ -627,6 +750,160 @@ describe("agent run lifecycle APIs", () => {
     }
   });
 
+  it("matches anonymous streaming results with explicit args before FIFO fallback", async () => {
+    const runId = `run-anonymous-stream-explicit-args-${Date.now()}`;
+    mockCreateCodingAgent.mockResolvedValueOnce({
+      generate: mockGenerate,
+      stream: jest.fn(async () => ({
+        fullStream: createMockFullStream([
+          {
+            type: "tool-call",
+            payload: {
+              toolName: "readFile",
+              args: { filePath: "src/first.ts" },
+            },
+          },
+          {
+            type: "tool-call",
+            payload: {
+              toolName: "readFile",
+              args: { filePath: "src/second.ts" },
+            },
+          },
+          {
+            type: "tool-result",
+            payload: {
+              toolName: "readFile",
+              args: { filePath: "src/second.ts" },
+              result: { success: true, content: "second" },
+            },
+          },
+          {
+            type: "tool-result",
+            payload: {
+              toolName: "readFile",
+              args: { filePath: "src/first.ts" },
+              result: { success: true, content: "first" },
+            },
+          },
+        ]),
+        text: Promise.resolve("Read both files."),
+        toolCalls: Promise.resolve([]),
+        steps: Promise.resolve([]),
+      })),
+    });
+
+    const { server, baseUrl } = await startServer();
+
+    try {
+      const chatResponse = await requestJson(baseUrl, "POST", "/api/agent/chat", {
+        runId,
+        message: "Read both files",
+        modelId: "gpt-4o",
+        workspaceRoot: `/tmp/anonymous-stream-explicit-${runId}`,
+        isTauri: false,
+        stream: true,
+      });
+      expect(chatResponse.status).toBe(200);
+
+      const eventsResponse = await requestJson(
+        baseUrl,
+        "GET",
+        `/api/agent/runs/${runId}/events`,
+      );
+      expect(eventsResponse.status).toBe(200);
+      const persistedResults = eventsResponse.body.events
+        .filter((event: { eventType: string }) => event.eventType === "tool_result")
+        .map((event: { payload: { args: unknown } }) => event.payload.args);
+      expect(persistedResults).toEqual([
+        { filePath: "src/second.ts" },
+        { filePath: "src/first.ts" },
+      ]);
+    } finally {
+      await stopServer(server);
+    }
+  });
+
+  it("persists reconciled stream step results missing from raw chunks", async () => {
+    const runId = `run-reconciled-stream-results-${Date.now()}`;
+    mockCreateCodingAgent.mockResolvedValueOnce({
+      generate: mockGenerate,
+      stream: jest.fn(async () => ({
+        fullStream: createMockFullStream([
+          {
+            type: "tool-call",
+            payload: {
+              toolName: "editFile",
+              toolCallId: "stream-edit-1",
+              args: { filePath: "src/final.ts" },
+            },
+          },
+        ]),
+        text: Promise.resolve("Edited file."),
+        toolCalls: Promise.resolve([]),
+        steps: Promise.resolve([
+          {
+            content: [
+              {
+                type: "tool-call",
+                toolName: "editFile",
+                toolCallId: "stream-edit-1",
+                args: { filePath: "src/final.ts" },
+              },
+              {
+                type: "tool-result",
+                toolName: "editFile",
+                toolCallId: "stream-edit-1",
+                result: { success: true, diff: "patched" },
+              },
+            ],
+            toolCalls: [],
+          },
+        ]),
+      })),
+    });
+
+    const { server, baseUrl } = await startServer();
+
+    try {
+      const chatResponse = await requestJson(baseUrl, "POST", "/api/agent/chat", {
+        runId,
+        message: "Edit file",
+        modelId: "gpt-4o",
+        workspaceRoot: `/tmp/reconciled-stream-${runId}`,
+        isTauri: false,
+        stream: true,
+      });
+      expect(chatResponse.status).toBe(200);
+
+      const eventsResponse = await requestJson(
+        baseUrl,
+        "GET",
+        `/api/agent/runs/${runId}/events`,
+      );
+      expect(eventsResponse.status).toBe(200);
+      const toolCalls = eventsResponse.body.events.filter(
+        (event: { eventType: string }) => event.eventType === "tool_call",
+      );
+      const toolResults = eventsResponse.body.events.filter(
+        (event: { eventType: string }) => event.eventType === "tool_result",
+      );
+      expect(toolCalls).toHaveLength(1);
+      expect(toolResults).toEqual([
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            name: "editFile",
+            args: { filePath: "src/final.ts" },
+            result: { success: true, diff: "patched" },
+            toolCallId: "stream-edit-1",
+          }),
+        }),
+      ]);
+    } finally {
+      await stopServer(server);
+    }
+  });
+
   it("preserves actions from every reflection attempt in the replay timeline", async () => {
     const runId = `run-reflection-actions-${Date.now()}`;
     mockGenerate
@@ -659,13 +936,11 @@ describe("agent run lifecycle APIs", () => {
               {
                 type: "tool-call",
                 toolName: "editFile",
-                toolCallId: "repair-edit-1",
                 args: { filePath: "src/fixed.ts" },
               },
               {
                 type: "tool-result",
                 toolName: "editFile",
-                toolCallId: "repair-edit-1",
                 result: { success: true },
               },
             ],
@@ -703,7 +978,7 @@ describe("agent run lifecycle APIs", () => {
           expect.objectContaining({
             payload: expect.objectContaining({
               name: "editFile",
-              toolCallId: "repair-edit-1",
+              args: { filePath: "src/fixed.ts" },
             }),
           }),
         ]),
