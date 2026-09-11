@@ -48,6 +48,9 @@ describe("ACP server", () => {
         const client = acp
             .client({ name: "iris-agent-test-client" })
             .onNotification(acp.methods.client.session.update, (ctx) => {
+                if (ctx.params.update.sessionUpdate === "available_commands_update") {
+                    return;
+                }
                 updates.push(ctx.params);
             });
 
@@ -72,6 +75,7 @@ describe("ACP server", () => {
             expect(runtime.stream).toHaveBeenCalledWith("Read the README", {
                 workspaceRoot: "/workspace",
                 abortSignal: expect.any(AbortSignal),
+                maxSteps: 50,
             });
             expect(updates.map((entry) => entry.update.sessionUpdate)).toEqual([
                 "agent_thought_chunk",
@@ -116,6 +120,9 @@ describe("ACP server", () => {
         const client = acp
             .client({ name: "iris-agent-test-client" })
             .onNotification(acp.methods.client.session.update, (ctx) => {
+                if (ctx.params.update.sessionUpdate === "available_commands_update") {
+                    return;
+                }
                 updates.push(ctx.params);
             });
 
@@ -174,6 +181,9 @@ describe("ACP server", () => {
         const client = acp
             .client({ name: "iris-agent-test-client" })
             .onNotification(acp.methods.client.session.update, (ctx) => {
+                if (ctx.params.update.sessionUpdate === "available_commands_update") {
+                    return;
+                }
                 updates.push(ctx.params);
             });
 
@@ -252,6 +262,9 @@ describe("ACP server", () => {
         const client = acp
             .client({ name: "iris-agent-test-client" })
             .onNotification(acp.methods.client.session.update, (ctx) => {
+                if (ctx.params.update.sessionUpdate === "available_commands_update") {
+                    return;
+                }
                 updates.push(ctx.params);
             });
 
@@ -332,6 +345,9 @@ describe("ACP server", () => {
         const client = acp
             .client({ name: "iris-agent-test-client" })
             .onNotification(acp.methods.client.session.update, (ctx) => {
+                if (ctx.params.update.sessionUpdate === "available_commands_update") {
+                    return;
+                }
                 updates.push(ctx.params);
             });
 
@@ -381,6 +397,9 @@ describe("ACP server", () => {
         const client = acp
             .client({ name: "iris-agent-test-client" })
             .onNotification(acp.methods.client.session.update, (ctx) => {
+                if (ctx.params.update.sessionUpdate === "available_commands_update") {
+                    return;
+                }
                 updates.push(ctx.params);
             });
 
@@ -603,6 +622,9 @@ describe("ACP server", () => {
         const client = acp
             .client({ name: "iris-agent-test-client" })
             .onNotification(acp.methods.client.session.update, (ctx) => {
+                if (ctx.params.update.sessionUpdate === "available_commands_update") {
+                    return;
+                }
                 updates.push(ctx.params);
             });
 
@@ -730,6 +752,9 @@ describe("ACP server", () => {
         const client = acp
             .client({ name: "iris-agent-test-client" })
             .onNotification(acp.methods.client.session.update, (ctx) => {
+                if (ctx.params.update.sessionUpdate === "available_commands_update") {
+                    return;
+                }
                 updates.push(ctx.params);
             });
 
@@ -820,6 +845,9 @@ describe("ACP server", () => {
         const client = acp
             .client({ name: "iris-agent-test-client" })
             .onNotification(acp.methods.client.session.update, (ctx) => {
+                if (ctx.params.update.sessionUpdate === "available_commands_update") {
+                    return;
+                }
                 updates.push(ctx.params);
             });
 
@@ -916,6 +944,9 @@ describe("ACP server", () => {
         const client = acp
             .client({ name: "iris-agent-test-client" })
             .onNotification(acp.methods.client.session.update, (ctx) => {
+                if (ctx.params.update.sessionUpdate === "available_commands_update") {
+                    return;
+                }
                 updates.push(ctx.params);
             });
 

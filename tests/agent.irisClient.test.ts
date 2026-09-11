@@ -34,8 +34,15 @@ describe("IrisClient", () => {
         expect(runtime.stream).toHaveBeenCalledWith("Say hello", {
             workspaceRoot: "/workspace",
             abortSignal: expect.any(AbortSignal),
+            maxSteps: 50,
         });
         expect(updates).toEqual([
+            expect.objectContaining({
+                sessionId,
+                update: expect.objectContaining({
+                    sessionUpdate: "available_commands_update",
+                }),
+            }),
             expect.objectContaining({
                 sessionId,
                 update: expect.objectContaining({

@@ -1,11 +1,109 @@
 import { randomUUID } from "node:crypto";
 import { Readable, Writable } from "node:stream";
+import os from "node:os";
+import fs from "node:fs/promises";
 import * as acp from "@agentclientprotocol/sdk";
 import path from "path";
 import {
   getToolCallSignature,
   resolveToolExecutionStatus,
 } from "../core/agent/utils/toolLifecycle";
+import { executeCommand } from "../core/agent/tools/executeCommand";
+import {
+  getSlashCommandDescriptors,
+  isSlashCommandsFeatureEnabled,
+} from "../helpers/slashCommands";
+import {
+  extractTokenUsageFromChunkPayload,
+  mergeTokenUsage,
+  type TokenUsageSummary,
+} from "../helpers/tokenUsage";
+
+const DEFAULT_MAX_STEPS = 50;
+
+const CHAT_SESSIONS_DIR = path.join(os.homedir(), ".iris", "chat-sessions");
+
+type PersistedChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+type PersistedChatSession = {
+  id: string;
+  title?: string;
+  createdAt?: number;
+  updatedAt?: number;
+  messages: PersistedChatMessage[];
+};
+
+const isSafeChatSessionId = (sessionId: string): boolean =>
+  /^[A-Za-z0-9._:-]+$/.test(sessionId);
+
+const getChatSessionPath = (sessionId: string): string =>
+  path.join(CHAT_SESSIONS_DIR, `${sessionId}.json`);
+
+const loadPersistedChatSession = async (
+  sessionId: string,
+): Promise<PersistedChatSession | undefined> => {
+  if (!isSafeChatSessionId(sessionId)) return undefined;
+  try {
+    const raw = await fs.readFile(getChatSessionPath(sessionId), "utf8");
+    const parsed = JSON.parse(raw) as PersistedChatSession;
+    if (!Array.isArray(parsed?.messages)) return undefined;
+    return parsed;
+  } catch {
+    return undefined;
+  }
+};
+
+const savePersistedChatSession = async (
+  sessionId: string,
+  messages: PersistedChatMessage[],
+  existing?: PersistedChatSession,
+): Promise<void> => {
+  if (!isSafeChatSessionId(sessionId)) return;
+  const timestamp = Date.now();
+  const payload: PersistedChatSession = {
+    id: sessionId,
+    title: existing?.title,
+    createdAt: existing?.createdAt ?? timestamp,
+    updatedAt: timestamp,
+    messages,
+  };
+  try {
+    await fs.mkdir(CHAT_SESSIONS_DIR, { recursive: true });
+    await fs.writeFile(
+      getChatSessionPath(sessionId),
+      JSON.stringify(payload, null, 2),
+      "utf8",
+    );
+  } catch {
+    // Persistence is best-effort; the in-memory session remains usable.
+  }
+};
+
+type IrisMetaExtension = {
+  chatSessionId?: string;
+  maxSteps?: number;
+};
+
+const readIrisMeta = (
+  meta: { [key: string]: unknown } | null | undefined,
+): IrisMetaExtension => {
+  const iris = meta && typeof meta === "object" ? meta.iris : undefined;
+  if (!iris || typeof iris !== "object") return {};
+  const record = iris as Record<string, unknown>;
+  return {
+    chatSessionId:
+      typeof record.chatSessionId === "string"
+        ? record.chatSessionId
+        : undefined,
+    maxSteps:
+      typeof record.maxSteps === "number" && Number.isFinite(record.maxSteps)
+        ? Math.max(1, Math.floor(record.maxSteps))
+        : undefined,
+  };
+};
 
 type AgentStreamChunk = {
   type?: string;
@@ -46,6 +144,7 @@ type ActiveTurn = {
 type AcpSessionState = {
   cwd: string;
   activeTurn?: ActiveTurn;
+  history: PersistedChatMessage[];
 };
 
 type PendingToolInvocation = {
@@ -132,12 +231,38 @@ export const createAcpAgentApp = (
     await cancelActiveTurn(sessions.get(sessionId)?.activeTurn);
   };
 
+  const notifyAvailableCommands = async (
+    ctx: {
+      client: {
+        notify: (method: string, params: Record<string, unknown>) => Promise<void>;
+      };
+    },
+    sessionId: string,
+  ): Promise<void> => {
+    if (!isSlashCommandsFeatureEnabled()) return;
+    const descriptors = getSlashCommandDescriptors();
+    if (!descriptors.length) return;
+    const availableCommands = descriptors.map((descriptor) => ({
+      name: descriptor.name,
+      description: descriptor.description,
+    }));
+    await ctx.client
+      .notify(acp.methods.client.session.update, {
+        sessionId,
+        update: {
+          sessionUpdate: "available_commands_update",
+          availableCommands,
+        },
+      })
+      .catch(() => undefined);
+  };
+
   return acp
     .agent({ name: "iris-agent" })
     .onRequest(acp.methods.agent.initialize, async () => ({
       protocolVersion: acp.PROTOCOL_VERSION,
       agentCapabilities: {
-        loadSession: false,
+        loadSession: true,
         sessionCapabilities: { close: {} },
       },
       agentInfo: {
@@ -149,9 +274,44 @@ export const createAcpAgentApp = (
       if (boundWorkspaceRoot) {
         assertAcpWorkspace({ cwd: ctx.params.cwd }, boundWorkspaceRoot);
       }
-      const sessionId = randomUUID();
-      sessions.set(sessionId, { cwd: boundWorkspaceRoot || ctx.params.cwd });
+      const irisMeta = readIrisMeta(ctx.params._meta);
+      const sessionId =
+        irisMeta.chatSessionId && isSafeChatSessionId(irisMeta.chatSessionId)
+          ? irisMeta.chatSessionId
+          : randomUUID();
+      sessions.set(sessionId, {
+        cwd: boundWorkspaceRoot || ctx.params.cwd,
+        history: [],
+      });
+      await notifyAvailableCommands(ctx, sessionId);
       return { sessionId };
+    })
+    .onRequest(acp.methods.agent.session.load, async (ctx) => {
+      const sessionId = ctx.params.sessionId;
+      if (boundWorkspaceRoot) {
+        assertAcpWorkspace({ cwd: ctx.params.cwd }, boundWorkspaceRoot);
+      }
+      const persisted = await loadPersistedChatSession(sessionId);
+      if (!persisted) {
+        throw new Error(`No persisted chat session found for '${sessionId}'`);
+      }
+      const history = persisted.messages.slice();
+      sessions.set(sessionId, {
+        cwd: boundWorkspaceRoot || ctx.params.cwd,
+        history,
+      });
+      for (const message of history) {
+        await ctx.client.notify(acp.methods.client.session.update, {
+          sessionId,
+          update: {
+            sessionUpdate:
+              message.role === "user" ? "user_message_chunk" : "agent_message_chunk",
+            content: { type: "text", text: message.content },
+          },
+        });
+      }
+      await notifyAvailableCommands(ctx, sessionId);
+      return {};
     })
     .onRequest(acp.methods.agent.session.prompt, async (ctx) => {
       const sessionId = ctx.params.sessionId;
@@ -165,6 +325,23 @@ export const createAcpAgentApp = (
       session.activeTurn = activeTurn;
       await cancelActiveTurn(previousTurn);
       const promptText = toPromptText(ctx.params.prompt);
+      const irisMeta = readIrisMeta(ctx.params._meta);
+      const effectiveMaxSteps = irisMeta.maxSteps ?? DEFAULT_MAX_STEPS;
+      let stepsUsed = 0;
+      let usage: TokenUsageSummary | undefined;
+      if (promptText) {
+        session.history.push({ role: "user", content: promptText });
+      }
+      const persistTurn = async (assistantText: string): Promise<void> => {
+        if (assistantText) {
+          session.history.push({ role: "assistant", content: assistantText });
+        }
+        await savePersistedChatSession(
+          sessionId,
+          session.history,
+          await loadPersistedChatSession(sessionId),
+        );
+      };
       const turnSignal = activeTurn.abortController.signal;
       if (sessions.get(sessionId) !== session || turnSignal.aborted) {
         return { stopReason: "cancelled" as const };
@@ -211,6 +388,7 @@ export const createAcpAgentApp = (
                 {
                   workspaceRoot: session.cwd,
                   abortSignal: turnSignal,
+                  maxSteps: effectiveMaxSteps,
                 },
               ) as Promise<AgentStreamResult>,
           );
@@ -225,6 +403,11 @@ export const createAcpAgentApp = (
           const runtimeSignaturesByToolCall = new Map<string, Set<string>>();
           const runtimeProtocolIdByOperation = new Map<string, string>();
           let emittedText = false;
+          const suspendedTools: Array<{
+            toolName: string;
+            toolCallId: string;
+            suspendPayload?: Record<string, unknown>;
+          }> = [];
 
           const normalizeToolArgs = (
             rawArgs: unknown,
@@ -493,6 +676,10 @@ export const createAcpAgentApp = (
 
             if (value.type === "text-delta" || value.type === "reasoning-delta") {
               const text = String(value.payload?.text || "");
+              const chunkUsage = extractTokenUsageFromChunkPayload(value.payload);
+              if (chunkUsage) {
+                usage = mergeTokenUsage(usage, chunkUsage);
+              }
               if (!text) continue;
               if (value.type === "text-delta") emittedText = true;
               await ctx.client.notify(acp.methods.client.session.update, {
@@ -509,6 +696,7 @@ export const createAcpAgentApp = (
             }
 
             if (value.type === "tool-call") {
+              stepsUsed += 1;
               const toolName = String(value.payload?.toolName || "tool");
               const toolArgs = normalizeToolArgs(value.payload?.args);
               const suppliedToolCallId = value.payload?.toolCallId;
@@ -570,11 +758,66 @@ export const createAcpAgentApp = (
                   },
                 });
               }
-              const output =
+              let output =
                 value.payload?.result ??
                 value.payload?.output ??
                 value.payload?.content ??
                 value.payload?.data;
+
+              if (resolveToolExecutionStatus(output) === "pending_confirmation") {
+                const permissionResponse = await ctx.client.request(
+                  acp.methods.client.session.requestPermission,
+                  {
+                    sessionId: ctx.params.sessionId,
+                    toolCall: {
+                      toolCallId,
+                      title: toolName,
+                      kind: toToolKind(toolName),
+                      status: "pending",
+                      rawInput: value.payload?.args,
+                    },
+                    options: [
+                      { optionId: "allow_once", name: "Allow", kind: "allow_once" },
+                      { optionId: "reject_once", name: "Reject", kind: "reject_once" },
+                    ],
+                  },
+                );
+                const outcome = (
+                  permissionResponse as {
+                    outcome?: { outcome?: string; optionId?: string };
+                  }
+                )?.outcome;
+                const approved =
+                  outcome?.outcome === "selected" &&
+                  outcome.optionId === "allow_once";
+
+                if (approved) {
+                  const toolArgs = normalizeToolArgs(value.payload?.args);
+                  try {
+                    output = await executeCommand({
+                      command:
+                        typeof toolArgs.command === "string"
+                          ? toolArgs.command
+                          : String(toolArgs.command || ""),
+                      cwd: session.cwd,
+                      workspaceRoot: session.cwd,
+                      skipConfirmation: true,
+                      ...toolArgs,
+                    } as Parameters<typeof executeCommand>[0]);
+                  } catch (error) {
+                    output = {
+                      status: "failed",
+                      error: error instanceof Error ? error.message : String(error),
+                    };
+                  }
+                } else {
+                  output = {
+                    status: "failed",
+                    error: "Tool call was rejected by the user.",
+                  };
+                }
+              }
+
               await ctx.client.notify(acp.methods.client.session.update, {
                 sessionId: ctx.params.sessionId,
                 update: {
@@ -593,6 +836,48 @@ export const createAcpAgentApp = (
                   ],
                 },
               });
+              continue;
+            }
+
+            if (value.type === "tool-suspended" || value.type === "tool_suspended") {
+              const toolName = String(value.payload?.toolName || "tool");
+              const suppliedToolCallId = value.payload?.toolCallId;
+              const consumed = consumePendingInvocation(
+                toolName,
+                suppliedToolCallId,
+                undefined,
+              );
+              const toolCallId = consumed.toolCallId;
+              const suspendPayload =
+                value.payload?.suspendPayload &&
+                typeof value.payload.suspendPayload === "object"
+                  ? (value.payload.suspendPayload as Record<string, unknown>)
+                  : undefined;
+              const question = extractText(suspendPayload) || "Waiting for input to continue.";
+              await ctx.client.notify(acp.methods.client.session.update, {
+                sessionId: ctx.params.sessionId,
+                update: {
+                  sessionUpdate: "tool_call_update",
+                  toolCallId,
+                  status: "in_progress",
+                  rawOutput: suspendPayload,
+                  content: [
+                    {
+                      type: "content",
+                      content: { type: "text", text: question },
+                    },
+                  ],
+                },
+              });
+              await ctx.client.notify(acp.methods.client.session.update, {
+                sessionId: ctx.params.sessionId,
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: { type: "text", text: question },
+                },
+              });
+              suspendedTools.push({ toolName, toolCallId, suspendPayload });
+              continue;
             }
           }
 
@@ -614,7 +899,29 @@ export const createAcpAgentApp = (
           if (activeTurn.abortController.signal.aborted) {
             return { stopReason: "cancelled" as const };
           }
-          return { stopReason: "end_turn" as const };
+          await persistTurn(finalText || "");
+          const resolvedUsage =
+            usage &&
+            typeof usage.totalTokens === "number" &&
+            typeof usage.inputTokens === "number" &&
+            typeof usage.outputTokens === "number"
+              ? {
+                  totalTokens: usage.totalTokens,
+                  inputTokens: usage.inputTokens,
+                  outputTokens: usage.outputTokens,
+                }
+              : undefined;
+          const stopReason =
+            !finalText && stepsUsed >= effectiveMaxSteps
+              ? ("max_turn_requests" as const)
+              : ("end_turn" as const);
+          return {
+            stopReason,
+            ...(resolvedUsage ? { usage: resolvedUsage } : {}),
+            ...(suspendedTools.length
+              ? { _meta: { iris: { suspendedTools } } }
+              : {}),
+          };
         }
 
         const generated = await raceWithAbort(async () =>
@@ -622,6 +929,7 @@ export const createAcpAgentApp = (
             ? runtimeAgent.generate(promptText, {
               workspaceRoot: session.cwd,
               abortSignal: turnSignal,
+              maxSteps: effectiveMaxSteps,
             })
             : runtimeAgent.chat
               ? runtimeAgent.chat({
@@ -647,6 +955,7 @@ export const createAcpAgentApp = (
             },
           });
         }
+        await persistTurn(responseText || "");
         return { stopReason: "end_turn" as const };
       } catch (error) {
         if (activeTurn.abortController.signal.aborted) {
