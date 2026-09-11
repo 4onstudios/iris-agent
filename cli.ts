@@ -3,14 +3,19 @@
 /**
  * iris-agent CLI with ACP (Agent Client Protocol) support
  * Usage:
- *   iris-agent --workspace /path/to/workspace --modelId gpt-4o --acp
- *   iris-agent --workspace /path/to/workspace --modelId gpt-4o --chat
+ *   iris-agent --workspace /path/to/workspace --modelId openrouter/openai/gpt-4o --acp
+ *   iris-agent --workspace /path/to/workspace --modelId openrouter/openai/gpt-4o --chat
  */
 
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import { createCodingAgent } from "./api/core/agent/index.js";
 import { startAcpServer } from "./api/acp/acpServer.js";
+
+const defaultModelId =
+  process.env.MODEL_ID ||
+  process.env.OPENROUTER_MODEL ||
+  "openrouter/openai/gpt-4o";
 
 const argv = yargs(hideBin(process.argv))
   .option("workspace", {
@@ -34,7 +39,7 @@ const argv = yargs(hideBin(process.argv))
   .option("modelId", {
     type: "string",
     description: "Language model identifier",
-    default: "gpt-4o",
+    default: defaultModelId,
   })
   .help()
   .parseSync();
@@ -70,7 +75,7 @@ async function main() {
   } else if (argv.chat) {
     // Interactive chat mode
     console.log(`💬 Entering chat mode (type "exit" to quit)`);
-    await startChatMode(agent);
+    await startChatMode(agent, workspaceRoot);
   } else {
     // Default: show help
     yargs(hideBin(process.argv))
@@ -78,7 +83,7 @@ async function main() {
   }
 }
 
-async function startChatMode(agent: any) {
+async function startChatMode(agent: any, workspaceRoot?: string) {
   const readline = await import("readline");
   const rl = readline.createInterface({
     input: process.stdin,
@@ -88,23 +93,76 @@ async function startChatMode(agent: any) {
   const question = (prompt: string) =>
     new Promise<string>((resolve) => rl.question(prompt, resolve));
 
+  const threadId = `cli-chat-${Date.now()}`;
+  const resourceId = `cli-session`;
+
   try {
     while (true) {
       const input = await question("\n> ");
+      const trimmedInput = input.trim();
 
-      if (input.toLowerCase() === "exit") {
+      if (!trimmedInput) {
+        continue;
+      }
+
+      if (trimmedInput.toLowerCase() === "exit" || trimmedInput.toLowerCase() === "quit") {
         console.log("👋 Goodbye!");
         break;
       }
 
       try {
-        console.log("🤔 Processing...");
-        const response = await agent.chat({
-          messages: [{ role: "user", content: input }],
-        });
+        console.log("🤔 Processing...\n");
 
-        console.log("\n✅ Agent Response:");
-        console.log(response);
+        const options: Record<string, unknown> = {
+          threadId,
+          resourceId,
+          maxSteps: 50,
+          workspaceRoot,
+        };
+
+        if (typeof agent.stream === "function") {
+          const streamResult = await agent.stream(trimmedInput, options);
+          const reader = streamResult.fullStream.getReader();
+          let hasOutput = false;
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            if (value?.type === "text-delta" || value?.type === "reasoning-delta") {
+              const text = String(value.payload?.text || "");
+              if (text) {
+                process.stdout.write(text);
+                hasOutput = true;
+              }
+            } else if (value?.type === "tool-call") {
+              const toolName =
+                typeof value.payload?.toolName === "string"
+                  ? value.payload.toolName
+                  : "tool";
+              process.stdout.write(`\n⚙️  [Calling tool: ${toolName}]... `);
+            } else if (value?.type === "tool-result") {
+              process.stdout.write(`done.\n`);
+            }
+          }
+
+          if (!hasOutput && streamResult.text) {
+            const final = await streamResult.text;
+            if (final) {
+              console.log(final);
+            }
+          }
+          console.log();
+        } else if (typeof agent.generate === "function") {
+          const result = await agent.generate(trimmedInput, options);
+          const text =
+            typeof result === "string"
+              ? result
+              : result?.text || JSON.stringify(result, null, 2);
+          console.log("\n✅ Agent Response:\n" + text);
+        } else {
+          throw new Error("Agent does not support streaming or text generation");
+        }
       } catch (error) {
         console.error("❌ Error:", error);
       }

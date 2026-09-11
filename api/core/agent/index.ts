@@ -662,6 +662,9 @@ const getModel = (modelId: string) => {
 
   // Anthropic Claude models
   if (normalizedModelId.startsWith("claude")) {
+    if (!process.env.ANTHROPIC_API_KEY && process.env.OPENROUTER_API_KEY) {
+      return resolveOpenrouterModel(`anthropic/${normalizedModelId}`);
+    }
     if (anthropicBetaHeader) {
       console.warn(
         `[agent] using anthropic-beta header: ${anthropicBetaHeader}`,
@@ -674,6 +677,10 @@ const getModel = (modelId: string) => {
 
   // Google Gemini models
   if (normalizedModelId.startsWith("gemini") || normalizedModelId.startsWith("google/")) {
+    if (!process.env.GOOGLE_GENERATIVE_AI_API_KEY && !process.env.GEMINI_API_KEY && process.env.OPENROUTER_API_KEY) {
+      const cleanId = normalizedModelId.replace("google/", "");
+      return resolveOpenrouterModel(`google/${cleanId}`);
+    }
     const cleanId = normalizedModelId.replace("google/", "");
     return google(cleanId);
   }
@@ -684,10 +691,16 @@ const getModel = (modelId: string) => {
     normalizedModelId.startsWith("o1") ||
     normalizedModelId.startsWith("o3")
   ) {
+    if (!process.env.OPENAI_API_KEY && process.env.OPENROUTER_API_KEY) {
+      return resolveOpenrouterModel(`openai/${normalizedModelId}`);
+    }
     return openai(normalizedModelId);
   }
 
-  // Default to OpenAI
+  // Default to OpenRouter if OPENROUTER_API_KEY is present, else OpenAI
+  if (!process.env.OPENAI_API_KEY && process.env.OPENROUTER_API_KEY) {
+    return resolveOpenrouterModel(normalizedModelId);
+  }
   console.warn(`Unknown model provider for '${normalizedModelId}', defaulting to OpenAI`);
   return openai(normalizedModelId);
 };
