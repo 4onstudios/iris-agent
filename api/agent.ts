@@ -1857,6 +1857,22 @@ router.post(
         });
       };
 
+      const persistToolEvent = async (
+        eventType: "tool_call" | "tool_result",
+        payload: Record<string, unknown>,
+      ): Promise<void> => {
+        await safePersistRunLifecycleEvent({
+          runId: resolvedRunId,
+          lifecycleState,
+          stopReason,
+          eventType,
+          payload,
+          objective: typeof message === "string" ? message.slice(0, 2000) : "",
+          workspacePath: workspaceRoot || process.cwd(),
+          modelId,
+        });
+      };
+
       const transitionToCancelled = async (phase: string): Promise<void> => {
         await persistLifecycle("cancelled", "cancelled", "cancelled", {
           phase,
@@ -3010,8 +3026,10 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                 stopReason: "none",
                 eventType: "tool_call",
                 payload: {
-                  toolName,
+                  name: toolName,
+                  args: redactToolResult(pendingCall.args).result,
                   toolCallId: pendingCall.toolCallId,
+                  status: "pending",
                 },
               });
 
@@ -3119,11 +3137,10 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                 stopReason: "none",
                 eventType: "tool_result",
                 payload: {
-                  toolName,
-                  toolCallId:
-                    typeof chunk.payload?.toolCallId === "string"
-                      ? (chunk.payload.toolCallId as string)
-                      : undefined,
+                  name: toolName,
+                  args: redactToolResult(resultArgs).result,
+                  result: safeToolResult,
+                  toolCallId,
                   status: resolveToolExecutionStatus(safeToolResult),
                 },
               });
@@ -4471,6 +4488,26 @@ _You have discovered the following in earlier interactions. Use this to avoid re
         gitDetected,
         policyMode: gitSafetyMode,
       };
+
+      await Promise.all([
+        ...normalizedToolCalls.map((toolCall) =>
+          persistToolEvent("tool_call", {
+            name: toolCall.name,
+            args: redactToolResult(toolCall.args).result,
+            toolCallId: toolCall.toolCallId,
+            status: toolCall.status,
+          }),
+        ),
+        ...normalizedExecutedToolResults.map((toolResult) =>
+          persistToolEvent("tool_result", {
+            name: toolResult.name,
+            args: redactToolResult(toolResult.args).result,
+            result: toolResult.result,
+            toolCallId: toolResult.toolCallId,
+            status: toolResult.status,
+          }),
+        ),
+      ]);
 
       logTokenUsageSource({
         mode: "non_stream",

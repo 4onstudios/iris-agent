@@ -213,6 +213,98 @@ describe("agent run lifecycle APIs", () => {
     }
   });
 
+  it("persists detailed tool actions for replay clients", async () => {
+    mockGenerate.mockResolvedValueOnce({
+      text: "Found the requested code.",
+      steps: [
+        {
+          content: [
+            {
+              type: "tool-call",
+              toolName: "readFile",
+              toolCallId: "read-1",
+              args: { filePath: "src/index.ts", startLine: 1, endLine: 20 },
+            },
+            {
+              type: "tool-result",
+              toolName: "readFile",
+              toolCallId: "read-1",
+              result: {
+                success: true,
+                filePath: "src/index.ts",
+                content: "export const answer = 42;",
+              },
+            },
+            {
+              type: "tool-call",
+              toolName: "grepSearch",
+              toolCallId: "search-1",
+              args: { searchText: "answer", filePattern: "src/**/*.ts" },
+            },
+          ],
+          toolCalls: [],
+        },
+      ],
+      toolCalls: [],
+    });
+
+    const { server, baseUrl } = await startServer();
+
+    try {
+      const chatResponse = await requestJson(baseUrl, "POST", "/api/agent/chat", {
+        message: "Inspect the source",
+        modelId: "gpt-4o",
+        workspaceRoot: "/tmp/run-lifecycle",
+        isTauri: false,
+      });
+      expect(chatResponse.status).toBe(200);
+
+      const eventsResponse = await requestJson(
+        baseUrl,
+        "GET",
+        `/api/agent/runs/${chatResponse.body.runId}/events`,
+      );
+      expect(eventsResponse.status).toBe(200);
+
+      expect(eventsResponse.body.events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            eventType: "tool_call",
+            payload: {
+              name: "grepSearch",
+              args: {
+                searchText: "answer",
+                filePattern: "src/**/*.ts",
+              },
+              toolCallId: "search-1",
+              status: "pending",
+            },
+          }),
+          expect.objectContaining({
+            eventType: "tool_result",
+            payload: {
+              name: "readFile",
+              args: {
+                filePath: "src/index.ts",
+                startLine: 1,
+                endLine: 20,
+              },
+              result: {
+                success: true,
+                filePath: "src/index.ts",
+                content: "export const answer = 42;",
+              },
+              toolCallId: "read-1",
+              status: "completed",
+            },
+          }),
+        ]),
+      );
+    } finally {
+      await stopServer(server);
+    }
+  });
+
   it("rejects invalid client-provided run ids on chat requests", async () => {
     const { server, baseUrl } = await startServer();
 

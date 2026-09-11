@@ -104,6 +104,12 @@ Run lifecycle states and event payloads are returned by the run endpoints. Store
 the returned `runId` from a chat response if the client needs polling,
 progress-event retrieval, or cancellation.
 
+Persisted `tool_call` and `tool_result` events carry the complete, redacted
+action details needed to render a replayable tool timeline: `name`, `args`,
+`toolCallId`, and `status`; completed actions also include `result`. This lets
+clients show, for example, the path and line range read or the search query,
+matched files, and result counts without relying on the live stream.
+
 ### CLI Mode
 
 ```sh
