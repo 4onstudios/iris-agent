@@ -334,7 +334,17 @@ const resolveToolResultArgs = (
     : undefined;
 
   if (toolCallId) {
-    return argsByCallId.get(toolCallId) || explicitRecord || {};
+    const mappedArgs = argsByCallId.get(toolCallId);
+    if (
+      explicitRecord &&
+      (!mappedArgs ||
+        getToolCallSignature(toolName, explicitRecord) !==
+          getToolCallSignature(toolName, mappedArgs))
+    ) {
+      return explicitRecord;
+    }
+
+    return mappedArgs || explicitRecord || {};
   }
 
   if (explicitRecord) {
