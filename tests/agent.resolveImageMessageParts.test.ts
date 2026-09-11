@@ -87,6 +87,22 @@ describe("resolveImageMessageParts", () => {
     expect(parts).toHaveLength(0);
   });
 
+  it("blocks workspace symlinks that point outside the workspace", async () => {
+    const secretPath = path.join(externalRoot, "secret.png");
+    await fs.writeFile(secretPath, Buffer.from("secret-png-data"));
+
+    const symlinkPath = path.join(workspaceRoot, "secret-link.png");
+    await fs.symlink(secretPath, symlinkPath);
+
+    const parts = await resolveImageMessageParts(
+      [{ name: "secret-link.png", path: "secret-link.png", type: "image/png" }],
+      workspaceRoot,
+      false,
+    );
+
+    expect(parts).toHaveLength(0);
+  });
+
   it("passes through client-provided data URLs unchanged", async () => {
     const dataUrl = "data:image/png;base64,ZmFrZQ==";
 

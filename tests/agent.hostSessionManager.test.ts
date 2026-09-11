@@ -286,6 +286,9 @@ describe("HostSessionManager", () => {
         ).toBe(nativeTransport);
 
         await expect(result.getFinalResult()).resolves.toEqual({ text: "hello" });
+        await expect(result.getFinalResult()).resolves.toEqual({ text: "hello" });
+        expect(runtimeStreamResult.getFinalResult).toHaveBeenCalledTimes(1);
+        expect(onPostTurn).toHaveBeenCalledTimes(1);
         expect(onPostTurn).toHaveBeenCalledWith(
             expect.objectContaining({
                 request: expect.objectContaining({ input: "stream this" }),

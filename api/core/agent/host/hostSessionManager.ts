@@ -525,19 +525,26 @@ export class HostSessionManager<TRuntime extends AgentRuntime> {
     await enforceDeclaredToolHooks(managed.config.hooks, turnRequest, invocation);
 
     const streamResult = await managed.runtime.runTurnStream(turnRequest);
+    let finalizedResultPromise: Promise<AgentTurnResult> | undefined;
     return {
       ...(streamResult as Record<string, unknown>),
       stream: streamResult.stream,
       getFinalResult: async () => {
-        const finalResult = await streamResult.getFinalResult();
-        await runPostToolHooks(managed.config.hooks, finalResult, invocation);
-        await Promise.resolve(
-          managed.config.hooks?.onPostTurn?.(
-            { request: turnRequest, result: finalResult },
-            invocation,
-          ),
-        );
-        return finalResult;
+        if (!finalizedResultPromise) {
+          finalizedResultPromise = (async () => {
+            const finalResult = await streamResult.getFinalResult();
+            await runPostToolHooks(managed.config.hooks, finalResult, invocation);
+            await Promise.resolve(
+              managed.config.hooks?.onPostTurn?.(
+                { request: turnRequest, result: finalResult },
+                invocation,
+              ),
+            );
+            return finalResult;
+          })();
+        }
+
+        return finalizedResultPromise;
       },
     };
   }

@@ -23,6 +23,15 @@ export type ResolvedImageMessagePart = {
   mediaType?: string;
 };
 
+const isPathWithin = (basePath: string, targetPath: string): boolean => {
+  const relative = path.relative(basePath, targetPath);
+  return !(
+    path.isAbsolute(relative) ||
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`)
+  );
+};
+
 const resolveImageMediaType = (file: ImageContextFile): string | undefined => {
   const rawType =
     typeof file?.type === "string" ? file.type.trim().toLowerCase() : "";
@@ -72,6 +81,9 @@ export const resolveImageMessageParts = async (
 ): Promise<ResolvedImageMessagePart[]> => {
   const parts: ResolvedImageMessagePart[] = [];
   const resolvedWorkspace = path.resolve(workspacePath);
+  const realWorkspace = await fs
+    .realpath(resolvedWorkspace)
+    .catch(() => resolvedWorkspace);
   let imagesIncluded = 0;
 
   for (const file of filesInContext) {
@@ -133,17 +145,14 @@ export const resolveImageMessageParts = async (
       : path.resolve(path.join(resolvedWorkspace, filePathValue));
 
     if (!path.isAbsolute(filePathValue)) {
-      if (!absolutePath.startsWith(resolvedWorkspace + path.sep)) {
+      if (!isPathWithin(resolvedWorkspace, absolutePath)) {
         console.warn(
           "Skipping path-traversing relative image path:",
           filePathValue,
         );
         continue;
       }
-    } else if (
-      !allowOutOfWorkspace &&
-      !absolutePath.startsWith(resolvedWorkspace + path.sep)
-    ) {
+    } else if (!allowOutOfWorkspace && !isPathWithin(resolvedWorkspace, absolutePath)) {
       console.warn(
         "Skipping out-of-workspace absolute image path:",
         filePathValue,
@@ -155,6 +164,16 @@ export const resolveImageMessageParts = async (
       const stats = await fs.stat(absolutePath);
       if (!stats.isFile()) {
         continue;
+      }
+      if (!allowOutOfWorkspace) {
+        const realAbsolutePath = await fs.realpath(absolutePath);
+        if (!isPathWithin(realWorkspace, realAbsolutePath)) {
+          console.warn(
+            "Skipping symlinked out-of-workspace image path:",
+            filePathValue,
+          );
+          continue;
+        }
       }
       if (stats.size > MAX_IMAGE_FILE_SIZE_BYTES) {
         console.warn(

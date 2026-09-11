@@ -504,6 +504,86 @@ describe("ACP server", () => {
         });
     });
 
+    it("does not start a replacement turn if the session closes while cancelling the previous turn", async () => {
+        let firstReadStarted = false;
+        let releaseFirstRead!: () => void;
+        const firstRead = new Promise<{
+            done: boolean;
+            value?: { type?: string; payload?: Record<string, unknown> };
+        }>((resolve) => {
+            releaseFirstRead = () => resolve({ done: true });
+        });
+        let resolveFirstCancel!: () => void;
+        const firstCancel = new Promise<void>((resolve) => {
+            resolveFirstCancel = resolve;
+        });
+
+        const runtime: AcpRuntimeAgent = {
+            stream: jest
+                .fn()
+                .mockImplementationOnce(async () => ({
+                    fullStream: {
+                        getReader: () => ({
+                            read: async () => {
+                                firstReadStarted = true;
+                                return await firstRead;
+                            },
+                            cancel: async () => await firstCancel,
+                        }),
+                    },
+                    text: Promise.resolve(""),
+                }))
+                .mockImplementationOnce(async () => ({
+                    fullStream: new ReadableStream({
+                        start(controller) {
+                            controller.close();
+                        },
+                    }),
+                    text: Promise.resolve("should-not-run"),
+                })),
+        };
+        const client = acp.client({ name: "iris-agent-test-client" });
+
+        await client.connectWith(createAcpAgentApp(runtime), async (ctx) => {
+            await ctx.request(acp.methods.agent.initialize, {
+                protocolVersion: acp.PROTOCOL_VERSION,
+                clientCapabilities: {},
+            });
+            const session = await ctx.request(acp.methods.agent.session.new, {
+                cwd: "/workspace",
+                mcpServers: [],
+            });
+
+            const firstPrompt = ctx.request(acp.methods.agent.session.prompt, {
+                sessionId: session.sessionId,
+                prompt: [{ type: "text", text: "first" }],
+            });
+            while (!firstReadStarted) {
+                await Promise.resolve();
+            }
+
+            const secondPrompt = ctx.request(acp.methods.agent.session.prompt, {
+                sessionId: session.sessionId,
+                prompt: [{ type: "text", text: "second" }],
+            });
+
+            await Promise.resolve();
+            await expect(
+                ctx.request(acp.methods.agent.session.close, {
+                    sessionId: session.sessionId,
+                }),
+            ).resolves.toEqual({});
+
+            resolveFirstCancel();
+            releaseFirstRead();
+
+            await expect(firstPrompt).resolves.toEqual({ stopReason: "cancelled" });
+            await expect(secondPrompt).resolves.toEqual({ stopReason: "cancelled" });
+        });
+
+        expect(runtime.stream).toHaveBeenCalledTimes(1);
+    });
+
     it("cancels after stream completion but before final text resolves", async () => {
         let resolveText!: (value: string) => void;
         const finalText = new Promise<string>((resolve) => {
