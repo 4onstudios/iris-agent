@@ -2258,14 +2258,31 @@ router.post(
         });
       };
 
+      let isWebWorkspaceForPersistence = false;
       const persistToolEvent = async (
         eventType: "tool_call" | "tool_result",
         payload: Record<string, unknown>,
         eventLifecycleState = lifecycleState,
       ): Promise<void> => {
+        const toolName =
+          typeof payload.name === "string"
+            ? payload.name
+            : typeof payload.toolName === "string"
+              ? payload.toolName
+              : "";
+        const effectiveArgs =
+          "args" in payload && isRecordValue(payload.args)
+            ? sanitizeToolArgsForWorkspace(
+                toolName,
+                payload.args,
+                isWebWorkspaceForPersistence,
+              )
+            : payload.args;
         const args =
           "args" in payload
-            ? summarizeToolArgsForPersistence(payload.args)
+            ? summarizeToolArgsForPersistence(
+                redactToolResult(effectiveArgs).result,
+              )
             : undefined;
         const result =
           "result" in payload
@@ -2658,6 +2675,7 @@ router.post(
 
       // Detect if this is a web-based workspace (virtual path)
       const isWebWorkspace = workspacePath.startsWith("/workspace/");
+      isWebWorkspaceForPersistence = isWebWorkspace;
 
       // Generate environment snapshot for first message (non-web workspaces only)
       let envSnapshotMarkdown = "";
@@ -3488,7 +3506,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                 {
                   name: toolName,
                   toolName,
-                  args: redactToolResult(pendingCall.args).result,
+                  args: pendingCall.args,
                   toolCallId: pendingCall.toolCallId,
                   status: "pending",
                 },
@@ -3592,6 +3610,25 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                 toolCallId,
                 status: resolveToolExecutionStatus(safeToolResult),
               });
+              const persistedResultActionKey = getPersistedStreamToolActionKey(
+                "tool_result",
+                toolName,
+                toolCallId,
+                resultArgs,
+              );
+              persistedStreamToolActionKeys.add(persistedResultActionKey);
+              await persistToolEvent(
+                "tool_result",
+                {
+                  name: toolName,
+                  toolName,
+                  args: resultArgs,
+                  result: safeToolResult,
+                  toolCallId,
+                  status: resolveToolExecutionStatus(safeToolResult),
+                },
+                "running",
+              );
 
               continue;
             }
@@ -4103,7 +4140,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
               {
                 name: action.name,
                 toolName: action.name,
-                args: redactToolResult(action.args).result,
+                args: action.args,
                 ...(action.eventType === "tool_result"
                   ? { result: action.result }
                   : {}),
@@ -4549,6 +4586,26 @@ _You have discovered the following in earlier interactions. Use this to avoid re
         (toolName, args) =>
           sanitizeToolArgsForWorkspace(toolName, args, isWebWorkspace),
       );
+      const persistedReplayActions = new Set<PersistedToolAction>();
+      const persistReplayToolActions = async (
+        actions: PersistedToolAction[],
+      ): Promise<void> => {
+        for (const action of actions) {
+          if (persistedReplayActions.has(action)) continue;
+          persistedReplayActions.add(action);
+          await persistToolEvent(action.eventType, {
+            name: action.name,
+            toolName: action.name,
+            args: action.args,
+            ...(action.eventType === "tool_result"
+              ? { result: action.result }
+              : {}),
+            toolCallId: action.toolCallId,
+            status: action.status,
+          });
+        }
+      };
+      await persistReplayToolActions(replayToolActions);
 
       const uniqueThoughtSteps = Array.from(
         new Set(
@@ -4949,15 +5006,15 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             ),
           );
 
-          replayToolActions.push(
-            ...buildOrderedPersistedToolActions(
-              autoFixResult.steps,
-              autoFixNormalizedToolCalls,
-              autoFixNormalizedExecutedResults,
-              (toolName, args) =>
-                sanitizeToolArgsForWorkspace(toolName, args, isWebWorkspace),
-            ),
+          const autoFixReplayActions = buildOrderedPersistedToolActions(
+            autoFixResult.steps,
+            autoFixNormalizedToolCalls,
+            autoFixNormalizedExecutedResults,
+            (toolName, args) =>
+              sanitizeToolArgsForWorkspace(toolName, args, isWebWorkspace),
           );
+          replayToolActions.push(...autoFixReplayActions);
+          await persistReplayToolActions(autoFixReplayActions);
           normalizedToolCalls.length = 0;
           normalizedToolCalls.push(...autoFixNormalizedToolCalls);
           normalizedExecutedToolResults.length = 0;
@@ -5007,18 +5064,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
         policyMode: gitSafetyMode,
       };
 
-      for (const action of replayToolActions) {
-        await persistToolEvent(action.eventType, {
-          name: action.name,
-          toolName: action.name,
-          args: redactToolResult(action.args).result,
-          ...(action.eventType === "tool_result"
-            ? { result: action.result }
-            : {}),
-          toolCallId: action.toolCallId,
-          status: action.status,
-        });
-      }
+      await persistReplayToolActions(replayToolActions);
 
       logTokenUsageSource({
         mode: "non_stream",
