@@ -1868,6 +1868,55 @@ const truncatePersistedSummaryString = (value: string): string => {
   return value.slice(0, PERSISTED_TOOL_RESULT_SUMMARY_FIELD_CHARS);
 };
 
+const getJsonByteLength = (value: unknown): number | null => {
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) return null;
+  return Buffer.byteLength(serialized, "utf8");
+};
+
+const enforcePersistedSummaryByteLimit = (
+  summary: Record<string, unknown>,
+): Record<string, unknown> => {
+  const bounded = { ...summary };
+  const currentByteLength = (): number => getJsonByteLength(bounded) ?? 0;
+
+  const shrinkStringField = (key: string): void => {
+    const value = bounded[key];
+    if (typeof value !== "string" || value.length === 0) return;
+
+    while (currentByteLength() > MAX_PERSISTED_TOOL_RESULT_BYTES) {
+      const current = bounded[key];
+      if (typeof current !== "string" || current.length === 0) break;
+      const overage =
+        currentByteLength() - MAX_PERSISTED_TOOL_RESULT_BYTES;
+      const nextLength = Math.max(0, current.length - Math.max(1, overage));
+      bounded[key] = current.slice(0, nextLength);
+      if (nextLength === 0) break;
+    }
+  };
+
+  shrinkStringField("preview");
+  const stringKeys = Object.keys(bounded)
+    .filter((key) => key !== "preview" && typeof bounded[key] === "string")
+    .sort(
+      (a, b) =>
+        String(bounded[b]).length - String(bounded[a]).length,
+    );
+  for (const key of stringKeys) {
+    if (currentByteLength() <= MAX_PERSISTED_TOOL_RESULT_BYTES) break;
+    shrinkStringField(key);
+  }
+
+  if (currentByteLength() > MAX_PERSISTED_TOOL_RESULT_BYTES) {
+    for (const key of ["preview", ...stringKeys]) {
+      if (currentByteLength() <= MAX_PERSISTED_TOOL_RESULT_BYTES) break;
+      delete bounded[key];
+    }
+  }
+
+  return bounded;
+};
+
 const summarizeToolResultForPersistence = (result: unknown): unknown => {
   let serialized: string | undefined;
   try {
@@ -1897,7 +1946,7 @@ const summarizeToolResultForPersistence = (result: unknown): unknown => {
     preview: serialized.slice(0, PERSISTED_TOOL_RESULT_PREVIEW_CHARS),
   };
   if (!result || typeof result !== "object" || Array.isArray(result)) {
-    return summary;
+    return enforcePersistedSummaryByteLimit(summary);
   }
 
   const record = result as Record<string, unknown>;
@@ -1920,7 +1969,7 @@ const summarizeToolResultForPersistence = (result: unknown): unknown => {
     }
   }
 
-  return summary;
+  return enforcePersistedSummaryByteLimit(summary);
 };
 
 const normalizeToolActionPayload = (

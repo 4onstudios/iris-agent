@@ -395,6 +395,7 @@ describe("agent run lifecycle APIs", () => {
 
   it("persists bounded streaming results with the matching call arguments", async () => {
     const largeContent = "x".repeat(20 * 1024);
+    const largeError = "failed: ".concat("E".repeat(2 * 1024 * 1024));
     const runId = `run-stream-result-${Date.now()}`;
     mockCreateCodingAgent.mockResolvedValueOnce({
       generate: mockGenerate,
@@ -417,7 +418,11 @@ describe("agent run lifecycle APIs", () => {
             payload: {
               toolName: "readFile",
               toolCallId: "stream-read-1",
-              result: { success: true, content: largeContent },
+              result: {
+                success: false,
+                error: largeError,
+                content: largeContent,
+              },
             },
           },
         ]),
@@ -446,6 +451,21 @@ describe("agent run lifecycle APIs", () => {
         `/api/agent/runs/${runId}/events`,
       );
       expect(eventsResponse.status).toBe(200);
+      const persistedResultEvent = eventsResponse.body.events.find(
+        (event: { eventType: string; payload?: { name?: string } }) =>
+          event.eventType === "tool_result" &&
+          event.payload?.name === "readFile",
+      );
+      expect(persistedResultEvent).toBeDefined();
+      const serializedPersistedResult = JSON.stringify(
+        persistedResultEvent.payload.result,
+      );
+      expect(
+        Buffer.byteLength(serializedPersistedResult, "utf8"),
+      ).toBeLessThanOrEqual(16 * 1024);
+      expect(
+        persistedResultEvent.payload.result.error.length,
+      ).toBeLessThanOrEqual(1024);
       expect(eventsResponse.body.events).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -460,6 +480,7 @@ describe("agent run lifecycle APIs", () => {
               result: expect.objectContaining({
                 truncated: true,
                 originalByteLength: expect.any(Number),
+                success: false,
               }),
             }),
           }),
