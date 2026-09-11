@@ -7,6 +7,13 @@ import {
 } from "../api/core/agent/utils/toolLifecycle";
 
 describe("normalizeToolLifecycle", () => {
+  it("recognizes camel-case isError results as failures", () => {
+    expect(resolveToolExecutionStatus({ isError: true })).toBe("failed");
+    expect(resolveToolExecutionStatus({ value: { isError: true } })).toBe(
+      "failed",
+    );
+  });
+
   it("keeps only terminal executed result for the same tool call", () => {
     const pending: PendingToolCall[] = [];
     const executed: ExecutedToolResult[] = [
@@ -293,6 +300,94 @@ describe("normalizeToolLifecycle", () => {
     ];
 
     expect(countUniqueToolCalls([], executed)).toBe(2);
+  });
+
+  it("treats a reused tool call ID with different operation details as a distinct invocation", () => {
+    const executed: ExecutedToolResult[] = [
+      {
+        name: "readFile",
+        args: { filePath: "src/index.ts" },
+        toolCallId: "reused-id",
+        result: { status: "completed" },
+      },
+      {
+        name: "writeFile",
+        args: { filePath: "src/index.ts", content: "updated" },
+        toolCallId: "reused-id",
+        result: { status: "completed" },
+      },
+    ];
+
+    const normalized = normalizeToolLifecycle([], executed);
+
+    expect(normalized.executedToolResults).toHaveLength(2);
+    expect(countUniqueToolCalls([], normalized.executedToolResults)).toBe(2);
+  });
+
+  it("reconciles identified calls when one side omits argument details", () => {
+    const pending: PendingToolCall[] = [
+      {
+        name: "readFile",
+        args: { filePath: "src/index.ts" },
+        toolCallId: "shared-id",
+      },
+    ];
+    const executed: ExecutedToolResult[] = [
+      {
+        name: "readFile",
+        args: {},
+        toolCallId: "shared-id",
+        result: { status: "completed", content: "ok" },
+      },
+    ];
+
+    const normalized = normalizeToolLifecycle(pending, executed);
+
+    expect(normalized.pendingToolCalls).toEqual([]);
+    expect(normalized.executedToolResults).toEqual([
+      expect.objectContaining({
+        name: "readFile",
+        args: { filePath: "src/index.ts" },
+        toolCallId: "shared-id",
+      }),
+    ]);
+    expect(countUniqueToolCalls(pending, executed)).toBe(1);
+  });
+
+  it("treats repeated detailed snapshots as one signature when reconciling an omitted-args identified result", () => {
+    const pending: PendingToolCall[] = [
+      {
+        name: "readFile",
+        args: { filePath: "src/index.ts" },
+        toolCallId: "shared-id",
+      },
+    ];
+    const executed: ExecutedToolResult[] = [
+      {
+        name: "readFile",
+        args: { filePath: "src/index.ts" },
+        toolCallId: "shared-id",
+        result: { status: "in_progress" },
+      },
+      {
+        name: "readFile",
+        args: {},
+        toolCallId: "shared-id",
+        result: { status: "completed" },
+      },
+    ];
+
+    const normalized = normalizeToolLifecycle(pending, executed);
+
+    expect(normalized.pendingToolCalls).toEqual([]);
+    expect(normalized.executedToolResults).toEqual([
+      expect.objectContaining({
+        name: "readFile",
+        args: { filePath: "src/index.ts" },
+        toolCallId: "shared-id",
+      }),
+    ]);
+    expect(countUniqueToolCalls(pending, executed)).toBe(1);
   });
 
   it("preserves anonymous result multiplicity when counting pre-normalized results", () => {

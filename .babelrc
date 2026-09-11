@@ -5,8 +5,9 @@
 
       {
         "targets": {
-          "esmodules": true
-        }
+          "node": "current"
+        },
+        "modules": "commonjs"
       }
     ],
     "@babel/preset-react"

@@ -3,8 +3,8 @@
 /**
  * iris-agent CLI with ACP (Agent Client Protocol) support
  * Usage:
- *   iris-agent --workspace /path/to/workspace --acp
- *   iris-agent --chat --workspace /path/to/workspace
+ *   iris-agent --workspace /path/to/workspace --modelId gpt-4o --acp
+ *   iris-agent --workspace /path/to/workspace --modelId gpt-4o --chat
  */
 
 import yargs from "yargs";
@@ -31,28 +31,42 @@ const argv = yargs(hideBin(process.argv))
     description: "Interactive chat mode",
     default: false,
   })
-  .option("port", {
-    alias: "p",
-    type: "number",
-    description: "Port for ACP server",
-    default: 3000,
+  .option("modelId", {
+    type: "string",
+    description: "Language model identifier",
+    default: "gpt-4o",
   })
   .help()
   .parseSync();
 
 async function main() {
   const workspaceRoot = argv.workspace as string;
+  const modelId = argv.modelId;
+
+  if (argv.acp) {
+    const stderrLog = console.error.bind(console);
+    console.log = stderrLog;
+    console.debug = stderrLog;
+    console.info = stderrLog;
+    console.warn = stderrLog;
+    console.dir = stderrLog;
+    console.table = stderrLog;
+    console.trace = stderrLog;
+    console.group = stderrLog;
+    console.groupCollapsed = stderrLog;
+    console.groupEnd = stderrLog;
+  }
 
   console.log(`🚀 Iris Agent CLI`);
   console.log(`📁 Workspace: ${workspaceRoot}`);
+  console.log(`🤖 Model: ${modelId}`);
 
   // Create agent instance
-  const agent = await createCodingAgent("gpt-4", workspaceRoot);
+  const agent = await createCodingAgent(modelId, workspaceRoot);
 
   if (argv.acp) {
-    // Start ACP server mode
-    console.log(`🔗 Starting ACP server on port ${argv.port}...`);
-    await startAcpServer(agent, argv.port as number);
+    console.log("🔗 Starting ACP server over stdio...");
+    await startAcpServer(agent, workspaceRoot);
   } else if (argv.chat) {
     // Interactive chat mode
     console.log(`💬 Entering chat mode (type "exit" to quit)`);

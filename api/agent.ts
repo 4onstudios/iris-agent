@@ -2,11 +2,6 @@ import express from "express";
 import type { Request, Response, NextFunction } from "express";
 import os from "os";
 import { randomUUID } from "node:crypto";
-import {
-  createCodingAgent,
-  createAgentRequestContext,
-  getSkillsList,
-} from "./core/agent/index";
 import fsNative from "fs";
 import fs from "fs/promises";
 import path from "path";
@@ -46,8 +41,13 @@ import { redactToolResult } from "./core/agent/utils/toolResultSafetyProcessor";
 import type { ToolCallBudget } from "./core/agent/utils/toolCallBudget";
 import { serializeToolResultsForContinuation } from "./core/containers/chat/toolResultSerialization";
 import {
+  type AgentRuntime,
+  type AgentStreamEvent,
+  type AgentTurnStreamResult,
+  type HostSessionHandle,
   createDefaultAgentRegistry,
   ExternalAgentLifecycleManager,
+  HostSessionManager,
 } from "./core/agent/host";
 import {
   truncateText,
@@ -55,6 +55,10 @@ import {
   resolveModelInputTokenLimit,
   resolveModelSupportsVision,
 } from "./helpers/promptBudget";
+import {
+  isLikelyImageFile,
+  resolveImageMessageParts,
+} from "./helpers/resolveImageMessageParts";
 import {
   parseSlashCommandRequest,
   getSlashCommandDescriptors,
@@ -96,6 +100,7 @@ import {
 } from "./data/runStore";
 
 const router = express.Router();
+const activeChatSessionTurns = new Set<string>();
 
 type ChatRole = "user" | "assistant" | "system" | "tool";
 
@@ -152,7 +157,7 @@ type AgentChatRequestBody = {
   enableSlashCommands?: boolean;
   enabledSkills?: string[];
   approvalMode?:
-    "Default Approvals" | "Bypass Approvals" | "Autopilot (Preview)";
+  "Default Approvals" | "Bypass Approvals" | "Autopilot (Preview)";
   preferredAgentId?: string;
   mcpServers?: McpServerConfig[];
   terminalAutoApproveRules?: TerminalAutoApproveRules;
@@ -207,6 +212,29 @@ type AgentGenerateResult = {
   usage?: unknown;
 };
 
+type NativeAgentStreamChunk = {
+  type?: string;
+  payload?: Record<string, unknown>;
+};
+
+type NativeAgentStreamResult = {
+  fullStream: ReadableStream<NativeAgentStreamChunk>;
+  text: Promise<string>;
+  toolCalls: Promise<
+    Array<{
+      toolName?: string;
+      args?: Record<string, unknown>;
+      toolCallId?: string;
+    }>
+  >;
+  usage?: Promise<unknown> | unknown;
+  steps?: Promise<StreamStep[]> | StreamStep[];
+};
+
+type GeneratedAgentTurnStreamResult = AgentTurnStreamResult & {
+  rawStreamResult: NativeAgentStreamResult;
+};
+
 type GeneratedAgent = {
   // eslint-disable-next-line no-unused-vars
   generate: (
@@ -231,51 +259,10 @@ type GeneratedAgent = {
     result: Record<string, unknown>;
   }>;
   clearProcessedWorkspaceResults?: (generationId: string) => void;
+  stream?: (
+    ...args: [string | MultimodalMessage[], Record<string, unknown>]
+  ) => Promise<NativeAgentStreamResult>;
 };
-
-const IMAGE_EXT_TO_MIME: Record<string, string> = {
-  png: "image/png",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  webp: "image/webp",
-  gif: "image/gif",
-  bmp: "image/bmp",
-  svg: "image/svg+xml",
-  avif: "image/avif",
-};
-
-const MAX_IMAGE_FILE_SIZE_BYTES = 5 * 1024 * 1024;
-const MAX_IMAGES_PER_REQUEST = 1;
-
-const resolveImageMediaType = (
-  file: Record<string, any>,
-): string | undefined => {
-  const rawType =
-    typeof file?.type === "string" ? file.type.trim().toLowerCase() : "";
-  if (rawType.startsWith("image/")) {
-    return rawType;
-  }
-
-  const ext =
-    typeof file?.name === "string"
-      ? file.name.split(".").pop()?.toLowerCase() || ""
-      : "";
-  return IMAGE_EXT_TO_MIME[ext] || undefined;
-};
-
-const isLikelyImageFile = (file: Record<string, any>): boolean => {
-  const mediaType = resolveImageMediaType(file);
-  if (mediaType) {
-    return true;
-  }
-
-  const pathValue =
-    typeof file?.path === "string" ? file.path.toLowerCase() : "";
-  return /\.(png|jpe?g|webp|gif|bmp|svg|avif)$/.test(pathValue);
-};
-
-const toDataUrlFromBuffer = (bytes: Buffer, mediaType: string): string =>
-  `data:${mediaType};base64,${bytes.toString("base64")}`;
 
 /**
  * Safely extract error message from any thrown value.
@@ -307,127 +294,6 @@ const sanitizeToolArgsForWorkspace = (
   const sanitizedArgs = { ...normalizedArgs };
   delete sanitizedArgs.workspacePath;
   return sanitizedArgs;
-};
-
-export const resolveImageMessageParts = async (
-  filesInContext: Array<Record<string, any>>,
-  workspacePath: string,
-  isWebWorkspace: boolean,
-  allowOutOfWorkspace = false,
-): Promise<MultimodalContentPart[]> => {
-  const parts: MultimodalContentPart[] = [];
-  const resolvedWorkspace = path.resolve(workspacePath);
-  let imagesIncluded = 0;
-
-  for (const file of filesInContext) {
-    if (!isLikelyImageFile(file)) {
-      continue;
-    }
-
-    // Limit to 1 image per request to prevent token budget exhaustion
-    if (imagesIncluded >= MAX_IMAGES_PER_REQUEST) {
-      console.warn("Skipping image: reached maximum images per request limit");
-      continue;
-    }
-
-    const mediaType = resolveImageMediaType(file) || "image/png";
-    const encodedFromClient =
-      typeof file?.imageDataUrl === "string" ? file.imageDataUrl.trim() : "";
-    if (encodedFromClient.startsWith("data:image/")) {
-      parts.push({
-        type: "image",
-        image: encodedFromClient,
-        mediaType,
-      });
-      imagesIncluded++;
-      continue;
-    }
-
-    const directUrlCandidates = [file?.imageUrl, file?.previewUrl, file?.path]
-      .filter(
-        (value): value is string =>
-          typeof value === "string" && value.trim().length > 0,
-      )
-      .map((value) => value.trim());
-    const httpsUrl = directUrlCandidates.find((value) =>
-      /^https?:\/\//i.test(value),
-    );
-    if (httpsUrl) {
-      parts.push({
-        type: "image",
-        image: httpsUrl,
-        mediaType,
-      });
-      imagesIncluded++;
-      continue;
-    }
-
-    if (isWebWorkspace) {
-      continue;
-    }
-
-    const filePathValue =
-      typeof file?.path === "string" && file.path.trim().length > 0
-        ? file.path.trim()
-        : "";
-    if (!filePathValue || /^blob:/i.test(filePathValue)) {
-      continue;
-    }
-
-    const absolutePath = path.isAbsolute(filePathValue)
-      ? path.resolve(filePathValue)
-      : path.resolve(path.join(resolvedWorkspace, filePathValue));
-
-    if (!path.isAbsolute(filePathValue)) {
-      if (!absolutePath.startsWith(resolvedWorkspace + path.sep)) {
-        console.warn(
-          "Skipping path-traversing relative image path:",
-          filePathValue,
-        );
-        continue;
-      }
-    } else if (
-      !allowOutOfWorkspace &&
-      !absolutePath.startsWith(resolvedWorkspace + path.sep)
-    ) {
-      console.warn(
-        "Skipping out-of-workspace absolute image path:",
-        filePathValue,
-      );
-      continue;
-    }
-
-    try {
-      const stats = await fs.stat(absolutePath);
-      if (!stats.isFile()) {
-        continue;
-      }
-      if (stats.size > MAX_IMAGE_FILE_SIZE_BYTES) {
-        console.warn(
-          "Skipping oversized image:",
-          filePathValue,
-          `${stats.size} bytes exceeds limit of ${MAX_IMAGE_FILE_SIZE_BYTES} bytes`,
-        );
-        continue;
-      }
-      const bytes = await fs.readFile(absolutePath);
-      parts.push({
-        type: "image",
-        image: toDataUrlFromBuffer(bytes, mediaType),
-        mediaType,
-      });
-      imagesIncluded++;
-    } catch (err) {
-      // Skip unreadable image paths and continue with other context files.
-      console.warn(
-        "Failed to read image:",
-        filePathValue,
-        getErrorMessage(err),
-      );
-    }
-  }
-
-  return parts;
 };
 
 type ExecutedToolResult = {
@@ -520,14 +386,27 @@ const reconcileToolLifecycleSnapshots = (
     const streamedById = new Map(
       streamed
         .map((entry, index) =>
-          entry.toolCallId ? [entry.toolCallId, index] : undefined,
+          entry.toolCallId
+            ? [
+                `${entry.toolCallId}:${getToolCallSignature(
+                  entry.name,
+                  entry.args || {},
+                )}`,
+                index,
+              ]
+            : undefined,
         )
         .filter((entry): entry is [string, number] => entry !== undefined),
     );
 
     for (const entry of snapshot) {
       if (entry.toolCallId) {
-        const matchingIndex = streamedById.get(entry.toolCallId);
+        const matchingIndex = streamedById.get(
+          `${entry.toolCallId}:${getToolCallSignature(
+            entry.name,
+            entry.args || {},
+          )}`,
+        );
         if (matchingIndex !== undefined) {
           merged[matchingIndex] = entry;
           claimedStreamedIndexes.add(matchingIndex);
@@ -540,7 +419,7 @@ const reconcileToolLifecycleSnapshots = (
           !claimedStreamedIndexes.has(index) &&
           (!streamedEntry.toolCallId || !entry.toolCallId) &&
           getToolCallSignature(streamedEntry.name, streamedEntry.args || {}) ===
-            getToolCallSignature(entry.name, entry.args || {}),
+          getToolCallSignature(entry.name, entry.args || {}),
       );
       if (matchingIndex === -1) {
         merged.push(entry);
@@ -665,6 +544,14 @@ const DEFAULT_PROMPT_TOKEN_BUDGET_RATIO = 0.55;
 const MIN_PROMPT_TOKEN_BUDGET = 4096;
 const PROMPT_TOKEN_RESERVE = 6144;
 const agentCache = new Map<string, GeneratedAgent>();
+type AgentCoreModule = typeof import("./core/agent/index");
+let agentCoreModulePromise: Promise<AgentCoreModule> | undefined;
+const loadAgentCoreModule = (): Promise<AgentCoreModule> => {
+  if (!agentCoreModulePromise) {
+    agentCoreModulePromise = import("./core/agent/index");
+  }
+  return agentCoreModulePromise;
+};
 const REMOTE_CHAT_SESSIONS_DIR = path.join(
   os.homedir(),
   ".iris",
@@ -852,15 +739,323 @@ const generateWithRetry = async (
   agent: GeneratedAgent,
   prompt: string | MultimodalMessage[],
   generateOptions: Record<string, unknown>,
+  abortSignal: AbortSignal,
   maxAttempts = 3,
 ): Promise<AgentGenerateResult> => {
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (abortSignal.aborted) {
+      throw new Error("Run cancelled");
+    }
     try {
       return await agent.generate(prompt, generateOptions);
     } catch (error) {
       lastError = error;
+      if (abortSignal.aborted) {
+        throw error;
+      }
+      const shouldRetry = isRetryableModelError(error) && attempt < maxAttempts;
+
+      if (!shouldRetry) {
+        throw error;
+      }
+
+      const backoffMs = 600 * 2 ** (attempt - 1);
+      console.warn(
+        `[agent] transient model error (attempt ${attempt}/${maxAttempts}); retrying in ${backoffMs}ms`,
+      );
+      await sleep(backoffMs);
+    }
+  }
+
+  throw lastError;
+};
+
+const asGenerateResultFromTurn = (turnResult: {
+  text: string;
+  raw?: unknown;
+}): AgentGenerateResult => {
+  if (turnResult.raw && typeof turnResult.raw === "object") {
+    return turnResult.raw as AgentGenerateResult;
+  }
+
+  return {
+    text: turnResult.text,
+  };
+};
+
+const createGeneratedAgentRuntimeAdapter = (
+  agent: GeneratedAgent,
+): AgentRuntime => {
+  const turnAbortControllers = new Map<string, AbortController>();
+
+  const createTurnAbortController = (sessionId: string): AbortController => {
+    const controller = new AbortController();
+    turnAbortControllers.set(sessionId, controller);
+    return controller;
+  };
+
+  const clearTurnAbortController = (
+    sessionId: string,
+    controller: AbortController,
+  ): void => {
+    const active = turnAbortControllers.get(sessionId);
+    if (active === controller) {
+      turnAbortControllers.delete(sessionId);
+    }
+  };
+
+  return {
+    descriptor: {
+      id: "generated-agent-runtime",
+      name: "Generated Agent Runtime",
+      version: "0.1.0",
+      source: "external",
+    },
+    async startSession(context) {
+      return {
+        sessionId: context.sessionId,
+        agentId: "generated-agent-runtime",
+        createdAt: Date.now(),
+      };
+    },
+    async runTurn(request) {
+      const metadata =
+        request.metadata && typeof request.metadata === "object"
+          ? (request.metadata as Record<string, unknown>)
+          : {};
+
+      const modelInput =
+        metadata.modelInput !== undefined
+          ? (metadata.modelInput as string | MultimodalMessage[])
+          : request.input;
+      const generateOptions =
+        metadata.generateOptions && typeof metadata.generateOptions === "object"
+          ? (metadata.generateOptions as Record<string, unknown>)
+          : {};
+      const requestContext = generateOptions.requestContext as {
+        set?: (key: string, value: unknown) => void;
+      } | undefined;
+      requestContext?.set?.("onPreToolUse", request.onPreToolUse);
+      const turnAbortController = createTurnAbortController(request.sessionId);
+      const generateOptionsWithAbort = {
+        ...generateOptions,
+        abortSignal: turnAbortController.signal,
+      };
+      let result: AgentGenerateResult;
+      try {
+        result = await agent.generate(modelInput, generateOptionsWithAbort);
+      } finally {
+        clearTurnAbortController(request.sessionId, turnAbortController);
+      }
+
+      return {
+        text: result.text || "",
+        toolCalls: Array.isArray(result.toolCalls)
+          ? (result.toolCalls as Array<Record<string, unknown>>)
+          : undefined,
+        raw: result,
+      };
+    },
+    async runTurnStream(request) {
+      const metadata =
+        request.metadata && typeof request.metadata === "object"
+          ? (request.metadata as Record<string, unknown>)
+          : {};
+      const modelInput =
+        metadata.modelInput !== undefined
+          ? (metadata.modelInput as string | MultimodalMessage[])
+          : request.input;
+      const generateOptions =
+        metadata.generateOptions && typeof metadata.generateOptions === "object"
+          ? (metadata.generateOptions as Record<string, unknown>)
+          : {};
+      const requestContext = generateOptions.requestContext as {
+        set?: (key: string, value: unknown) => void;
+      } | undefined;
+      requestContext?.set?.("onPreToolUse", request.onPreToolUse);
+
+      if (typeof agent.stream !== "function") {
+        throw new Error("Generated agent runtime does not support streaming");
+      }
+
+      const turnAbortController = createTurnAbortController(request.sessionId);
+      const generateOptionsWithAbort = {
+        ...generateOptions,
+        abortSignal: turnAbortController.signal,
+      };
+      let rawStreamResult: NativeAgentStreamResult;
+      try {
+        rawStreamResult = await agent.stream(modelInput, generateOptionsWithAbort);
+      } catch (error) {
+        clearTurnAbortController(request.sessionId, turnAbortController);
+        throw error;
+      }
+    const tee = (
+      rawStreamResult.fullStream as ReadableStream<NativeAgentStreamChunk> & {
+        tee?: () => [
+          ReadableStream<NativeAgentStreamChunk>,
+          ReadableStream<NativeAgentStreamChunk>,
+        ];
+      }
+    ).tee;
+    const [hostEventSource, transportSource] =
+      typeof tee === "function"
+        ? tee.call(rawStreamResult.fullStream)
+        : [
+          new ReadableStream<NativeAgentStreamChunk>({
+            start(controller) {
+              controller.close();
+            },
+          }),
+          rawStreamResult.fullStream,
+        ];
+    const mappedStream = hostEventSource.pipeThrough(
+      new TransformStream<NativeAgentStreamChunk, AgentStreamEvent>({
+        transform(chunk, controller) {
+          if (!chunk?.type) return;
+
+          if (chunk.type === "text-delta" || chunk.type === "reasoning-delta") {
+            const text = String(chunk.payload?.text || "");
+            if (text) controller.enqueue({ type: "text-delta", text });
+            return;
+          }
+
+          if (chunk.type === "tool-call") {
+            const toolName =
+              typeof chunk.payload?.toolName === "string"
+                ? chunk.payload.toolName
+                : "unknown_tool";
+            controller.enqueue({
+              type: "tool-call",
+              name: toolName,
+              args:
+                chunk.payload?.args && typeof chunk.payload.args === "object"
+                  ? (chunk.payload.args as Record<string, unknown>)
+                  : undefined,
+            });
+            return;
+          }
+
+          if (chunk.type === "tool-result") {
+            const toolName =
+              typeof chunk.payload?.toolName === "string"
+                ? chunk.payload.toolName
+                : "unknown_tool";
+            controller.enqueue({
+              type: "tool-result",
+              name: toolName,
+              result:
+                chunk.payload?.result ??
+                chunk.payload?.output ??
+                chunk.payload?.content ??
+                chunk.payload?.data,
+            });
+            return;
+          }
+
+          if (chunk.type === "tool-suspended" || chunk.type === "tool_suspended") {
+            controller.enqueue({
+              type: "approval-required",
+              reason: "Tool suspended and awaiting user input",
+              payload: chunk.payload,
+            });
+          }
+        },
+        flush(controller) {
+          controller.enqueue({ type: "done" });
+        },
+      }),
+    );
+      const transportStreamResult: NativeAgentStreamResult = {
+        ...rawStreamResult,
+        fullStream: transportSource,
+      };
+
+      const result: GeneratedAgentTurnStreamResult = {
+        stream: mappedStream,
+        getFinalResult: async () => {
+          const [text, toolCalls, usage, steps] = await Promise.all([
+            rawStreamResult.text,
+            rawStreamResult.toolCalls,
+            Promise.resolve(rawStreamResult.usage).catch(() => undefined),
+            Promise.resolve(rawStreamResult.steps).catch(() => undefined),
+          ]);
+
+          return {
+            text: text || "",
+            toolCalls: Array.isArray(toolCalls)
+              ? toolCalls
+                .filter((item) => typeof item?.toolName === "string")
+                .map((item) => ({
+                  name: item.toolName as string,
+                  args: item.args || {},
+                  toolCallId: item.toolCallId,
+                }))
+              : undefined,
+            raw: {
+              text,
+              toolCalls,
+              usage,
+              steps,
+              streamResult: rawStreamResult,
+            },
+          };
+        },
+        rawStreamResult: transportStreamResult,
+      };
+      return {
+        ...result,
+        getFinalResult: async () => {
+          try {
+            return await result.getFinalResult();
+          } finally {
+            clearTurnAbortController(request.sessionId, turnAbortController);
+          }
+        },
+      };
+    },
+    async cancelTurn(sessionId) {
+      const controller = turnAbortControllers.get(sessionId);
+      if (!controller) return;
+      controller.abort();
+      turnAbortControllers.delete(sessionId);
+    },
+    async endSession(sessionId) {
+      // No-op: GeneratedAgent lifecycle is managed by agent cache.
+      turnAbortControllers.delete(sessionId);
+    },
+  };
+};
+
+const generateWithSessionRetry = async (
+  session: HostSessionHandle,
+  prompt: string | MultimodalMessage[],
+  generateOptions: Record<string, unknown>,
+  abortSignal: AbortSignal,
+  maxAttempts = 3,
+): Promise<AgentGenerateResult> => {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (abortSignal.aborted) {
+      throw new Error("Run cancelled");
+    }
+    try {
+      const turnResult = await session.sendAndWait({
+        prompt: typeof prompt === "string" ? prompt : "[multimodal-prompt]",
+        metadata: {
+          modelInput: prompt,
+          generateOptions,
+        },
+      });
+      return asGenerateResultFromTurn(turnResult);
+    } catch (error) {
+      lastError = error;
+      if (abortSignal.aborted) {
+        throw error;
+      }
       const shouldRetry = isRetryableModelError(error) && attempt < maxAttempts;
 
       if (!shouldRetry) {
@@ -918,11 +1113,11 @@ async function getOrCreateAgent(
   }
   let manifestExternalRegistration:
     | {
-        id?: string;
-        name?: string;
-        description?: string;
-        runtimeFactory: () => Promise<GeneratedAgent>;
-      }
+      id?: string;
+      name?: string;
+      description?: string;
+      runtimeFactory: () => Promise<GeneratedAgent>;
+    }
     | undefined;
 
   const externalManifestPath =
@@ -954,10 +1149,11 @@ async function getOrCreateAgent(
       );
     }
   }
+  const agentCore = await loadAgentCoreModule();
 
   const registry = createDefaultAgentRegistry<GeneratedAgent>({
     irisFactory: () =>
-      createCodingAgent(modelId, workspacePath, {
+      agentCore.createCodingAgent(modelId, workspacePath, {
         mcpServers,
         terminalAutoApproveRules,
         // Non-observational requests already include the bounded conversation
@@ -1357,11 +1553,11 @@ const extractProviderErrorDetails = (
   const providerError = (errorRecord?.data as Record<string, unknown>)
     ?.error as
     | {
-        code?: string | number;
-        type?: string;
-        message?: string;
-        metadata?: { raw?: string };
-      }
+      code?: string | number;
+      type?: string;
+      message?: string;
+      metadata?: { raw?: string };
+    }
     | undefined;
   const code = providerError?.code ?? providerError?.type;
   const message =
@@ -1554,6 +1750,8 @@ router.post(
 
     let requestedModelId = "gpt-4o";
     let activeRunId: string | undefined;
+    let activeHostSession: HostSessionHandle | undefined;
+    let activeHostSessionManager: HostSessionManager<AgentRuntime> | undefined;
 
     // Set longer timeout for this specific route (5 minutes)
     req.setTimeout(5 * 60 * 1000);
@@ -1581,6 +1779,7 @@ router.post(
         useMastraObservationalMemory: rawUseMastraObservationalMemory,
         observationalMemorySettings: rawObservationalMemorySettings,
         streamErrorRetry: rawStreamErrorRetry,
+        stream = false,
       } = req.body;
 
       requestedModelId = modelId;
@@ -1609,12 +1808,31 @@ router.post(
       const workspaceMutationGenerationId = randomUUID();
       activeRunId = resolvedRunId;
       const mastraThreadId = chatSessionId || resolvedRunId;
+      if (chatSessionId) {
+        const activeTurnKey = `chat:${mastraThreadId}`;
+        if (activeChatSessionTurns.has(activeTurnKey)) {
+          return res.status(409).json({
+            success: false,
+            runId: resolvedRunId,
+            lifecycleState: "queued",
+            stopReason: "none",
+            error:
+              "Another prompt is already running for this chat session. Wait for it to finish before starting a new turn.",
+          });
+        }
+        activeChatSessionTurns.add(activeTurnKey);
+        const releaseActiveTurn = () => {
+          activeChatSessionTurns.delete(activeTurnKey);
+        };
+        res.once("finish", releaseActiveTurn);
+        res.once("close", releaseActiveTurn);
+      }
       const mastraMemoryScope =
         rawUseMastraObservationalMemory === true
           ? {
-              thread: mastraThreadId,
-              resource: `iris-chat:${mastraThreadId}`,
-            }
+            thread: mastraThreadId,
+            resource: `iris-chat:${mastraThreadId}`,
+          }
           : undefined;
       let lifecycleState: RunLifecycleState = "queued";
       let stopReason: RunStopReason = "none";
@@ -1659,6 +1877,67 @@ router.post(
             err.message,
           );
           return true;
+        }
+      };
+      const turnAbortController = new AbortController();
+      let turnCancellationForwarded = false;
+      const requestTurnCancellation = async (): Promise<void> => {
+        if (!turnAbortController.signal.aborted) {
+          turnAbortController.abort();
+        }
+
+        if (turnCancellationForwarded) {
+          return;
+        }
+        turnCancellationForwarded = true;
+
+        if (!activeHostSession) {
+          return;
+        }
+
+        try {
+          await activeHostSession.cancel();
+        } catch (error) {
+          console.warn(
+            "[agent] Failed to propagate turn cancellation to host session:",
+            getErrorMessage(error),
+          );
+        }
+      };
+      type CancelledDuringWait = { __cancelledDuringWait: true };
+      const cancelledDuringWait: CancelledDuringWait = {
+        __cancelledDuringWait: true,
+      };
+      const isCancelledWaitResult = (
+        value: unknown,
+      ): value is CancelledDuringWait =>
+        Boolean(
+          value &&
+          typeof value === "object" &&
+          "__cancelledDuringWait" in value &&
+          (value as { __cancelledDuringWait?: unknown })
+            .__cancelledDuringWait === true,
+        );
+      const waitForResultOrCancellation = async <T>(
+        work: Promise<T>,
+      ): Promise<T | CancelledDuringWait> => {
+        let stopped = false;
+        const waitForCancellation: Promise<CancelledDuringWait> = (async () => {
+          while (!stopped) {
+            if (await isCancelled()) {
+              await requestTurnCancellation();
+              return cancelledDuringWait;
+            }
+            await sleep(75);
+          }
+          return cancelledDuringWait;
+        })();
+
+        try {
+          const settled = await Promise.race([work, waitForCancellation]);
+          return settled;
+        } finally {
+          stopped = true;
         }
       };
 
@@ -1769,14 +2048,16 @@ router.post(
       });
 
       if (await isCancelled()) {
-        await transitionToCancelled("run_started");
-        return res.status(409).json({
-          success: false,
-          runId: resolvedRunId,
-          lifecycleState,
-          stopReason,
-          error: "Run was cancelled",
-        });
+        if (!stream) {
+          await transitionToCancelled("run_started");
+          return res.status(409).json({
+            success: false,
+            runId: resolvedRunId,
+            lifecycleState,
+            stopReason,
+            error: "Run was cancelled",
+          });
+        }
       }
 
       const modelProfile = getModelExecutionProfile(modelId);
@@ -1890,7 +2171,7 @@ router.post(
               status,
               taskId:
                 typeof (commandResult as { taskId?: unknown }).taskId ===
-                "string"
+                  "string"
                   ? (commandResult as { taskId?: string }).taskId
                   : undefined,
               toolCalls: [],
@@ -1908,7 +2189,7 @@ router.post(
           const commandSucceeded = status === "completed";
           const commandError =
             (commandResult as { error?: unknown }).error &&
-            typeof (commandResult as { error?: unknown }).error === "string"
+              typeof (commandResult as { error?: unknown }).error === "string"
               ? (commandResult as { error?: string }).error || "Command failed"
               : "Command failed";
           const stdoutText =
@@ -1963,7 +2244,11 @@ router.post(
             snapshot = await getEnvironmentSnapshot(workspacePath);
             // Cache for 5 minutes
             envSnapshotCache.set(cacheKey, snapshot);
-            setTimeout(() => envSnapshotCache.delete(cacheKey), 5 * 60 * 1000);
+            const evictionTimer = setTimeout(
+              () => envSnapshotCache.delete(cacheKey),
+              5 * 60 * 1000,
+            );
+            evictionTimer.unref();
           }
 
           envSnapshotMarkdown = formatSnapshotAsMarkdown(snapshot);
@@ -1992,6 +2277,29 @@ router.post(
         useMastraObservationalMemory,
         observationalMemorySettings,
         effectiveStreamErrorRetry,
+      );
+
+      const hostSessionId = chatSessionId || resolvedRunId;
+      activeHostSessionManager = new HostSessionManager<AgentRuntime>(
+        () => Promise.resolve(createGeneratedAgentRuntimeAdapter(agent)),
+        {
+          workspacePath,
+          modelId,
+          metadata: {
+            runId: resolvedRunId,
+            preferredAgentId: effectivePreferredAgentId || "iris",
+          },
+        },
+      );
+      activeHostSession = await activeHostSessionManager.resumeSession(
+        hostSessionId,
+        {
+          modelId,
+          metadata: {
+            runId: resolvedRunId,
+            threadId: mastraThreadId,
+          },
+        },
       );
 
       // Build workspace context
@@ -2176,26 +2484,26 @@ _You have discovered the following in earlier interactions. Use this to avoid re
 
       const multimodalImageParts = resolveModelSupportsVision(modelId)
         ? await resolveImageMessageParts(
-            safeFilesInContext,
-            workspacePath,
-            isWebWorkspace,
-            hasDesktopAuth(req),
-          )
+          safeFilesInContext,
+          workspacePath,
+          isWebWorkspace,
+          hasDesktopAuth(req),
+        )
         : [];
       const modelInput: string | MultimodalMessage[] =
         multimodalImageParts.length > 0
           ? [
-              {
-                role: "user",
-                content: [
-                  {
-                    type: "text",
-                    text: prompt,
-                  },
-                  ...multimodalImageParts,
-                ],
-              },
-            ]
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: prompt,
+                },
+                ...multimodalImageParts,
+              ],
+            },
+          ]
           : prompt;
 
       console.log("📏 Prompt budget", {
@@ -2286,6 +2594,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             total + (Array.isArray(step.toolCalls) ? step.toolCalls.length : 0),
           0,
         ) >= maxToolCalls;
+      const { createAgentRequestContext } = await loadAgentCoreModule();
       const agentRequestContext = createAgentRequestContext(enabledSkills, {
         workspaceMutationGenerationId,
         toolCallBudget,
@@ -2310,6 +2619,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
         toolCallConcurrency: 1,
         stopWhen: stopWhenToolBudgetReached,
         requestContext: agentRequestContext,
+        abortSignal: turnAbortController.signal,
       };
 
       if (isSynthesisOnlyContinuation) {
@@ -2320,16 +2630,16 @@ _You have discovered the following in earlier interactions. Use this to avoid re
       const generateBackendOnlySynthesis = async (
         completedToolResults: ExecutedToolResult[],
         stopReason?: ToolCallBudget["stopReason"] | "empty_final_response",
-      ): Promise<AgentGenerateResult> => {
+      ): Promise<AgentGenerateResult | CancelledDuringWait> => {
         const completedResults =
           completedToolResults.length > 0
             ? serializeToolResultsForContinuation(
-                completedToolResults.map(({ name, result }) => ({
-                  name,
-                  result,
-                })),
-                "unknown_tool",
-              )
+              completedToolResults.map(({ name, result }) => ({
+                name,
+                result,
+              })),
+              "unknown_tool",
+            )
             : "No tools completed before the action budget was exhausted.";
         const stopReasonExplanation =
           stopReason === "repeated_call"
@@ -2339,22 +2649,40 @@ _You have discovered the following in earlier interactions. Use this to avoid re
               : "The server-side tool-action budget is exhausted.";
         const synthesisPrompt = `${prompt}\n\n${stopReasonExplanation} Do not call any tools. Produce the final answer now using only the conversation and completed tool results below. Clearly distinguish verified findings from uncertainty.\n\nCompleted tool results:\n${completedResults}`;
 
-        return generateWithRetry(
-          agent,
-          synthesisPrompt,
-          {
-            maxSteps: 1,
-            maxOutputTokens,
-            ...(mastraMemoryScope ? { memory: mastraMemoryScope } : {}),
-            toolChoice: "none" as const,
-            toolCallConcurrency: 1,
-            requestContext: agentRequestContext,
-          },
-          modelProfile.generateRetryAttempts,
+        const synthesisOptions = {
+          maxSteps: 1,
+          maxOutputTokens,
+          ...(mastraMemoryScope ? { memory: mastraMemoryScope } : {}),
+          toolChoice: "none" as const,
+          toolCallConcurrency: 1,
+          requestContext: agentRequestContext,
+          abortSignal: turnAbortController.signal,
+        };
+
+        if (activeHostSession) {
+          return await waitForResultOrCancellation(
+            generateWithSessionRetry(
+              activeHostSession,
+              synthesisPrompt,
+              synthesisOptions,
+              turnAbortController.signal,
+              modelProfile.generateRetryAttempts,
+            ),
+          );
+        }
+
+        return await waitForResultOrCancellation(
+          generateWithRetry(
+            agent,
+            synthesisPrompt,
+            synthesisOptions,
+            turnAbortController.signal,
+            modelProfile.generateRetryAttempts,
+          ),
         );
       };
 
-      if (req.body.stream) {
+      if (stream) {
         res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
         res.setHeader("Cache-Control", "no-cache, no-transform");
         res.setHeader("Connection", "keep-alive");
@@ -2434,23 +2762,102 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             stopReason,
           });
 
-          const streamResult = await (
-            agent as unknown as {
-              stream: (
-                ...args: [string | MultimodalMessage[], Record<string, unknown>]
-              ) => Promise<{
-                fullStream: ReadableStream<any>;
-                text: Promise<string>;
-                toolCalls: Promise<
-                  Array<{
-                    toolName?: string;
-                    args?: Record<string, unknown>;
-                    toolCallId?: string;
-                  }>
-                >;
-              }>;
-            }
-          ).stream(modelInput, generateOptions);
+          const streamResultPromise = activeHostSession
+            ? (async () => {
+              const hostStreamResult = await activeHostSession.sendStream({
+                prompt:
+                  typeof modelInput === "string"
+                    ? modelInput
+                    : "[multimodal-prompt]",
+                metadata: {
+                  modelInput,
+                  generateOptions,
+                },
+              });
+
+              const rawFromSession = (hostStreamResult as any)
+                .rawStreamResult as
+                | {
+                  fullStream: ReadableStream<any>;
+                  text: Promise<string>;
+                  toolCalls: Promise<
+                    Array<{
+                      toolName?: string;
+                      args?: Record<string, unknown>;
+                      toolCallId?: string;
+                    }>
+                  >;
+                  usage?: Promise<unknown> | unknown;
+                  steps?: Promise<StreamStep[]> | StreamStep[];
+                }
+                | undefined;
+
+              if (rawFromSession) {
+                void hostStreamResult.stream.cancel().catch((error: unknown) => {
+                  console.error("Failed to cancel host stream adapter:", error);
+                });
+                return rawFromSession;
+              }
+
+              throw new Error(
+                "Host session stream transport unavailable for SSE chunk pipeline",
+              );
+            })()
+            : (
+              agent as unknown as {
+                stream: (
+                  ...args: [
+                    string | MultimodalMessage[],
+                    Record<string, unknown>,
+                  ]
+                ) => Promise<{
+                  fullStream: ReadableStream<any>;
+                  text: Promise<string>;
+                  toolCalls: Promise<
+                    Array<{
+                      toolName?: string;
+                      args?: Record<string, unknown>;
+                      toolCallId?: string;
+                    }>
+                  >;
+                  usage?: Promise<unknown> | unknown;
+                  steps?: Promise<StreamStep[]> | StreamStep[];
+                }>;
+              }
+            ).stream(modelInput, generateOptions);
+          const streamResultOrCancellation = await waitForResultOrCancellation(
+            streamResultPromise,
+          );
+          if (isCancelledWaitResult(streamResultOrCancellation)) {
+            await transitionToCancelled("before_stream_reader");
+            writeEvent("lifecycle", {
+              runId: resolvedRunId,
+              lifecycleState,
+              stopReason,
+            });
+            writeEvent("done", {
+              success: false,
+              runId: resolvedRunId,
+              lifecycleState,
+              stopReason,
+              cancelled: true,
+              response: "Run cancelled",
+              toolCalls: [],
+              executedToolResults: [],
+              suspendedTools: [],
+              thoughtSteps: [],
+              model: modelId,
+              autoFixAttempted: false,
+              autoFixFailureCount: 0,
+              maxStepsReached: false,
+              stepsUsed: 0,
+              maxSteps,
+            });
+            stopKeepAlive();
+            res.end();
+            return;
+          }
+          const streamResult = streamResultOrCancellation;
 
           const reader = streamResult.fullStream.getReader();
           const thoughtBuffer: string[] = [];
@@ -2462,15 +2869,62 @@ _You have discovered the following in earlier interactions. Use this to avoid re
           let streamUsageSeenInChunks = false;
 
           const getPendingKey = (call: PendingToolCall): string => {
-            if (call.toolCallId) return `id:${call.toolCallId}`;
-            return `sig:${call.name}:${JSON.stringify(call.args || {})}`;
+            const signature = getToolCallSignature(call.name, call.args || {});
+            if (call.toolCallId) return `id:${call.toolCallId}:${signature}`;
+            return signature;
           };
+          const getEmittedInvocationKey = (
+            toolName: string,
+            toolCallId: string | undefined,
+            args: Record<string, unknown>,
+          ): string =>
+            toolCallId
+              ? `id:${toolCallId}:${getToolCallSignature(toolName, args)}`
+              : getToolCallSignature(toolName, args);
+          const emittedToolCallKeys = new Set<string>();
 
           while (true) {
-            const { value, done } = await reader.read();
+            const streamReadOrCancellation = await waitForResultOrCancellation(
+              reader.read(),
+            );
+            if (isCancelledWaitResult(streamReadOrCancellation)) {
+              await reader.cancel().catch(() => undefined);
+              await transitionToCancelled("stream_read_wait");
+              writeEvent("lifecycle", {
+                runId: resolvedRunId,
+                lifecycleState,
+                stopReason,
+              });
+              writeEvent("done", {
+                success: false,
+                runId: resolvedRunId,
+                lifecycleState,
+                stopReason,
+                cancelled: true,
+                response: "Run cancelled",
+                toolCalls: [],
+                executedToolResults: [],
+                suspendedTools: streamedSuspendedTools,
+                thoughtSteps:
+                  thoughtBuffer.length > 0 ? [thoughtBuffer.join("")] : [],
+                model: modelId,
+                autoFixAttempted: false,
+                autoFixFailureCount: 0,
+                maxStepsReached: false,
+                stepsUsed: 0,
+                maxSteps,
+              });
+              stopKeepAlive();
+              res.end();
+              return;
+            }
+
+            const { value, done } = streamReadOrCancellation;
             if (done) break;
 
             if (await isCancelled()) {
+              await requestTurnCancellation();
+              await reader.cancel().catch(() => undefined);
               await transitionToCancelled("stream_iteration");
               writeEvent("lifecycle", {
                 runId: resolvedRunId,
@@ -2575,6 +3029,15 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                 pendingCountsInSnapshot.set(key, occurrence);
                 if (occurrence <= (emittedPendingCounts.get(key) || 0)) continue;
                 emittedPendingCounts.set(key, occurrence);
+                if (call.toolCallId) {
+                  emittedToolCallKeys.add(
+                    getEmittedInvocationKey(
+                      call.name,
+                      call.toolCallId,
+                      call.args || {},
+                    ),
+                  );
+                }
                 writeEvent("tool_call", {
                   name: call.name,
                   args: call.args,
@@ -2621,14 +3084,32 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                     : undefined,
               });
 
+              const toolCallId =
+                typeof chunk.payload?.toolCallId === "string"
+                  ? (chunk.payload.toolCallId as string)
+                  : undefined;
+              const resultArgs =
+                (chunk.payload?.args as Record<string, unknown>) || {};
+              const emittedInvocationKey = getEmittedInvocationKey(
+                toolName,
+                toolCallId,
+                resultArgs,
+              );
+              if (toolCallId && !emittedToolCallKeys.has(emittedInvocationKey)) {
+                emittedToolCallKeys.add(emittedInvocationKey);
+                writeEvent("tool_call", {
+                  name: toolName,
+                  args: resultArgs,
+                  toolCallId,
+                  status: "pending",
+                });
+              }
+
               writeEvent("tool_result", {
                 name: toolName,
-                args: (chunk.payload?.args as Record<string, unknown>) || {},
+                args: resultArgs,
                 result: safeToolResult,
-                toolCallId:
-                  typeof chunk.payload?.toolCallId === "string"
-                    ? (chunk.payload.toolCallId as string)
-                    : undefined,
+                toolCallId,
                 status: resolveToolExecutionStatus(safeToolResult),
               });
 
@@ -2667,7 +3148,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                     : undefined,
                 suspendPayload:
                   chunk.payload?.suspendPayload &&
-                  typeof chunk.payload.suspendPayload === "object"
+                    typeof chunk.payload.suspendPayload === "object"
                     ? (chunk.payload.suspendPayload as Record<string, unknown>)
                     : undefined,
               };
@@ -2693,25 +3174,123 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             }
           }
 
-          const finalText = await streamResult.text;
-          const streamedToolCalls = await streamResult.toolCalls;
-          const streamSteps = await Promise.resolve(
-            (
-              streamResult as unknown as {
-                steps?: Promise<StreamStep[]>;
-              }
-            ).steps,
-          ).catch(() => undefined);
+          const finalTextOrCancellation = await waitForResultOrCancellation(
+            streamResult.text,
+          );
+          if (isCancelledWaitResult(finalTextOrCancellation)) {
+            await transitionToCancelled("before_stream_final_text");
+            writeEvent("lifecycle", {
+              runId: resolvedRunId,
+              lifecycleState,
+              stopReason,
+            });
+            writeEvent("done", {
+              success: false,
+              runId: resolvedRunId,
+              lifecycleState,
+              stopReason,
+              cancelled: true,
+              response: "Run cancelled",
+              toolCalls: [],
+              executedToolResults: [],
+              suspendedTools: streamedSuspendedTools,
+              thoughtSteps:
+                thoughtBuffer.length > 0 ? [thoughtBuffer.join("")] : [],
+              model: modelId,
+              autoFixAttempted: false,
+              autoFixFailureCount: 0,
+              maxStepsReached: false,
+              stepsUsed: 0,
+              maxSteps,
+            });
+            stopKeepAlive();
+            res.end();
+            return;
+          }
+          const finalText = finalTextOrCancellation;
+          const streamedToolCallsOrCancellation =
+            await waitForResultOrCancellation(streamResult.toolCalls);
+          if (isCancelledWaitResult(streamedToolCallsOrCancellation)) {
+            await transitionToCancelled("before_stream_tool_calls");
+            writeEvent("lifecycle", {
+              runId: resolvedRunId,
+              lifecycleState,
+              stopReason,
+            });
+            writeEvent("done", {
+              success: false,
+              runId: resolvedRunId,
+              lifecycleState,
+              stopReason,
+              cancelled: true,
+              response: "Run cancelled",
+              toolCalls: [],
+              executedToolResults: [],
+              suspendedTools: streamedSuspendedTools,
+              thoughtSteps:
+                thoughtBuffer.length > 0 ? [thoughtBuffer.join("")] : [],
+              model: modelId,
+              autoFixAttempted: false,
+              autoFixFailureCount: 0,
+              maxStepsReached: false,
+              stepsUsed: 0,
+              maxSteps,
+            });
+            stopKeepAlive();
+            res.end();
+            return;
+          }
+          const streamedToolCalls = streamedToolCallsOrCancellation;
+          const streamStepsOrCancellation = await waitForResultOrCancellation(
+            Promise.resolve(
+              (
+                streamResult as unknown as {
+                  steps?: Promise<StreamStep[]>;
+                }
+              ).steps,
+            ).catch(() => undefined),
+          );
+          if (isCancelledWaitResult(streamStepsOrCancellation)) {
+            await transitionToCancelled("before_stream_steps");
+            writeEvent("lifecycle", {
+              runId: resolvedRunId,
+              lifecycleState,
+              stopReason,
+            });
+            writeEvent("done", {
+              success: false,
+              runId: resolvedRunId,
+              lifecycleState,
+              stopReason,
+              cancelled: true,
+              response: "Run cancelled",
+              toolCalls: [],
+              executedToolResults: [],
+              suspendedTools: streamedSuspendedTools,
+              thoughtSteps:
+                thoughtBuffer.length > 0 ? [thoughtBuffer.join("")] : [],
+              model: modelId,
+              autoFixAttempted: false,
+              autoFixFailureCount: 0,
+              maxStepsReached: false,
+              stepsUsed: 0,
+              maxSteps,
+            });
+            stopKeepAlive();
+            res.end();
+            return;
+          }
+          const streamSteps = streamStepsOrCancellation;
           const streamStepsUsed = Array.isArray(streamSteps)
             ? streamSteps.length
             : 0;
           const streamToolCallsFromSteps = Array.isArray(streamSteps)
             ? streamSteps.reduce(
-                (total, step) =>
-                  total +
-                  (Array.isArray(step.toolCalls) ? step.toolCalls.length : 0),
-                0,
-              )
+              (total, step) =>
+                total +
+                (Array.isArray(step.toolCalls) ? step.toolCalls.length : 0),
+              0,
+            )
             : undefined;
           const streamLastStep = Array.isArray(streamSteps)
             ? streamSteps[streamSteps.length - 1]
@@ -2719,10 +3298,43 @@ _You have discovered the following in earlier interactions. Use this to avoid re
           const streamLastStepHadToolCalls =
             Array.isArray(streamLastStep?.toolCalls) &&
             streamLastStep.toolCalls.length > 0;
-          const streamUsageFromResult = normalizeTokenUsage(
-            await Promise.resolve(
+          const streamUsageRawOrCancellation = await waitForResultOrCancellation(
+            Promise.resolve(
               (streamResult as unknown as { usage?: unknown }).usage,
             ).catch(() => undefined),
+          );
+          if (isCancelledWaitResult(streamUsageRawOrCancellation)) {
+            await transitionToCancelled("before_stream_usage");
+            writeEvent("lifecycle", {
+              runId: resolvedRunId,
+              lifecycleState,
+              stopReason,
+            });
+            writeEvent("done", {
+              success: false,
+              runId: resolvedRunId,
+              lifecycleState,
+              stopReason,
+              cancelled: true,
+              response: "Run cancelled",
+              toolCalls: [],
+              executedToolResults: [],
+              suspendedTools: streamedSuspendedTools,
+              thoughtSteps:
+                thoughtBuffer.length > 0 ? [thoughtBuffer.join("")] : [],
+              model: modelId,
+              autoFixAttempted: false,
+              autoFixFailureCount: 0,
+              maxStepsReached: false,
+              stepsUsed: 0,
+              maxSteps,
+            });
+            stopKeepAlive();
+            res.end();
+            return;
+          }
+          const streamUsageFromResult = normalizeTokenUsage(
+            streamUsageRawOrCancellation,
           );
           const streamUsageSeenInFinal = Boolean(streamUsageFromResult);
           streamTokenUsage = mergeTokenUsage(
@@ -2741,25 +3353,39 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             usage: streamTokenUsage,
             modelId,
           });
-          const mappedToolCalls: PendingToolCall[] = (
-            streamedToolCalls || []
-          ).reduce<PendingToolCall[]>((calls, call) => {
-            const toolName = call?.toolName;
-            if (typeof toolName !== "string" || toolName.length === 0) {
+          const typedStreamedToolCalls =
+            (streamedToolCalls || []) as Array<{
+              toolName?: string;
+              args?: Record<string, unknown>;
+              toolCallId?: string;
+            }>;
+          const mappedToolCalls: PendingToolCall[] = typedStreamedToolCalls.reduce(
+            (
+              calls: PendingToolCall[],
+              call: {
+                toolName?: string;
+                args?: Record<string, unknown>;
+                toolCallId?: string;
+              },
+            ) => {
+              const toolName = call?.toolName;
+              if (typeof toolName !== "string" || toolName.length === 0) {
+                return calls;
+              }
+
+              calls.push({
+                name: toolName,
+                args: call.args || {},
+                toolCallId:
+                  typeof call.toolCallId === "string"
+                    ? call.toolCallId
+                    : undefined,
+              });
+
               return calls;
-            }
-
-            calls.push({
-              name: toolName,
-              args: call.args || {},
-              toolCallId:
-                typeof call.toolCallId === "string"
-                  ? call.toolCallId
-                  : undefined,
-            });
-
-            return calls;
-          }, []);
+            },
+            [],
+          );
 
           const processedStreamToolResults = Array.isArray(streamSteps)
             ? extractProcessedToolResults(streamSteps)
@@ -2843,9 +3469,9 @@ _You have discovered the following in earlier interactions. Use this to avoid re
           const streamToolCallsUsed =
             typeof streamToolCallsFromSteps === "number"
               ? Math.max(
-                  streamToolCallsFromSteps,
-                  normalizedStreamToolCallsUsed,
-                )
+                streamToolCallsFromSteps,
+                normalizedStreamToolCallsUsed,
+              )
               : normalizedStreamToolCallsUsed;
           const hasStreamToolActivity =
             normalizedStreamToolCalls.length > 0 ||
@@ -2906,17 +3532,49 @@ _You have discovered the following in earlier interactions. Use this to avoid re
           if (shouldSynthesizeAfterCompletedToolWork) {
             const synthesisStopReason =
               streamBudgetReached ||
-              toolCallBudget.stopReason === "repeated_call" ||
-              streamToolCallsUsed >= maxToolCalls
+                toolCallBudget.stopReason === "repeated_call" ||
+                streamToolCallsUsed >= maxToolCalls
                 ? (toolCallBudget.stopReason ?? "limit")
                 : "empty_final_response";
-            const synthesisResult = await generateBackendOnlySynthesis(
-              normalizedStreamExecutedResults,
-              synthesisStopReason,
-            );
+            const synthesisResultOrCancellation =
+              await generateBackendOnlySynthesis(
+                normalizedStreamExecutedResults,
+                synthesisStopReason,
+              );
+            if (isCancelledWaitResult(synthesisResultOrCancellation)) {
+              await transitionToCancelled("during_stream_backend_synthesis");
+              writeEvent("lifecycle", {
+                runId: resolvedRunId,
+                lifecycleState,
+                stopReason,
+              });
+              writeEvent("done", {
+                success: false,
+                runId: resolvedRunId,
+                lifecycleState,
+                stopReason,
+                cancelled: true,
+                response: "Run cancelled",
+                toolCalls: [],
+                executedToolResults: [],
+                suspendedTools: streamedSuspendedTools,
+                thoughtSteps:
+                  thoughtBuffer.length > 0 ? [thoughtBuffer.join("")] : [],
+                model: modelId,
+                autoFixAttempted: false,
+                autoFixFailureCount: 0,
+                maxStepsReached: false,
+                stepsUsed: 0,
+                maxSteps,
+              });
+              stopKeepAlive();
+              res.end();
+              return;
+            }
+            const synthesisResult = synthesisResultOrCancellation;
             const synthesizedText =
               typeof synthesisResult.text === "string" &&
-              synthesisResult.text.trim().length > 0
+                synthesisResult.text.trim().length > 0
                 ? synthesisResult.text
                 : null;
             if (!synthesizedText && streamEndedWithoutFinalText) {
@@ -2996,11 +3654,11 @@ _You have discovered the following in earlier interactions. Use this to avoid re
               source: streamUsageSource,
             })
               ? {
-                  tokenUsageDebug: buildTokenUsageDebug({
-                    mode: "stream",
-                    source: streamUsageSource,
-                  }),
-                }
+                tokenUsageDebug: buildTokenUsageDebug({
+                  mode: "stream",
+                  source: streamUsageSource,
+                }),
+              }
               : {}),
           });
           stopKeepAlive();
@@ -3057,12 +3715,34 @@ _You have discovered the following in earlier interactions. Use this to avoid re
 
       let result: AgentGenerateResult;
       try {
-        result = await generateWithRetry(
-          agent,
-          modelInput,
-          generateOptions,
-          modelProfile.generateRetryAttempts,
+        const resultOrCancellation = await waitForResultOrCancellation(
+          activeHostSession
+            ? generateWithSessionRetry(
+              activeHostSession,
+              modelInput,
+              generateOptions,
+              turnAbortController.signal,
+              modelProfile.generateRetryAttempts,
+            )
+            : generateWithRetry(
+              agent,
+              modelInput,
+              generateOptions,
+              turnAbortController.signal,
+              modelProfile.generateRetryAttempts,
+            ),
         );
+        if (isCancelledWaitResult(resultOrCancellation)) {
+          await transitionToCancelled("during_model_request");
+          return res.status(409).json({
+            success: false,
+            runId: resolvedRunId,
+            lifecycleState,
+            stopReason,
+            error: "Run was cancelled",
+          });
+        }
+        result = resultOrCancellation;
       } finally {
         agent.clearProcessedWorkspaceResults?.(workspaceMutationGenerationId);
       }
@@ -3236,7 +3916,9 @@ _You have discovered the following in earlier interactions. Use this to avoid re
           args: Record<string, unknown>,
           toolCallId?: string,
         ): string =>
-          toolCallId ? `id:${toolCallId}` : getToolCallSignature(name, args);
+          toolCallId
+            ? `id:${toolCallId}:${getToolCallSignature(name, args)}`
+            : getToolCallSignature(name, args);
 
         if (lastStep.content && Array.isArray(lastStep.content)) {
           lastStep.content.forEach((item) => {
@@ -3496,15 +4178,13 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             })
             .join("\n\n");
 
-          const autoFixPrompt = `${prompt}\n\nA prior attempt produced failures. Perform a targeted repair pass for attempt ${reflectionAttempt}/${reflectionCap}.\n\n${
-            validationFailureReport
-              ? `Validation failures:\n${validationFailureReport}\n\n`
-              : ""
-          }${
-            toolFailureReport
+          const autoFixPrompt = `${prompt}\n\nA prior attempt produced failures. Perform a targeted repair pass for attempt ${reflectionAttempt}/${reflectionCap}.\n\n${validationFailureReport
+            ? `Validation failures:\n${validationFailureReport}\n\n`
+            : ""
+            }${toolFailureReport
               ? `Tool execution failures:\n${toolFailureReport}\n\n`
               : ""
-          }Requirements:\n- Focus only on the listed failures.\n- If patch/tool matching failed, retry with tighter file targeting and explicit paths.\n- Keep edits minimal and reversible.\n- Stop after this repair pass.`;
+            }Requirements:\n- Focus only on the listed failures.\n- If patch/tool matching failed, retry with tighter file targeting and explicit paths.\n- Keep edits minimal and reversible.\n- Stop after this repair pass.`;
 
           const autoFixOptions = {
             maxSteps: Math.min(
@@ -3517,22 +4197,47 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             toolCallConcurrency: 1,
             stopWhen: stopWhenToolBudgetReached,
             requestContext: agentRequestContext,
+            abortSignal: turnAbortController.signal,
           };
 
-          let autoFixResult: AgentGenerateResult;
+          let autoFixResultOrCancellation:
+            | AgentGenerateResult
+            | CancelledDuringWait;
           const admittedBeforeReflection = toolCallBudget.admitted;
           try {
-            autoFixResult = await generateWithRetry(
-              agent,
-              autoFixPrompt,
-              autoFixOptions,
-              modelProfile.reflectionRetryAttempts,
+            autoFixResultOrCancellation = await waitForResultOrCancellation(
+              activeHostSession
+                ? generateWithSessionRetry(
+                  activeHostSession,
+                  autoFixPrompt,
+                  autoFixOptions,
+                  turnAbortController.signal,
+                  modelProfile.reflectionRetryAttempts,
+                )
+                : generateWithRetry(
+                  agent,
+                  autoFixPrompt,
+                  autoFixOptions,
+                  turnAbortController.signal,
+                  modelProfile.reflectionRetryAttempts,
+                ),
             );
           } finally {
             agent.clearProcessedWorkspaceResults?.(
               workspaceMutationGenerationId,
             );
           }
+          if (isCancelledWaitResult(autoFixResultOrCancellation)) {
+            await transitionToCancelled("during_reflection_model_request");
+            return res.status(409).json({
+              success: false,
+              runId: resolvedRunId,
+              lifecycleState,
+              stopReason,
+              error: "Run was cancelled",
+            });
+          }
+          const autoFixResult = autoFixResultOrCancellation;
           if (await isCancelled()) {
             await transitionToCancelled("after_reflection_response");
             return res.status(409).json({
@@ -3593,7 +4298,11 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                 ) {
                   autoFixToolCallArgs.set(
                     item.toolCallId,
-                    item.args || item.input || {},
+                    sanitizeToolArgsForWorkspace(
+                      item.toolName,
+                      item.input || item.args,
+                      isWebWorkspace,
+                    ),
                   );
                 }
               });
@@ -3615,14 +4324,9 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                   }
 
                   const safeToolResult = redactToolResult(toolResult).result;
-                  const safeArgs = redactToolResult(args).result as Record<
-                    string,
-                    unknown
-                  >;
-
                   autoFixExecutedToolResults.push({
                     name: item.toolName,
-                    args: safeArgs,
+                    args,
                     result: safeToolResult,
                     toolCallId: item.toolCallId,
                     lifecycleStepIndex: index,
@@ -3680,7 +4384,10 @@ _You have discovered the following in earlier interactions. Use this to avoid re
           const autoFixNormalizedToolCalls =
             autoFixNormalizedLifecycle.pendingToolCalls.map((call) => ({
               name: call.name,
-              args: call.args,
+              args: redactToolResult(call.args).result as Record<
+                string,
+                unknown
+              >,
               toolCallId: call.toolCallId,
               status: "pending" as ToolExecutionStatus,
             }));
@@ -3689,7 +4396,10 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             autoFixNormalizedLifecycle.executedToolResults.map(
               (toolResult) => ({
                 name: toolResult.name,
-                args: toolResult.args,
+                args: redactToolResult(toolResult.args).result as Record<
+                  string,
+                  unknown
+                >,
                 result: toolResult.result,
                 toolCallId: toolResult.toolCallId,
                 status: resolveToolExecutionStatus(toolResult.result),
@@ -3750,7 +4460,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
           reflectionStopReason =
             remainingValidationFailures.length +
               remainingToolFailures.length ===
-            0
+              0
               ? "resolved"
               : "max_attempts";
         }
@@ -3845,10 +4555,10 @@ _You have discovered the following in earlier interactions. Use this to avoid re
         const payload = primarySuspension.suspendPayload || {};
         const question =
           typeof payload.question === "string" &&
-          payload.question.trim().length > 0
+            payload.question.trim().length > 0
             ? payload.question
             : typeof payload.prompt === "string" &&
-                payload.prompt.trim().length > 0
+              payload.prompt.trim().length > 0
               ? payload.prompt
               : primarySuspension.name === "submit_plan"
                 ? "A plan requires your review. Please approve, reject, or provide feedback."
@@ -3922,13 +4632,24 @@ _You have discovered the following in earlier interactions. Use this to avoid re
         const synthesisStopReason = budgetLimitReached
           ? (toolCallBudget.stopReason ?? "limit")
           : "empty_final_response";
-        const synthesisResult = await generateBackendOnlySynthesis(
+        const synthesisResultOrCancellation = await generateBackendOnlySynthesis(
           normalizedExecutedToolResults,
           synthesisStopReason,
         );
+        if (isCancelledWaitResult(synthesisResultOrCancellation)) {
+          await transitionToCancelled("during_backend_synthesis");
+          return res.status(409).json({
+            success: false,
+            runId: resolvedRunId,
+            lifecycleState,
+            stopReason,
+            error: "Run was cancelled",
+          });
+        }
+        const synthesisResult = synthesisResultOrCancellation;
         const synthesizedText =
           typeof synthesisResult.text === "string" &&
-          synthesisResult.text.trim().length > 0
+            synthesisResult.text.trim().length > 0
             ? synthesisResult.text
             : null;
         if (!synthesizedText && endedWithoutFinalText) {
@@ -4075,6 +4796,17 @@ _You have discovered the following in earlier interactions. Use this to avoid re
         errorDetails:
           process.env.NODE_ENV === "development" ? err.stack : undefined,
       });
+    } finally {
+      try {
+        if (activeHostSession) {
+          await activeHostSession.disconnect();
+        } else if (activeHostSessionManager) {
+          await activeHostSessionManager.stopAll();
+        }
+      } catch (disconnectError) {
+        const disconnectMessage = getErrorMessage(disconnectError);
+        console.warn("[agent] failed to clean up host session:", disconnectMessage);
+      }
     }
   },
 );
@@ -4122,13 +4854,13 @@ router.get(
       },
       latestCheckpoint: snapshot.latestCheckpoint
         ? {
-            sequence: snapshot.latestCheckpoint.sequence,
-            lifecycleState: snapshot.latestCheckpoint.lifecycle_state,
-            stopReason: snapshot.latestCheckpoint.stop_reason,
-            eventType: snapshot.latestCheckpoint.event_type,
-            payload: parsePayload(snapshot.latestCheckpoint.payload_json),
-            createdAt: snapshot.latestCheckpoint.created_at,
-          }
+          sequence: snapshot.latestCheckpoint.sequence,
+          lifecycleState: snapshot.latestCheckpoint.lifecycle_state,
+          stopReason: snapshot.latestCheckpoint.stop_reason,
+          eventType: snapshot.latestCheckpoint.event_type,
+          payload: parsePayload(snapshot.latestCheckpoint.payload_json),
+          createdAt: snapshot.latestCheckpoint.created_at,
+        }
         : null,
     });
   },
@@ -4244,8 +4976,7 @@ router.post(
       }
 
       console.log(
-        `📋 Command confirmation ${confirmationId}: ${
-          approved ? "✅ Approved" : "❌ Skipped"
+        `📋 Command confirmation ${confirmationId}: ${approved ? "✅ Approved" : "❌ Skipped"
         }`,
       );
 
@@ -4269,7 +5000,7 @@ router.post(
           typeof workspaceRoot === "string" && workspaceRoot.trim().length > 0
             ? workspaceRoot
             : typeof toolArgs?.cwd === "string" &&
-                toolArgs.cwd.trim().length > 0
+              toolArgs.cwd.trim().length > 0
               ? toolArgs.cwd
               : process.cwd(),
         skipConfirmation: true, // Flag to bypass confirmation check
@@ -4619,8 +5350,8 @@ router.post(
       typeof req.body?.toolName === "string" ? req.body.toolName.trim() : "";
     const args =
       req.body?.args &&
-      typeof req.body.args === "object" &&
-      !Array.isArray(req.body.args)
+        typeof req.body.args === "object" &&
+        !Array.isArray(req.body.args)
         ? req.body.args
         : {};
     const workspaceRoot = req.body?.workspaceRoot || process.cwd();
@@ -4666,6 +5397,7 @@ router.post(
 
 router.get("/skills", async (_req: Request, res: Response) => {
   try {
+    const { getSkillsList } = await loadAgentCoreModule();
     const skills = await getSkillsList();
     res.json({ success: true, skills });
   } catch {

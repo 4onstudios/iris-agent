@@ -293,6 +293,248 @@ describe("agent run lifecycle APIs", () => {
     }
   });
 
+  it("settles a non-stream prompt when cancellation is requested during a stalled model response", async () => {
+    const { server, baseUrl } = await startServer();
+
+    try {
+      const runId = "run-cancel-stalled-model";
+      let receivedAbortSignal: AbortSignal | undefined;
+      mockGenerate.mockImplementation(
+        async (_prompt: unknown, options?: Record<string, unknown>) => {
+          const signal =
+            options?.abortSignal instanceof AbortSignal
+              ? options.abortSignal
+              : undefined;
+          receivedAbortSignal = signal;
+          return await new Promise<never>(() => undefined);
+        },
+      );
+
+      const pendingChatResponse = requestJson(baseUrl, "POST", "/api/agent/chat", {
+        runId,
+        message: "wait for model forever",
+        modelId: "gpt-4o",
+        workspaceRoot: "/tmp/run-lifecycle",
+        isTauri: false,
+      });
+
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const snapshot = await getRunSnapshot(runId);
+        if (snapshot) break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+
+      const cancelResponse = await requestJson(
+        baseUrl,
+        "POST",
+        `/api/agent/runs/${runId}/cancel`,
+      );
+      expect(cancelResponse.status).toBe(200);
+      expect(cancelResponse.body.success).toBe(true);
+
+      const timedResponse = await Promise.race([
+        pendingChatResponse,
+        new Promise<RequestResult>((_, reject) =>
+          setTimeout(
+            () => reject(new Error("Chat request did not settle after cancellation")),
+            600,
+          ),
+        ),
+      ]);
+
+      expect(timedResponse.status).toBe(409);
+      expect(timedResponse.body).toMatchObject({
+        success: false,
+        runId,
+        lifecycleState: "cancelled",
+        stopReason: "cancelled",
+        error: "Run was cancelled",
+      });
+      expect(receivedAbortSignal).toBeDefined();
+      expect(receivedAbortSignal?.aborted).toBe(true);
+    } finally {
+      await stopServer(server);
+    }
+  });
+
+  it("settles a non-stream prompt when cancellation is requested during stalled backend synthesis", async () => {
+    const { server, baseUrl } = await startServer();
+
+    try {
+      const runId = "run-cancel-stalled-synthesis";
+      let receivedSynthesisAbortSignal: AbortSignal | undefined;
+      mockGenerate
+        .mockResolvedValueOnce({
+          text: "",
+          steps: [
+            {
+              content: [
+                {
+                  type: "tool-call",
+                  toolName: "read_file",
+                  toolCallId: "tool_1",
+                  args: { filePath: "README.md" },
+                },
+                {
+                  type: "tool-result",
+                  toolName: "read_file",
+                  toolCallId: "tool_1",
+                  result: "README contents",
+                },
+              ],
+            },
+          ],
+          toolCalls: [],
+        })
+        .mockImplementationOnce(
+          async (_prompt: unknown, options?: Record<string, unknown>) => {
+            const signal =
+              options?.abortSignal instanceof AbortSignal
+                ? options.abortSignal
+                : undefined;
+            receivedSynthesisAbortSignal = signal;
+            return await new Promise<never>(() => undefined);
+          },
+        );
+
+      const pendingChatResponse = requestJson(baseUrl, "POST", "/api/agent/chat", {
+        runId,
+        message: "synthesize from tool output",
+        modelId: "gpt-4o",
+        workspaceRoot: "/tmp/run-lifecycle",
+        isTauri: false,
+        maxSteps: 2,
+      });
+
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        if (receivedSynthesisAbortSignal) break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(receivedSynthesisAbortSignal).toBeDefined();
+
+      const cancelResponse = await requestJson(
+        baseUrl,
+        "POST",
+        `/api/agent/runs/${runId}/cancel`,
+      );
+      expect(cancelResponse.status).toBe(200);
+      expect(cancelResponse.body.success).toBe(true);
+
+      const timedResponse = await Promise.race([
+        pendingChatResponse,
+        new Promise<RequestResult>((_, reject) =>
+          setTimeout(
+            () =>
+              reject(new Error("Chat request did not settle during stalled synthesis cancellation")),
+            800,
+          ),
+        ),
+      ]);
+
+      expect(timedResponse.status).toBe(409);
+      expect(timedResponse.body).toMatchObject({
+        success: false,
+        runId,
+        lifecycleState: "cancelled",
+        stopReason: "cancelled",
+        error: "Run was cancelled",
+      });
+      expect(receivedSynthesisAbortSignal?.aborted).toBe(true);
+    } finally {
+      await stopServer(server);
+    }
+  });
+
+  it("settles a non-stream prompt when cancellation is requested during stalled reflection", async () => {
+    const { server, baseUrl } = await startServer();
+
+    try {
+      const runId = "run-cancel-stalled-reflection";
+      let receivedReflectionAbortSignal: AbortSignal | undefined;
+      mockGenerate
+        .mockResolvedValueOnce({
+          text: "initial response",
+          steps: [
+            {
+              content: [
+                {
+                  type: "tool-result",
+                  toolName: "writeFile",
+                  result: {
+                    success: true,
+                    validation: {
+                      lint: {
+                        enabled: true,
+                        success: false,
+                        error: "lint failed",
+                      },
+                    },
+                  },
+                },
+              ],
+              toolCalls: [],
+            },
+          ],
+          toolCalls: [],
+        })
+        .mockImplementationOnce(
+          async (_prompt: unknown, options?: Record<string, unknown>) => {
+            const signal =
+              options?.abortSignal instanceof AbortSignal
+                ? options.abortSignal
+                : undefined;
+            receivedReflectionAbortSignal = signal;
+            return await new Promise<never>(() => undefined);
+          },
+        );
+
+      const pendingChatResponse = requestJson(baseUrl, "POST", "/api/agent/chat", {
+        runId,
+        message: "repair lint issues",
+        modelId: "gpt-4o",
+        workspaceRoot: "/tmp/run-lifecycle",
+        isTauri: false,
+      });
+
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        if (receivedReflectionAbortSignal) break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(receivedReflectionAbortSignal).toBeDefined();
+
+      const cancelResponse = await requestJson(
+        baseUrl,
+        "POST",
+        `/api/agent/runs/${runId}/cancel`,
+      );
+      expect(cancelResponse.status).toBe(200);
+      expect(cancelResponse.body.success).toBe(true);
+
+      const timedResponse = await Promise.race([
+        pendingChatResponse,
+        new Promise<RequestResult>((_, reject) =>
+          setTimeout(
+            () =>
+              reject(new Error("Chat request did not settle during stalled reflection cancellation")),
+            800,
+          ),
+        ),
+      ]);
+
+      expect(timedResponse.status).toBe(409);
+      expect(timedResponse.body).toMatchObject({
+        success: false,
+        runId,
+        lifecycleState: "cancelled",
+        stopReason: "cancelled",
+        error: "Run was cancelled",
+      });
+      expect(receivedReflectionAbortSignal?.aborted).toBe(true);
+    } finally {
+      await stopServer(server);
+    }
+  });
+
   it("deleting a chat session also deletes related run lifecycle data", async () => {
     const { server, baseUrl } = await startServer();
     const previousTauriBundled = process.env.TAURI_BUNDLED;

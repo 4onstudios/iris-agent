@@ -1,7 +1,7 @@
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
-import { resolveImageMessageParts } from "../api/agent";
+import { resolveImageMessageParts } from "../api/helpers/resolveImageMessageParts";
 
 describe("resolveImageMessageParts", () => {
   let workspaceRoot: string;
@@ -80,6 +80,22 @@ describe("resolveImageMessageParts", () => {
     const relativeEscape = path.relative(workspaceRoot, secretPath);
     const parts = await resolveImageMessageParts(
       [{ name: "secret.png", path: relativeEscape, type: "image/png" }],
+      workspaceRoot,
+      false,
+    );
+
+    expect(parts).toHaveLength(0);
+  });
+
+  it("blocks workspace symlinks that point outside the workspace", async () => {
+    const secretPath = path.join(externalRoot, "secret.png");
+    await fs.writeFile(secretPath, Buffer.from("secret-png-data"));
+
+    const symlinkPath = path.join(workspaceRoot, "secret-link.png");
+    await fs.symlink(secretPath, symlinkPath);
+
+    const parts = await resolveImageMessageParts(
+      [{ name: "secret-link.png", path: "secret-link.png", type: "image/png" }],
       workspaceRoot,
       false,
     );

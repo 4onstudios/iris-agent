@@ -5,10 +5,28 @@
   "description": "Standalone HTTP coding-agent service and CLI with ACP (Agent Client Protocol) support.",
   "type": "module",
   "bin": {
-    "iris-agent": "./bin/iris-agent.js"
+    "iris-agent": "./dist/cli.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./api/agent": {
+      "types": "./dist/api/agent.d.ts",
+      "import": "./dist/api/agent.js"
+    },
+    "./api/core/agent/index": {
+      "types": "./dist/api/core/agent/index.d.ts",
+      "import": "./dist/api/core/agent/index.js"
+    },
+    "./api/core/agent/tools/mcpTools": {
+      "types": "./dist/api/core/agent/tools/mcpTools.d.ts",
+      "import": "./dist/api/core/agent/tools/mcpTools.js"
+    }
+  },
   "packageManager": "yarn@1.22.22",
   "publishConfig": {
     "access": "public"
@@ -21,10 +39,16 @@
     "dev": "tsx watch server.ts",
     "cli": "tsx cli.ts",
     "cli:dev": "tsx watch cli.ts",
-    "build": "tsc",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.build.json && node scripts/fix-esm-import-specifiers.mjs && node scripts/copy-skill-assets.mjs",
+    "prepare": "npm run build",
     "test": "jest --config jest.config.cjs",
+    "test:package-consumer": "npm run build && node scripts/test-package-consumer.mjs",
     "typecheck": "tsc --noEmit"
   },
+  "files": [
+    "dist"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -64,8 +88,9 @@
     "@babel/preset-react": "^7.29.7",
     "@babel/preset-typescript": "^7.28.5",
     "@babel/runtime": "^8.0.0",
-    "@types/express": "^4.17.25",
+    "@types/express": "^5.0.6",
     "@types/jest": "^30.0.0",
+    "@types/json-schema": "^7.0.15",
     "@types/node": "^18.19.124",
     "babel-jest": "^30.5.0",
     "jest": "^30.5.0",

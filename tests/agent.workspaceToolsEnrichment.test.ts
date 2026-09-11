@@ -3,7 +3,7 @@ import {
   LocalFilesystem,
   Workspace,
 } from "@mastra/core/workspace";
-import { createIrisWorkspaceToolsConfig } from "../api/core/agent/index";
+import { createIrisWorkspaceToolsConfig } from "../api/core/agent/publicContracts";
 
 describe("Iris Mastra Workspace tool enrichment", () => {
   it("adds metadata and indexed search under Iris-facing names", async () => {

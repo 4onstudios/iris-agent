@@ -26,5 +26,7 @@ jobs:
         run: npm run typecheck
       - name: Build
         run: npm run build
+      - name: Package consumer compatibility
+        run: npm run test:package-consumer
       - name: Test
         run: npm test -- --runInBand --forceExit

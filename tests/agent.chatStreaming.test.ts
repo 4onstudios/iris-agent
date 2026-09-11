@@ -1,5 +1,6 @@
 import express from "express";
 import http from "http";
+import { randomUUID } from "crypto";
 
 const mockCreateCodingAgent = jest.fn();
 const mockAgentStream = jest.fn();
@@ -148,7 +149,13 @@ const startServer = async (): Promise<RunningServer> => {
 };
 
 const stopServer = async (server: http.Server): Promise<void> => {
+  const closeAllConnections = (
+    server as http.Server & { closeAllConnections?: () => void }
+  ).closeAllConnections;
   await new Promise<void>((resolve, reject) => {
+    if (typeof closeAllConnections === "function") {
+      closeAllConnections.call(server);
+    }
     server.close((err) => {
       if (err) {
         reject(err);
@@ -173,6 +180,9 @@ const createMockFullStream = (chunks: Array<Record<string, unknown>>) => {
           const value = chunks[index];
           index += 1;
           return { value, done: false };
+        },
+        async cancel() {
+          return undefined;
         },
       };
     },
@@ -271,6 +281,266 @@ describe("agent chat streaming", () => {
       expect(response.body).toContain("Plan first.");
       expect(response.body).toContain("Final answer part 1.");
       expect(response.body).toContain("Final answer part 2.");
+    } finally {
+      await stopServer(server);
+    }
+  }, 30000);
+
+  it("settles an SSE stream when cancellation is requested after chunks finish but final text stalls", async () => {
+    mockAgentStream.mockResolvedValueOnce({
+      fullStream: createMockFullStream([]),
+      text: new Promise<string>(() => undefined),
+      toolCalls: Promise.resolve([]),
+    });
+
+    const { server, baseUrl } = await startServer();
+
+    try {
+      const runId = `stream-cancel-after-chunks-${randomUUID()}`;
+      const streamResponsePromise = postStreaming(baseUrl, "/api/agent/chat", {
+        runId,
+        message: "hello",
+        modelId: "gpt-4o-mini",
+        workspaceRoot: "/tmp/stream-cancel-after-chunks",
+        isTauri: false,
+        stream: true,
+      });
+
+      let cancelResponse: JsonResponse | undefined;
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        cancelResponse = await postJson(
+          baseUrl,
+          `/api/agent/runs/${runId}/cancel`,
+          {},
+        );
+        if (cancelResponse.status !== 404) break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+
+      expect(cancelResponse?.status).toBe(200);
+      expect(cancelResponse?.body.success).toBe(true);
+
+      const streamResponse = await Promise.race([
+        streamResponsePromise,
+        new Promise<StreamingResponse>((_, reject) =>
+          setTimeout(
+            () => reject(new Error("Streaming response did not settle after cancellation")),
+            1200,
+          ),
+        ),
+      ]);
+
+      expect(streamResponse.status).toBe(200);
+      expect(streamResponse.contentType).toContain("text/event-stream");
+      expect(streamResponse.body).toContain("event: done");
+      expect(streamResponse.body).toContain("\"stopReason\":\"cancelled\"");
+      expect(streamResponse.body).toContain("\"cancelled\":true");
+    } finally {
+      await stopServer(server);
+    }
+  }, 30000);
+
+  it("settles an SSE stream when cancellation is requested while chunk reads are stalled", async () => {
+    let markReadStarted: (() => void) | undefined;
+    const readStarted = new Promise<void>((resolve) => {
+      markReadStarted = resolve;
+    });
+    let releaseRead: (() => void) | undefined;
+    const cancelRead = jest.fn(async () => {
+      releaseRead?.();
+    });
+    const stalledReader = {
+      read: jest.fn(async () => {
+        markReadStarted?.();
+        markReadStarted = undefined;
+        return await new Promise<{ value: undefined; done: true }>((resolve) => {
+          releaseRead = () => resolve({ value: undefined, done: true });
+        });
+      }),
+      cancel: cancelRead,
+    };
+
+    mockAgentStream.mockResolvedValueOnce({
+      fullStream: {
+        getReader() {
+          return stalledReader;
+        },
+      },
+      text: Promise.resolve(""),
+      toolCalls: Promise.resolve([]),
+    });
+
+    const { server, baseUrl } = await startServer();
+
+    try {
+      const runId = `stream-cancel-stalled-reader-${randomUUID()}`;
+      const streamResponsePromise = postStreaming(baseUrl, "/api/agent/chat", {
+        runId,
+        message: "hello",
+        modelId: "gpt-4o-mini",
+        workspaceRoot: "/tmp/stream-cancel-stalled-reader",
+        isTauri: false,
+        stream: true,
+      });
+
+      await Promise.race([
+        readStarted,
+        new Promise<void>((_, reject) =>
+          setTimeout(
+            () => reject(new Error("The stream did not begin reading within the expected time")),
+            5000,
+          ),
+        ),
+      ]);
+      expect(stalledReader.read).toHaveBeenCalled();
+
+      let cancelResponse: JsonResponse | undefined;
+      for (let attempt = 0; attempt < 80; attempt += 1) {
+        cancelResponse = await postJson(
+          baseUrl,
+          `/api/agent/runs/${runId}/cancel`,
+          {},
+        );
+        if (cancelResponse.status !== 404) break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+
+      expect(cancelResponse?.status).toBe(200);
+      expect(cancelResponse?.body.success).toBe(true);
+
+      const streamResponse = await Promise.race([
+        streamResponsePromise,
+        new Promise<StreamingResponse>((_, reject) =>
+          setTimeout(
+            () => reject(new Error("Streaming response did not settle after cancellation")),
+            1200,
+          ),
+        ),
+      ]);
+
+      expect(streamResponse.status).toBe(200);
+      expect(streamResponse.body).toContain("event: done");
+      expect(streamResponse.body).toContain("\"stopReason\":\"cancelled\"");
+      expect(streamResponse.body).toContain("\"cancelled\":true");
+      expect(cancelRead).toHaveBeenCalled();
+    } finally {
+      await stopServer(server);
+    }
+  }, 30000);
+
+  it("settles an SSE stream when cancellation is requested during stalled backend synthesis", async () => {
+    let markSynthesisStarted: (() => void) | undefined;
+    const synthesisStarted = new Promise<void>((resolve) => {
+      markSynthesisStarted = resolve;
+    });
+    let receivedSynthesisAbortSignal: AbortSignal | undefined;
+    const generate = jest
+      .fn()
+      .mockImplementationOnce(
+        async (_prompt: unknown, options?: Record<string, unknown>) => {
+          const signal =
+            options?.abortSignal instanceof AbortSignal
+              ? options.abortSignal
+              : undefined;
+          receivedSynthesisAbortSignal = signal;
+          markSynthesisStarted?.();
+          markSynthesisStarted = undefined;
+          return await new Promise<never>(() => undefined);
+        },
+      );
+
+    mockCreateCodingAgent.mockResolvedValueOnce({
+      generate,
+      stream: jest.fn(async () => ({
+        fullStream: createMockFullStream([
+          {
+            type: "tool-call",
+            payload: {
+              toolName: "read_file",
+              toolCallId: "tool_1",
+              args: { filePath: "README.md" },
+            },
+          },
+          {
+            type: "tool-result",
+            payload: {
+              toolName: "read_file",
+              toolCallId: "tool_1",
+              result: "README contents",
+            },
+          },
+        ]),
+        text: Promise.resolve(""),
+        toolCalls: Promise.resolve([]),
+        steps: Promise.resolve([
+          {
+            toolCalls: [{ toolName: "read_file" }],
+          },
+        ]),
+      })),
+    });
+
+    const { server, baseUrl } = await startServer();
+
+    try {
+      const runId = `stream-cancel-stalled-synthesis-${randomUUID()}`;
+      const streamResponsePromise = postStreaming(baseUrl, "/api/agent/chat", {
+        runId,
+        message: "Inspect the README",
+        modelId: "gpt-4o-mini",
+        workspaceRoot: "/tmp/stream-cancel-stalled-synthesis",
+        isTauri: false,
+        stream: true,
+        maxSteps: 2,
+      });
+
+      await Promise.race([
+        synthesisStarted,
+        new Promise<void>((_, reject) =>
+          setTimeout(
+            () =>
+              reject(
+                new Error("Backend synthesis did not begin within the expected time"),
+              ),
+            5000,
+          ),
+        ),
+      ]);
+      expect(receivedSynthesisAbortSignal).toBeDefined();
+
+      let cancelResponse: JsonResponse | undefined;
+      for (let attempt = 0; attempt < 80; attempt += 1) {
+        cancelResponse = await postJson(
+          baseUrl,
+          `/api/agent/runs/${runId}/cancel`,
+          {},
+        );
+        if (cancelResponse.status !== 404) break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+
+      expect(cancelResponse?.status).toBe(200);
+      expect(cancelResponse?.body.success).toBe(true);
+
+      const streamResponse = await Promise.race([
+        streamResponsePromise,
+        new Promise<StreamingResponse>((_, reject) =>
+          setTimeout(
+            () =>
+              reject(
+                new Error("Streaming response did not settle during stalled synthesis cancellation"),
+              ),
+            1200,
+          ),
+        ),
+      ]);
+
+      expect(streamResponse.status).toBe(200);
+      expect(streamResponse.contentType).toContain("text/event-stream");
+      expect(streamResponse.body).toContain("event: done");
+      expect(streamResponse.body).toContain("\"stopReason\":\"cancelled\"");
+      expect(streamResponse.body).toContain("\"cancelled\":true");
+      expect(receivedSynthesisAbortSignal?.aborted).toBe(true);
     } finally {
       await stopServer(server);
     }
@@ -1922,6 +2192,130 @@ describe("agent chat streaming", () => {
         .split("\n")
         .filter((line) => line === "event: tool_call");
       expect(toolCallEvents).toHaveLength(2);
+    } finally {
+      await stopServer(server);
+    }
+  }, 30000);
+
+  it("emits a synthetic tool_call before an orphan identified tool_result", async () => {
+    const args = { filePath: "README.md" };
+    mockCreateCodingAgent.mockResolvedValueOnce({
+      generate: jest.fn(async () => ({
+        text: "fallback",
+        steps: [],
+        toolCalls: [],
+      })),
+      stream: jest.fn(async () => ({
+        fullStream: createMockFullStream([
+          {
+            type: "tool-result",
+            payload: {
+              toolName: "read_file",
+              args,
+              toolCallId: "orphan-result-id",
+              result: { status: "completed", content: "README contents" },
+            },
+          },
+        ]),
+        text: Promise.resolve("Read it."),
+        toolCalls: Promise.resolve([]),
+        steps: Promise.resolve([]),
+      })),
+    });
+
+    const { server, baseUrl } = await startServer();
+
+    try {
+      const response = await postStreaming(baseUrl, "/api/agent/chat", {
+        message: "read the README",
+        modelId: "gpt-4o-mini",
+        workspaceRoot: "/tmp/stream-orphan-identified-result",
+        isTauri: false,
+        stream: true,
+      });
+
+      expect(response.status).toBe(200);
+      const toolCallIndex = response.body.indexOf("event: tool_call");
+      const toolResultIndex = response.body.indexOf("event: tool_result");
+      expect(toolCallIndex).toBeGreaterThanOrEqual(0);
+      expect(toolResultIndex).toBeGreaterThan(toolCallIndex);
+      expect(response.body).toContain('"toolCallId":"orphan-result-id"');
+    } finally {
+      await stopServer(server);
+    }
+  }, 30000);
+
+  it("emits a new synthetic tool_call when a reused toolCallId has different args", async () => {
+    mockCreateCodingAgent.mockResolvedValueOnce({
+      generate: jest.fn(async () => ({
+        text: "fallback",
+        steps: [],
+        toolCalls: [],
+      })),
+      stream: jest.fn(async () => ({
+        fullStream: createMockFullStream([
+          {
+            type: "tool-call",
+            payload: {
+              toolName: "read_file",
+              args: { filePath: "README.md" },
+              toolCallId: "reused-call-id",
+            },
+          },
+          {
+            type: "tool-result",
+            payload: {
+              toolName: "read_file",
+              args: { filePath: "README.md" },
+              toolCallId: "reused-call-id",
+              result: { status: "completed", content: "README contents" },
+            },
+          },
+          {
+            type: "tool-result",
+            payload: {
+              toolName: "read_file",
+              args: { filePath: "CHANGELOG.md" },
+              toolCallId: "reused-call-id",
+              result: { status: "completed", content: "CHANGELOG contents" },
+            },
+          },
+        ]),
+        text: Promise.resolve("Read both files."),
+        toolCalls: Promise.resolve([]),
+        steps: Promise.resolve([]),
+      })),
+    });
+
+    const { server, baseUrl } = await startServer();
+
+    try {
+      const response = await postStreaming(baseUrl, "/api/agent/chat", {
+        message: "read the docs",
+        modelId: "gpt-4o-mini",
+        workspaceRoot: "/tmp/stream-reused-tool-call-id",
+        isTauri: false,
+        stream: true,
+      });
+
+      expect(response.status).toBe(200);
+
+      const toolCallEvents = response.body.match(/event: tool_call/g) || [];
+      expect(toolCallEvents).toHaveLength(2);
+
+      const firstResultIndex = response.body.indexOf(
+        'event: tool_result\ndata: {"name":"read_file","args":{"filePath":"README.md"}',
+      );
+      const secondCallIndex = response.body.indexOf(
+        'event: tool_call\ndata: {"name":"read_file","args":{"filePath":"CHANGELOG.md"}',
+      );
+      const secondResultIndex = response.body.indexOf(
+        'event: tool_result\ndata: {"name":"read_file","args":{"filePath":"CHANGELOG.md"}',
+      );
+
+      expect(firstResultIndex).toBeGreaterThanOrEqual(0);
+      expect(secondCallIndex).toBeGreaterThan(firstResultIndex);
+      expect(secondResultIndex).toBeGreaterThan(secondCallIndex);
     } finally {
       await stopServer(server);
     }

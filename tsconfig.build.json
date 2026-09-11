@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "declaration": true,
+    "jsx": "react-jsx"
+  },
+  "include": ["index.ts", "api/**/*.ts", "server.ts", "cli.ts"],
+  "exclude": ["dist", "node_modules", "coverage", "tests"]
+}

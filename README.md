@@ -21,9 +21,14 @@
 Iris Agent is the standalone coding-agent service used by [AIRIS](https://github.com/4onstudios/iris).
 
 It provides streaming chat, workspace tools, LSP routes, MCP integration, command approvals, and run lifecycle APIs. It can run as:
+
 - **HTTP Service** - RESTful API under `/api/agent`
 - **CLI** - Interactive chat in the terminal
 - **ACP Server** - Agent Client Protocol via stdio for seamless IDE integration
+
+The SDK and ACP server require Node.js `>=22.13.0`. `IrisClient` is a
+Node.js API for IDE desktop or backend processes; it is not intended to run in
+a browser renderer.
 
 ## Quick Start
 
@@ -114,22 +119,26 @@ OPENAI_API_KEY=... npm run cli -- --workspace /path/to/project --acp
 ```
 
 This starts an ACP (Agent Client Protocol) server over stdio, allowing IDE
-integrations and other ACP clients to communicate with the agent. The `--port`
-option is not used by the stdio transport.
+integrations and other ACP clients to communicate with the agent. Standard
+output is reserved for newline-delimited JSON-RPC messages; logs are written to
+standard error. Each ACP process is bound to the workspace supplied at startup.
+To switch workspaces, close the process and respawn `iris-agent` with the new
+`--workspace` path.
 
 ## CLI Usage
 
 ```sh
-iris-agent --workspace <path> [--acp | --chat] [--port <port>]
+iris-agent --workspace <path> [--acp | --chat]
 ```
 
 **Options:**
+
 - `--workspace` (required) - Path to the workspace/project root
 - `--acp` - Start ACP protocol server (stdio-based)
 - `--chat` - Start interactive chat mode
-- `--port <port>` - Retained for compatibility; ACP currently uses stdio and does not listen on a TCP port.
+- `--modelId` - Model identifier used for chat/ACP sessions (default: `gpt-4o`)
 
-Short aliases are also available: `-w`, `-a`, `-c`, and `-p`. Running the CLI
+Short aliases are also available: `-w`, `-a`, and `-c`. Running the CLI
 without `--chat` or `--acp` prints help.
 
 **Examples:**
@@ -230,23 +239,225 @@ Commands that require approval pause until the client submits
 
 ## ACP Protocol
 
-The ACP server supports the following custom RPC methods:
+The stdio server implements the standard ACP v1 lifecycle:
 
-- `chat` - Send a message to the agent
-  - **Params:** `{ message: string }`
-  - **Response:** `{ success: boolean, response: any }`
+- `initialize`
+- `session/new`
+- `session/prompt`
+- `session/cancel`
+- `session/close`
+- `session/update` notifications for assistant text, reasoning, and tool status
 
-- `list_tools` - Get available tools
-  - **Params:** `{}`
-  - **Response:** `{ tools: Tool[] }`
+The server currently advertises text and resource-link prompts plus session
+close support. It does not advertise session persistence or unsupported media
+capabilities.
 
-- `list_skills` - Get available skills
-  - **Params:** `{}`
-  - **Response:** `{ skills: string[] }`
+Each ACP session must use the workspace supplied when starting the process.
+Close and respawn the CLI to use another workspace.
 
-- `workspace_info` - Get workspace metadata
-  - **Params:** `{}`
-  - **Response:** `{ workspaceRoot: string, timestamp: string, agentVersion: string }`
+### IrisClient SDK
+
+Install the published package in the Node.js process that owns your IDE's
+agent integration:
+
+```sh
+npm install @4onstudios/iris-agent
+```
+
+The spawned agent uses the provider credentials from its environment. For
+example:
+
+```sh
+OPENAI_API_KEY=... npm run your-ide-backend
+```
+
+When using a local checkout instead of the published package, build it before
+starting the compiled CLI:
+
+```sh
+npm install
+npm run build
+```
+
+When installing from a Git branch or commit, npm runs this package's
+`prepare` script to build `dist/` during installation, so root exports such as
+`IrisClient` are available without manually committing generated artifacts.
+
+The ACP subprocess writes protocol messages to stdout and diagnostic logs to
+stderr. Never merge logs into stdout or pipe stdout through a text logger;
+doing so corrupts the ACP stream.
+
+IDE extensions written for Node.js can use the exported `IrisClient` instead of
+managing ACP messages or the agent subprocess directly:
+
+```ts
+import { IrisClient } from "@4onstudios/iris-agent";
+
+const { client } = await IrisClient.spawn({
+  cwd: workspaceRoot,
+  onSessionUpdate(notification) {
+    renderAgentUpdate(notification.update);
+  },
+});
+
+try {
+  await client.openSession(workspaceRoot);
+  const result = await client.prompt("Explain the selected code");
+  console.log(result.stopReason);
+} finally {
+  await client.close();
+}
+```
+
+`IrisClient.spawn()` starts `iris-agent --workspace <cwd> --acp`, initializes the
+ACP connection, and owns process cleanup. The `cwd` must be the workspace path
+the agent is allowed to access. The package's `iris-agent` executable must be
+available on `PATH`; use `command` and `args` when your IDE starts a local
+checkout or a custom launcher:
+
+```ts
+const { client } = await IrisClient.spawn({
+  command: "node",
+  args: ["/path/to/iris-agent/dist/cli.js", "--workspace", workspaceRoot, "--acp"],
+  cwd: workspaceRoot,
+  env: { OPENAI_API_KEY: process.env.OPENAI_API_KEY },
+});
+```
+
+One `IrisClient` owns one active ACP session. Call `openSession()` before
+`prompt()`, use `cancel()` to stop the active turn, and call `closeSession()`
+to end a session in the current workspace. An ACP process is bound to its
+startup workspace: to switch workspaces, call `close()` and use `spawn()` to
+create a new client for the new workspace. `close()` also terminates a process
+created by `spawn()` and is safe to call repeatedly.
+
+`IrisClient.connect()` accepts an existing ACP stream or in-process ACP agent
+when the IDE manages the process or transport itself. Use this for IDEs that
+already have a process supervisor or ACP transport. `spawn()` rejects if the
+agent executable cannot start or initialization fails, so handle startup errors
+before enabling agent commands in the UI.
+
+The `onSessionUpdate` callback receives standard ACP session notifications:
+
+| Update | Typical UI behavior |
+| --- | --- |
+| `agent_message_chunk` | Append assistant text. |
+| `agent_thought_chunk` | Show or hide reasoning according to IDE policy. |
+| `tool_call` | Show a tool as running. |
+| `tool_call_update` | Update tool status and output. |
+
+Do not expose provider API keys or raw ACP stdio streams to a browser renderer.
+Keep the client in the trusted desktop/backend process and forward only the
+events and commands your IDE UI needs.
+
+#### Troubleshooting
+
+- `ENOENT` when calling `spawn()` means the configured `command` is not on
+  `PATH`. Set `command` and `args` to the compiled CLI, or install the package
+  globally for the IDE process.
+- An initialization failure usually means the subprocess exited early, the
+  provider key is missing, or stdout contains non-ACP output. Inspect stderr
+  and verify the provider environment passed through `env`.
+- A prompt requires an open session. Call `openSession()` once per workspace.
+  To switch workspaces, call `close()` to terminate the current ACP process,
+  then use `spawn()` to create a client bound to the new workspace.
+- `IrisClient` requires a Node.js desktop/backend process. Browser-only IDE
+  clients should call their backend over HTTPS/WebSocket/IPC instead of
+  spawning the agent in the renderer.
+
+### Custom IDE Backend
+
+For a custom IDE, keep `IrisClient` in the desktop or backend process and
+forward agent updates to the UI over WebSocket, IPC, or the IDE's event bus:
+
+```ts
+import { IrisClient } from "@4onstudios/iris-agent";
+
+export class IrisAgentController {
+  private client?: IrisClient;
+
+  async start(workspaceRoot: string, onUpdate: (update: unknown) => void) {
+    const spawned = await IrisClient.spawn({
+      cwd: workspaceRoot,
+      clientName: "my-custom-ide",
+      clientVersion: "1.0.0",
+      onSessionUpdate(notification) {
+        onUpdate(notification.update);
+      },
+    });
+
+    this.client = spawned.client;
+    await this.client.openSession(workspaceRoot);
+  }
+
+  async prompt(prompt: string) {
+    if (!this.client) throw new Error("Iris agent is not running");
+    return this.client.prompt(prompt);
+  }
+
+  async cancel() {
+    await this.client?.cancel();
+  }
+
+  async stop() {
+    await this.client?.close();
+    this.client = undefined;
+  }
+}
+```
+
+Example backend routes can forward updates to the custom IDE client:
+
+```ts
+const iris = new IrisAgentController();
+
+await iris.start(workspaceRoot, (update) => {
+  websocket.broadcast({ type: "agent-update", update });
+});
+
+app.post("/api/agent/prompt", async (request, response) => {
+  response.json(await iris.prompt(request.body.prompt));
+});
+
+app.post("/api/agent/cancel", async (_request, response) => {
+  await iris.cancel();
+  response.sendStatus(204);
+});
+
+app.post("/api/agent/stop", async (_request, response) => {
+  await iris.stop();
+  response.sendStatus(204);
+});
+```
+
+Handle forwarded updates in the IDE UI using `sessionUpdate`:
+
+```ts
+function handleAgentUpdate(update: any) {
+  switch (update.sessionUpdate) {
+    case "agent_message_chunk":
+      appendAssistantText(update.content.text);
+      break;
+    case "agent_thought_chunk":
+      appendReasoning(update.content.text);
+      break;
+    case "tool_call":
+      showToolStarted(update.title, update.toolCallId);
+      break;
+    case "tool_call_update":
+      updateToolStatus(update.toolCallId, update.status);
+      break;
+  }
+}
+```
+
+The integration flow is:
+
+```text
+Custom IDE UI -> IDE backend -> IrisClient.spawn()
+             -> iris-agent --acp -> ACP session/update events
+             -> IDE backend -> WebSocket/IPC -> Custom IDE UI
+```
 
 ## Development
 
