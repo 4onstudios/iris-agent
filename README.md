@@ -32,12 +32,12 @@ a browser renderer.
 
 ## Quick Start
 
-This project can be installed and run with either npm or Yarn.
+This project can be installed and run with either npm or Yarn. Configure your provider API key (such as `OPENROUTER_API_KEY` or `OPENAI_API_KEY`). By default, Iris Agent routes through OpenRouter (`openrouter/openai/gpt-4o`) when `OPENROUTER_API_KEY` is provided or configured.
 
 ```sh
 # npm
 npm install
-OPENAI_API_KEY=... npm start
+OPENROUTER_API_KEY=... npm start
 
 # yarn
 yarn install
@@ -48,7 +48,7 @@ yarn start
 
 ```sh
 npm install
-OPENAI_API_KEY=... npm start
+OPENROUTER_API_KEY=... npm start
 ```
 
 The service listens on port `8080` by default. Set `PORT` to change it. `GET /health` reports service readiness.
@@ -107,19 +107,23 @@ progress-event retrieval, or cancellation.
 ### CLI Mode
 
 ```sh
-OPENAI_API_KEY=... npm run cli -- --workspace /path/to/project --chat
+# Interactive chat with default model (openrouter/openai/gpt-4o)
+OPENROUTER_API_KEY=... npm run cli -- --workspace /path/to/project --chat
+
+# Interactive chat with a specific model
+OPENROUTER_API_KEY=... npm run cli -- --workspace /path/to/project --chat --modelId openrouter/anthropic/claude-3.7-sonnet
 ```
 
-This starts an interactive chat session in your terminal with access to the workspace.
+This starts an interactive streaming chat session in your terminal with access to the workspace and tools.
 
 ### ACP Server
 
 ```sh
-OPENAI_API_KEY=... npm run cli -- --workspace /path/to/project --acp
+OPENROUTER_API_KEY=... npm run cli -- --workspace /path/to/project --acp
 ```
 
 This starts an ACP (Agent Client Protocol) server over stdio, allowing IDE
-integrations and other ACP clients to communicate with the agent. Standard
+integrations and other ACP clients to communicate with the agent. Models can be configured at startup or dynamically per-session / per-prompt. Standard
 output is reserved for newline-delimited JSON-RPC messages; logs are written to
 standard error. Each ACP process is bound to the workspace supplied at startup.
 To switch workspaces, close the process and respawn `iris-agent` with the new
@@ -128,18 +132,17 @@ To switch workspaces, close the process and respawn `iris-agent` with the new
 ## CLI Usage
 
 ```sh
-iris-agent --workspace <path> [--acp | --chat]
+iris-agent --workspace <path> [--acp | --chat] [--modelId <model>]
 ```
 
 **Options:**
 
-- `--workspace` (required) - Path to the workspace/project root
-- `--acp` - Start ACP protocol server (stdio-based)
-- `--chat` - Start interactive chat mode
-- `--modelId` - Model identifier used for chat/ACP sessions (default: `gpt-4o`)
+- `--workspace` (required, `-w`) - Path to the workspace/project root
+- `--acp` (`-a`) - Start ACP protocol server (stdio-based)
+- `--chat` (`-c`) - Start interactive chat mode
+- `--modelId` - Model identifier used for chat/ACP sessions (default: `openrouter/openai/gpt-4o` or `MODEL_ID` / `OPENROUTER_MODEL` env vars)
 
-Short aliases are also available: `-w`, `-a`, and `-c`. Running the CLI
-without `--chat` or `--acp` prints help.
+Running the CLI without `--chat` or `--acp` prints help.
 
 **Examples:**
 
@@ -147,8 +150,14 @@ without `--chat` or `--acp` prints help.
 # Interactive chat
 npm run cli -- --workspace . --chat
 
+# Interactive chat with custom model
+npm run cli -- --workspace . --chat --modelId openrouter/anthropic/claude-3.7-sonnet
+
 # ACP server for IDE integration
 npm run cli -- --workspace . --acp
+
+# ACP server with custom default model
+npm run cli -- --workspace . --acp --modelId openrouter/openai/gpt-4o
 
 # HTTP service (default)
 npm start
@@ -242,18 +251,24 @@ Commands that require approval pause until the client submits
 The stdio server implements the standard ACP v1 lifecycle:
 
 - `initialize`
-- `session/new`
-- `session/prompt`
-- `session/cancel`
-- `session/close`
+- `session/new` - supports initial `modelId` specification in `_meta` or parameters
+- `session/load` - load existing session history with optional model override
+- `session/set_config_option` - dynamically change session options such as model (`configId: "model"`)
+- `session/prompt` - execute prompts with optional per-turn `modelId` override in `_meta`
+- `session/cancel` - abort active turn
+- `session/close` - clean up session resources
 - `session/update` notifications for assistant text, reasoning, and tool status
 
-The server currently advertises text and resource-link prompts plus session
-close support. It does not advertise session persistence or unsupported media
-capabilities.
+The server supports dynamic model resolution and caching across ACP requests.
 
-Each ACP session must use the workspace supplied when starting the process.
-Close and respawn the CLI to use another workspace.
+### Specifying Models in ACP Mode
+
+Clients can specify and change models at multiple levels:
+
+1. **Server Default**: Pass `--modelId <model>` to `iris-agent --acp` or set the `MODEL_ID` / `OPENROUTER_MODEL` environment variable.
+2. **Session Creation / Load**: Pass `modelId` in `_meta.iris.modelId` or `_meta.modelId` during `session/new` or `session/load`.
+3. **Dynamic Switch**: Call `session/set_config_option` with `configId: "model"` and `value: "<modelId>"` to change the active model for subsequent prompts.
+4. **Per-Prompt Override**: Include `_meta.iris.modelId` or `_meta.modelId` in the `session/prompt` payload to run a single prompt turn with a specific model.
 
 ### IrisClient SDK
 
@@ -268,7 +283,7 @@ The spawned agent uses the provider credentials from its environment. For
 example:
 
 ```sh
-OPENAI_API_KEY=... npm run your-ide-backend
+OPENROUTER_API_KEY=... npm run your-ide-backend
 ```
 
 When using a local checkout instead of the published package, build it before
@@ -301,9 +316,22 @@ const { client } = await IrisClient.spawn({
 });
 
 try {
-  await client.openSession(workspaceRoot);
+  // Open session with an optional specific model
+  await client.openSession(workspaceRoot, {
+    modelId: "openrouter/anthropic/claude-3.7-sonnet",
+  });
+
+  // Prompt the agent
   const result = await client.prompt("Explain the selected code");
   console.log(result.stopReason);
+
+  // Switch model dynamically mid-session
+  await client.setModel("openrouter/openai/gpt-4o");
+
+  // Or override model for a single prompt
+  await client.prompt("Refactor this function", {
+    modelId: "openrouter/google/gemini-2.0-flash",
+  });
 } finally {
   await client.close();
 }
