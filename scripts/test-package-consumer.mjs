@@ -58,6 +58,37 @@ try {
     ["--project", path.join(consumerRoot, "tsconfig.json")],
     { cwd: consumerRoot, stdio: "inherit" },
   );
+
+  await fs.writeFile(
+    path.join(consumerRoot, "consumer-runtime.mjs"),
+    [
+      'import fs from "node:fs/promises";',
+      'import path from "node:path";',
+      'import { getSkillsDir } from "@4onstudios/iris-agent/api/core/agent/index";',
+      "",
+      "const skillsDir = getSkillsDir();",
+      "const stats = await fs.stat(skillsDir);",
+      "if (!stats.isDirectory()) {",
+      '  throw new Error(`getSkillsDir() did not resolve a directory: ${skillsDir}`);',
+      "}",
+      "const normalizedSkillsDir = skillsDir.split(path.sep).join('/');",
+      "if (!normalizedSkillsDir.endsWith('/dist/api/core/skills')) {",
+      "  throw new Error(",
+      "    `getSkillsDir() resolved outside package assets: ${normalizedSkillsDir}`",
+      "  );",
+      "}",
+      "const entries = await fs.readdir(skillsDir);",
+      "if (entries.length === 0) {",
+      '  throw new Error(`skills directory is empty: ${skillsDir}`);',
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  execFileSync(process.execPath, [path.join(consumerRoot, "consumer-runtime.mjs")], {
+    cwd: consumerRoot,
+    stdio: "inherit",
+  });
 } finally {
   await fs.rm(consumerRoot, { recursive: true, force: true });
 }

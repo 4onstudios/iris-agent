@@ -298,8 +298,16 @@ describe("agent run lifecycle APIs", () => {
 
     try {
       const runId = "run-cancel-stalled-model";
+      let receivedAbortSignal: AbortSignal | undefined;
       mockGenerate.mockImplementation(
-        async () => await new Promise<never>(() => undefined),
+        async (_prompt: unknown, options?: Record<string, unknown>) => {
+          const signal =
+            options?.abortSignal instanceof AbortSignal
+              ? options.abortSignal
+              : undefined;
+          receivedAbortSignal = signal;
+          return await new Promise<never>(() => undefined);
+        },
       );
 
       const pendingChatResponse = requestJson(baseUrl, "POST", "/api/agent/chat", {
@@ -342,6 +350,8 @@ describe("agent run lifecycle APIs", () => {
         stopReason: "cancelled",
         error: "Run was cancelled",
       });
+      expect(receivedAbortSignal).toBeDefined();
+      expect(receivedAbortSignal?.aborted).toBe(true);
     } finally {
       await stopServer(server);
     }

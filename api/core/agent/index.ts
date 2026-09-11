@@ -13,6 +13,7 @@ import fs from "fs/promises";
 import path from "path";
 import os from "os";
 import { exec } from "child_process";
+import { fileURLToPath } from "url";
 import { promisify } from "util";
 
 export const getSkillsDir = (): string => {
@@ -20,14 +21,7 @@ export const getSkillsDir = (): string => {
     return path.resolve(__dirname, "..", "skills");
   }
 
-  const runtimeScriptDir = path.dirname(process.argv[1] || process.cwd());
-  const candidates = [
-    path.resolve(runtimeScriptDir, "api", "core", "skills"),
-    path.resolve(process.cwd(), "api", "core", "skills"),
-    path.resolve(process.cwd(), "dist", "api", "core", "skills"),
-  ];
-  const existing = candidates.find((candidate) => fsNative.existsSync(candidate));
-  return existing || candidates[0];
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "skills");
 };
 import { LibSQLStore, LibSQLVector } from "@mastra/libsql";
 import { Memory } from "@mastra/memory";

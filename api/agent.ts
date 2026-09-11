@@ -739,15 +739,22 @@ const generateWithRetry = async (
   agent: GeneratedAgent,
   prompt: string | MultimodalMessage[],
   generateOptions: Record<string, unknown>,
+  abortSignal: AbortSignal,
   maxAttempts = 3,
 ): Promise<AgentGenerateResult> => {
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (abortSignal.aborted) {
+      throw new Error("Run cancelled");
+    }
     try {
       return await agent.generate(prompt, generateOptions);
     } catch (error) {
       lastError = error;
+      if (abortSignal.aborted) {
+        throw error;
+      }
       const shouldRetry = isRetryableModelError(error) && attempt < maxAttempts;
 
       if (!shouldRetry) {
@@ -780,72 +787,111 @@ const asGenerateResultFromTurn = (turnResult: {
 
 const createGeneratedAgentRuntimeAdapter = (
   agent: GeneratedAgent,
-): AgentRuntime => ({
-  descriptor: {
-    id: "generated-agent-runtime",
-    name: "Generated Agent Runtime",
-    version: "0.1.0",
-    source: "external",
-  },
-  async startSession(context) {
-    return {
-      sessionId: context.sessionId,
-      agentId: "generated-agent-runtime",
-      createdAt: Date.now(),
-    };
-  },
-  async runTurn(request) {
-    const metadata =
-      request.metadata && typeof request.metadata === "object"
-        ? (request.metadata as Record<string, unknown>)
-        : {};
+): AgentRuntime => {
+  const turnAbortControllers = new Map<string, AbortController>();
 
-    const modelInput =
-      metadata.modelInput !== undefined
-        ? (metadata.modelInput as string | MultimodalMessage[])
-        : request.input;
-    const generateOptions =
-      metadata.generateOptions && typeof metadata.generateOptions === "object"
-        ? (metadata.generateOptions as Record<string, unknown>)
-        : {};
-    const requestContext = generateOptions.requestContext as {
-      set?: (key: string, value: unknown) => void;
-    } | undefined;
-    requestContext?.set?.("onPreToolUse", request.onPreToolUse);
+  const createTurnAbortController = (sessionId: string): AbortController => {
+    const controller = new AbortController();
+    turnAbortControllers.set(sessionId, controller);
+    return controller;
+  };
 
-    const result = await agent.generate(modelInput, generateOptions);
-
-    return {
-      text: result.text || "",
-      toolCalls: Array.isArray(result.toolCalls)
-        ? (result.toolCalls as Array<Record<string, unknown>>)
-        : undefined,
-      raw: result,
-    };
-  },
-  async runTurnStream(request) {
-    const metadata =
-      request.metadata && typeof request.metadata === "object"
-        ? (request.metadata as Record<string, unknown>)
-        : {};
-    const modelInput =
-      metadata.modelInput !== undefined
-        ? (metadata.modelInput as string | MultimodalMessage[])
-        : request.input;
-    const generateOptions =
-      metadata.generateOptions && typeof metadata.generateOptions === "object"
-        ? (metadata.generateOptions as Record<string, unknown>)
-        : {};
-    const requestContext = generateOptions.requestContext as {
-      set?: (key: string, value: unknown) => void;
-    } | undefined;
-    requestContext?.set?.("onPreToolUse", request.onPreToolUse);
-
-    if (typeof agent.stream !== "function") {
-      throw new Error("Generated agent runtime does not support streaming");
+  const clearTurnAbortController = (
+    sessionId: string,
+    controller: AbortController,
+  ): void => {
+    const active = turnAbortControllers.get(sessionId);
+    if (active === controller) {
+      turnAbortControllers.delete(sessionId);
     }
+  };
 
-  const rawStreamResult = await agent.stream(modelInput, generateOptions);
+  return {
+    descriptor: {
+      id: "generated-agent-runtime",
+      name: "Generated Agent Runtime",
+      version: "0.1.0",
+      source: "external",
+    },
+    async startSession(context) {
+      return {
+        sessionId: context.sessionId,
+        agentId: "generated-agent-runtime",
+        createdAt: Date.now(),
+      };
+    },
+    async runTurn(request) {
+      const metadata =
+        request.metadata && typeof request.metadata === "object"
+          ? (request.metadata as Record<string, unknown>)
+          : {};
+
+      const modelInput =
+        metadata.modelInput !== undefined
+          ? (metadata.modelInput as string | MultimodalMessage[])
+          : request.input;
+      const generateOptions =
+        metadata.generateOptions && typeof metadata.generateOptions === "object"
+          ? (metadata.generateOptions as Record<string, unknown>)
+          : {};
+      const requestContext = generateOptions.requestContext as {
+        set?: (key: string, value: unknown) => void;
+      } | undefined;
+      requestContext?.set?.("onPreToolUse", request.onPreToolUse);
+      const turnAbortController = createTurnAbortController(request.sessionId);
+      const generateOptionsWithAbort = {
+        ...generateOptions,
+        abortSignal: turnAbortController.signal,
+      };
+      let result: AgentGenerateResult;
+      try {
+        result = await agent.generate(modelInput, generateOptionsWithAbort);
+      } finally {
+        clearTurnAbortController(request.sessionId, turnAbortController);
+      }
+
+      return {
+        text: result.text || "",
+        toolCalls: Array.isArray(result.toolCalls)
+          ? (result.toolCalls as Array<Record<string, unknown>>)
+          : undefined,
+        raw: result,
+      };
+    },
+    async runTurnStream(request) {
+      const metadata =
+        request.metadata && typeof request.metadata === "object"
+          ? (request.metadata as Record<string, unknown>)
+          : {};
+      const modelInput =
+        metadata.modelInput !== undefined
+          ? (metadata.modelInput as string | MultimodalMessage[])
+          : request.input;
+      const generateOptions =
+        metadata.generateOptions && typeof metadata.generateOptions === "object"
+          ? (metadata.generateOptions as Record<string, unknown>)
+          : {};
+      const requestContext = generateOptions.requestContext as {
+        set?: (key: string, value: unknown) => void;
+      } | undefined;
+      requestContext?.set?.("onPreToolUse", request.onPreToolUse);
+
+      if (typeof agent.stream !== "function") {
+        throw new Error("Generated agent runtime does not support streaming");
+      }
+
+      const turnAbortController = createTurnAbortController(request.sessionId);
+      const generateOptionsWithAbort = {
+        ...generateOptions,
+        abortSignal: turnAbortController.signal,
+      };
+      let rawStreamResult: NativeAgentStreamResult;
+      try {
+        rawStreamResult = await agent.stream(modelInput, generateOptionsWithAbort);
+      } catch (error) {
+        clearTurnAbortController(request.sessionId, turnAbortController);
+        throw error;
+      }
     const tee = (
       rawStreamResult.fullStream as ReadableStream<NativeAgentStreamChunk> & {
         tee?: () => [
@@ -922,59 +968,80 @@ const createGeneratedAgentRuntimeAdapter = (
         },
       }),
     );
-    const transportStreamResult: NativeAgentStreamResult = {
-      ...rawStreamResult,
-      fullStream: transportSource,
-    };
+      const transportStreamResult: NativeAgentStreamResult = {
+        ...rawStreamResult,
+        fullStream: transportSource,
+      };
 
-    const result: GeneratedAgentTurnStreamResult = {
-      stream: mappedStream,
-      getFinalResult: async () => {
-        const [text, toolCalls, usage, steps] = await Promise.all([
-          rawStreamResult.text,
-          rawStreamResult.toolCalls,
-          Promise.resolve(rawStreamResult.usage).catch(() => undefined),
-          Promise.resolve(rawStreamResult.steps).catch(() => undefined),
-        ]);
+      const result: GeneratedAgentTurnStreamResult = {
+        stream: mappedStream,
+        getFinalResult: async () => {
+          const [text, toolCalls, usage, steps] = await Promise.all([
+            rawStreamResult.text,
+            rawStreamResult.toolCalls,
+            Promise.resolve(rawStreamResult.usage).catch(() => undefined),
+            Promise.resolve(rawStreamResult.steps).catch(() => undefined),
+          ]);
 
-        return {
-          text: text || "",
-          toolCalls: Array.isArray(toolCalls)
-            ? toolCalls
-              .filter((item) => typeof item?.toolName === "string")
-              .map((item) => ({
-                name: item.toolName as string,
-                args: item.args || {},
-                toolCallId: item.toolCallId,
-              }))
-            : undefined,
-          raw: {
-            text,
-            toolCalls,
-            usage,
-            steps,
-            streamResult: rawStreamResult,
-          },
-        };
-      },
-      rawStreamResult: transportStreamResult,
-    };
-    return result;
-  },
-  async endSession() {
-    // No-op: GeneratedAgent lifecycle is managed by agent cache.
-  },
-});
+          return {
+            text: text || "",
+            toolCalls: Array.isArray(toolCalls)
+              ? toolCalls
+                .filter((item) => typeof item?.toolName === "string")
+                .map((item) => ({
+                  name: item.toolName as string,
+                  args: item.args || {},
+                  toolCallId: item.toolCallId,
+                }))
+              : undefined,
+            raw: {
+              text,
+              toolCalls,
+              usage,
+              steps,
+              streamResult: rawStreamResult,
+            },
+          };
+        },
+        rawStreamResult: transportStreamResult,
+      };
+      return {
+        ...result,
+        getFinalResult: async () => {
+          try {
+            return await result.getFinalResult();
+          } finally {
+            clearTurnAbortController(request.sessionId, turnAbortController);
+          }
+        },
+      };
+    },
+    async cancelTurn(sessionId) {
+      const controller = turnAbortControllers.get(sessionId);
+      if (!controller) return;
+      controller.abort();
+      turnAbortControllers.delete(sessionId);
+    },
+    async endSession(sessionId) {
+      // No-op: GeneratedAgent lifecycle is managed by agent cache.
+      turnAbortControllers.delete(sessionId);
+    },
+  };
+};
 
 const generateWithSessionRetry = async (
   session: HostSessionHandle,
   prompt: string | MultimodalMessage[],
   generateOptions: Record<string, unknown>,
+  abortSignal: AbortSignal,
   maxAttempts = 3,
 ): Promise<AgentGenerateResult> => {
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (abortSignal.aborted) {
+      throw new Error("Run cancelled");
+    }
     try {
       const turnResult = await session.sendAndWait({
         prompt: typeof prompt === "string" ? prompt : "[multimodal-prompt]",
@@ -986,6 +1053,9 @@ const generateWithSessionRetry = async (
       return asGenerateResultFromTurn(turnResult);
     } catch (error) {
       lastError = error;
+      if (abortSignal.aborted) {
+        throw error;
+      }
       const shouldRetry = isRetryableModelError(error) && attempt < maxAttempts;
 
       if (!shouldRetry) {
@@ -1809,6 +1879,31 @@ router.post(
           return true;
         }
       };
+      const turnAbortController = new AbortController();
+      let turnCancellationForwarded = false;
+      const requestTurnCancellation = async (): Promise<void> => {
+        if (!turnAbortController.signal.aborted) {
+          turnAbortController.abort();
+        }
+
+        if (turnCancellationForwarded) {
+          return;
+        }
+        turnCancellationForwarded = true;
+
+        if (!activeHostSession) {
+          return;
+        }
+
+        try {
+          await activeHostSession.cancel();
+        } catch (error) {
+          console.warn(
+            "[agent] Failed to propagate turn cancellation to host session:",
+            getErrorMessage(error),
+          );
+        }
+      };
       type CancelledDuringWait = { __cancelledDuringWait: true };
       const cancelledDuringWait: CancelledDuringWait = {
         __cancelledDuringWait: true,
@@ -1830,6 +1925,7 @@ router.post(
         const waitForCancellation: Promise<CancelledDuringWait> = (async () => {
           while (!stopped) {
             if (await isCancelled()) {
+              await requestTurnCancellation();
               return cancelledDuringWait;
             }
             await sleep(75);
@@ -2523,6 +2619,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
         toolCallConcurrency: 1,
         stopWhen: stopWhenToolBudgetReached,
         requestContext: agentRequestContext,
+        abortSignal: turnAbortController.signal,
       };
 
       if (isSynthesisOnlyContinuation) {
@@ -2559,6 +2656,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
           toolChoice: "none" as const,
           toolCallConcurrency: 1,
           requestContext: agentRequestContext,
+          abortSignal: turnAbortController.signal,
         };
 
         if (activeHostSession) {
@@ -2566,6 +2664,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             activeHostSession,
             synthesisPrompt,
             synthesisOptions,
+            turnAbortController.signal,
             modelProfile.generateRetryAttempts,
           );
         }
@@ -2574,6 +2673,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
           agent,
           synthesisPrompt,
           synthesisOptions,
+          turnAbortController.signal,
           modelProfile.generateRetryAttempts,
         );
       };
@@ -2769,13 +2869,58 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             if (call.toolCallId) return `id:${call.toolCallId}:${signature}`;
             return signature;
           };
-          const emittedToolCallIds = new Set<string>();
+          const getEmittedInvocationKey = (
+            toolName: string,
+            toolCallId: string | undefined,
+            args: Record<string, unknown>,
+          ): string =>
+            toolCallId
+              ? `id:${toolCallId}:${getToolCallSignature(toolName, args)}`
+              : getToolCallSignature(toolName, args);
+          const emittedToolCallKeys = new Set<string>();
 
           while (true) {
-            const { value, done } = await reader.read();
+            const streamReadOrCancellation = await waitForResultOrCancellation(
+              reader.read(),
+            );
+            if (isCancelledWaitResult(streamReadOrCancellation)) {
+              await reader.cancel().catch(() => undefined);
+              await transitionToCancelled("stream_read_wait");
+              writeEvent("lifecycle", {
+                runId: resolvedRunId,
+                lifecycleState,
+                stopReason,
+              });
+              writeEvent("done", {
+                success: false,
+                runId: resolvedRunId,
+                lifecycleState,
+                stopReason,
+                cancelled: true,
+                response: "Run cancelled",
+                toolCalls: [],
+                executedToolResults: [],
+                suspendedTools: streamedSuspendedTools,
+                thoughtSteps:
+                  thoughtBuffer.length > 0 ? [thoughtBuffer.join("")] : [],
+                model: modelId,
+                autoFixAttempted: false,
+                autoFixFailureCount: 0,
+                maxStepsReached: false,
+                stepsUsed: 0,
+                maxSteps,
+              });
+              stopKeepAlive();
+              res.end();
+              return;
+            }
+
+            const { value, done } = streamReadOrCancellation;
             if (done) break;
 
             if (await isCancelled()) {
+              await requestTurnCancellation();
+              await reader.cancel().catch(() => undefined);
               await transitionToCancelled("stream_iteration");
               writeEvent("lifecycle", {
                 runId: resolvedRunId,
@@ -2881,7 +3026,13 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                 if (occurrence <= (emittedPendingCounts.get(key) || 0)) continue;
                 emittedPendingCounts.set(key, occurrence);
                 if (call.toolCallId) {
-                  emittedToolCallIds.add(call.toolCallId);
+                  emittedToolCallKeys.add(
+                    getEmittedInvocationKey(
+                      call.name,
+                      call.toolCallId,
+                      call.args || {},
+                    ),
+                  );
                 }
                 writeEvent("tool_call", {
                   name: call.name,
@@ -2935,8 +3086,13 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                   : undefined;
               const resultArgs =
                 (chunk.payload?.args as Record<string, unknown>) || {};
-              if (toolCallId && !emittedToolCallIds.has(toolCallId)) {
-                emittedToolCallIds.add(toolCallId);
+              const emittedInvocationKey = getEmittedInvocationKey(
+                toolName,
+                toolCallId,
+                resultArgs,
+              );
+              if (toolCallId && !emittedToolCallKeys.has(emittedInvocationKey)) {
+                emittedToolCallKeys.add(emittedInvocationKey);
                 writeEvent("tool_call", {
                   name: toolName,
                   args: resultArgs,
@@ -3529,12 +3685,14 @@ _You have discovered the following in earlier interactions. Use this to avoid re
               activeHostSession,
               modelInput,
               generateOptions,
+              turnAbortController.signal,
               modelProfile.generateRetryAttempts,
             )
             : generateWithRetry(
               agent,
               modelInput,
               generateOptions,
+              turnAbortController.signal,
               modelProfile.generateRetryAttempts,
             ),
         );
@@ -4003,6 +4161,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             toolCallConcurrency: 1,
             stopWhen: stopWhenToolBudgetReached,
             requestContext: agentRequestContext,
+            abortSignal: turnAbortController.signal,
           };
 
           let autoFixResult: AgentGenerateResult;
@@ -4013,12 +4172,14 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                 activeHostSession,
                 autoFixPrompt,
                 autoFixOptions,
+                turnAbortController.signal,
                 modelProfile.reflectionRetryAttempts,
               )
               : await generateWithRetry(
                 agent,
                 autoFixPrompt,
                 autoFixOptions,
+                turnAbortController.signal,
                 modelProfile.reflectionRetryAttempts,
               );
           } finally {

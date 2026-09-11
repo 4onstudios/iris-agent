@@ -167,7 +167,9 @@ export const createAcpAgentApp = (
         const abortWait = new Promise<T | typeof abortedMarker>((resolve) => {
           const onAbort = () => resolve(abortedMarker);
           turnSignal.addEventListener("abort", onAbort, { once: true });
-          work.finally(() => turnSignal.removeEventListener("abort", onAbort));
+          const cleanup = () =>
+            turnSignal.removeEventListener("abort", onAbort);
+          work.then(cleanup, cleanup);
         });
 
         const result = await Promise.race<T | typeof abortedMarker>([
