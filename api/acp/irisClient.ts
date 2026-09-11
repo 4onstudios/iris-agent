@@ -6,6 +6,15 @@ export type IrisClientOptions = {
     clientName?: string;
     clientVersion?: string;
     onSessionUpdate?: (notification: acp.SessionNotification) => void;
+    /**
+     * Called when the agent asks the client to approve or reject a tool call
+     * (e.g. a shell command) via `session/request_permission`. Return the
+     * outcome describing the user's decision. If omitted, IrisClient
+     * responds with `cancelled`, which the agent treats as a rejection.
+     */
+    onRequestPermission?: (
+        params: acp.RequestPermissionRequest,
+    ) => Promise<acp.RequestPermissionOutcome> | acp.RequestPermissionOutcome;
 };
 
 export type SpawnIrisClientOptions = IrisClientOptions & {
@@ -41,6 +50,12 @@ export class IrisClient {
             .client({ name: options.clientName ?? "iris-client" })
             .onNotification(acp.methods.client.session.update, (ctx) => {
                 options.onSessionUpdate?.(ctx.params);
+            })
+            .onRequest(acp.methods.client.session.requestPermission, async (ctx) => {
+                const outcome = options.onRequestPermission
+                    ? await options.onRequestPermission(ctx.params)
+                    : { outcome: "cancelled" as const };
+                return { outcome };
             });
         const connection =
             transport instanceof acp.AgentApp
