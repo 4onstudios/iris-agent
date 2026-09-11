@@ -104,13 +104,18 @@ Run lifecycle states and event payloads are returned by the run endpoints. Store
 the returned `runId` from a chat response if the client needs polling,
 progress-event retrieval, or cancellation.
 
-Persisted `tool_call` and `tool_result` events carry the complete, redacted
-action details needed to render a replayable tool timeline: `name` (and the
-deprecated compatibility alias `toolName`), `args`, `toolCallId`, and `status`;
-completed actions also include `result`. Legacy stored action events are
-normalized when read so both labels remain available. This lets clients show,
-for example, the path and line range read or the search query, matched files,
-and result counts without relying on the live stream.
+Persisted `tool_call` and `tool_result` events carry the redacted action
+details needed to render a replayable tool timeline: `name` (and the deprecated
+compatibility alias `toolName`), `args`, `toolCallId`, and `status`. Completed
+actions also include `result` when its JSON representation is at most 16 KiB.
+Larger or non-JSON-representable results are replaced with a bounded summary:
+`{ truncated: true, reason?: string, originalByteLength?: number, preview?: string }`.
+For oversized object results, scalar metadata such as `success`, `status`,
+`error`, `exitCode`, paths, and search counts may also be retained with long
+strings shortened. Legacy stored action events are normalized when read so both
+tool-name labels remain available. This lets clients show, for example, the
+path and line range read or the search query, matched files, and result counts
+without relying on the live stream.
 
 ### CLI Mode
 

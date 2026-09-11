@@ -304,6 +304,15 @@ type ExecutedToolResult = {
   lifecycleStepIndex?: number;
 };
 
+type PersistedToolAction = {
+  eventType: "tool_call" | "tool_result";
+  name: string;
+  args: Record<string, unknown>;
+  result?: unknown;
+  toolCallId?: string;
+  status: ToolExecutionStatus;
+};
+
 type StreamStep = {
   content?: Array<{
     type?: string;
@@ -338,12 +347,25 @@ const extractProcessedToolResults = (
   steps: StreamStep[],
 ): ExecutedToolResult[] => {
   const argsByCallId = new Map<string, Record<string, unknown>>();
+  const anonymousCallArgs: Array<{
+    toolName: string;
+    args: Record<string, unknown>;
+    consumed: boolean;
+  }> = [];
   const results: ExecutedToolResult[] = [];
 
   for (const step of steps) {
     for (const item of step.content || []) {
-      if (item.type === "tool-call" && item.toolCallId) {
-        argsByCallId.set(item.toolCallId, item.args || item.input || {});
+      if (item.type !== "tool-call" || !item.toolName) continue;
+      const args = item.args || item.input || {};
+      if (item.toolCallId) {
+        argsByCallId.set(item.toolCallId, args);
+      } else {
+        anonymousCallArgs.push({
+          toolName: item.toolName,
+          args,
+          consumed: false,
+        });
       }
     }
 
@@ -353,10 +375,19 @@ const extractProcessedToolResults = (
       const result = unwrapProcessedToolResult(
         item.result ?? item.output ?? item.content ?? item.data,
       );
+      const anonymousArgs = !item.toolCallId
+        ? anonymousCallArgs.find(
+          (call) => !call.consumed && call.toolName === item.toolName,
+        )
+        : undefined;
+      if (anonymousArgs) {
+        anonymousArgs.consumed = true;
+      }
       results.push({
         name: item.toolName,
         args:
           (item.toolCallId ? argsByCallId.get(item.toolCallId) : undefined) ||
+          anonymousArgs?.args ||
           item.args ||
           {},
         result: redactToolResult(result).result,
@@ -366,6 +397,128 @@ const extractProcessedToolResults = (
   }
 
   return results;
+};
+
+const buildOrderedPersistedToolActions = (
+  steps: Array<{ content?: AgentStepContentItem[] }> | undefined,
+  pendingToolCalls: Array<{
+    name: string;
+    args: Record<string, unknown>;
+    toolCallId?: string;
+    status: ToolExecutionStatus;
+  }>,
+  executedToolResults: Array<{
+    name: string;
+    args: Record<string, unknown>;
+    result: unknown;
+    toolCallId?: string;
+    status: ToolExecutionStatus;
+  }>,
+  sanitizeArgs: (
+    toolName: string,
+    args: Record<string, unknown> | undefined,
+  ) => Record<string, unknown>,
+): PersistedToolAction[] => {
+  const pendingEntries = pendingToolCalls.map((action) => ({
+    action,
+    consumed: false,
+  }));
+  const executedEntries = executedToolResults.map((action) => ({
+    action,
+    consumed: false,
+  }));
+  const actions: PersistedToolAction[] = [];
+
+  const takeById = <T extends { action: { toolCallId?: string } }>(
+    entries: Array<T & { consumed: boolean }>,
+    toolCallId: string | undefined,
+  ): (T & { consumed: boolean }) | undefined => {
+    if (!toolCallId) return undefined;
+    const entry = entries.find(
+      (candidate) =>
+        !candidate.consumed && candidate.action.toolCallId === toolCallId,
+    );
+    if (entry) entry.consumed = true;
+    return entry;
+  };
+
+  const takeBySignature = <
+    T extends { action: { name: string; args: Record<string, unknown> } },
+  >(
+    entries: Array<T & { consumed: boolean }>,
+    toolName: string,
+    args: Record<string, unknown>,
+  ): (T & { consumed: boolean }) | undefined => {
+    const signature = getToolCallSignature(toolName, args);
+    const entry = entries.find(
+      (candidate) =>
+        !candidate.consumed &&
+        getToolCallSignature(
+          candidate.action.name,
+          candidate.action.args || {},
+        ) === signature,
+    );
+    if (entry) entry.consumed = true;
+    return entry;
+  };
+
+  const takeByName = <
+    T extends { action: { name: string } },
+  >(
+    entries: Array<T & { consumed: boolean }>,
+    toolName: string,
+  ): (T & { consumed: boolean }) | undefined => {
+    const entry = entries.find(
+      (candidate) => !candidate.consumed && candidate.action.name === toolName,
+    );
+    if (entry) entry.consumed = true;
+    return entry;
+  };
+
+  for (const step of steps || []) {
+    for (const item of step.content || []) {
+      if (!item.toolName) continue;
+
+      if (item.type === "tool-call") {
+        const args = sanitizeArgs(item.toolName, item.input || item.args);
+        const entry =
+          takeById(pendingEntries, item.toolCallId) ||
+          takeBySignature(pendingEntries, item.toolName, args);
+        if (!entry) continue;
+        actions.push({
+          eventType: "tool_call",
+          ...entry.action,
+        });
+        continue;
+      }
+
+      if (item.type === "tool-result") {
+        const args = sanitizeArgs(item.toolName, item.args || item.input);
+        const entry =
+          takeById(executedEntries, item.toolCallId) ||
+          takeBySignature(executedEntries, item.toolName, args) ||
+          takeByName(executedEntries, item.toolName);
+        if (!entry) continue;
+        actions.push({
+          eventType: "tool_result",
+          ...entry.action,
+        });
+      }
+    }
+  }
+
+  for (const entry of pendingEntries) {
+    if (!entry.consumed) {
+      actions.push({ eventType: "tool_call", ...entry.action });
+    }
+  }
+  for (const entry of executedEntries) {
+    if (!entry.consumed) {
+      actions.push({ eventType: "tool_result", ...entry.action });
+    }
+  }
+
+  return actions;
 };
 
 const reconcileToolLifecycleSnapshots = (
@@ -1705,15 +1858,31 @@ const hasSuccessfulEditExecution = (
 
 const MAX_PERSISTED_TOOL_RESULT_BYTES = 16 * 1024;
 const PERSISTED_TOOL_RESULT_PREVIEW_CHARS = 4 * 1024;
+const PERSISTED_TOOL_RESULT_SUMMARY_FIELD_CHARS = 1024;
+
+const truncatePersistedSummaryString = (value: string): string => {
+  if (value.length <= PERSISTED_TOOL_RESULT_SUMMARY_FIELD_CHARS) {
+    return value;
+  }
+
+  return value.slice(0, PERSISTED_TOOL_RESULT_SUMMARY_FIELD_CHARS);
+};
 
 const summarizeToolResultForPersistence = (result: unknown): unknown => {
-  let serialized: string;
+  let serialized: string | undefined;
   try {
     serialized = JSON.stringify(result);
   } catch {
     return {
       truncated: true,
       reason: "Tool result could not be serialized for persistence",
+    };
+  }
+
+  if (serialized === undefined) {
+    return {
+      truncated: true,
+      reason: "Tool result has no JSON representation for persistence",
     };
   }
 
@@ -1744,11 +1913,9 @@ const summarizeToolResultForPersistence = (result: unknown): unknown => {
     "totalMatches",
   ]) {
     const value = record[key];
-    if (
-      typeof value === "string" ||
-      typeof value === "number" ||
-      typeof value === "boolean"
-    ) {
+    if (typeof value === "string") {
+      summary[key] = truncatePersistedSummaryString(value);
+    } else if (typeof value === "number" || typeof value === "boolean") {
       summary[key] = value;
     }
   }
@@ -2983,6 +3150,42 @@ _You have discovered the following in earlier interactions. Use this to avoid re
               ? `id:${toolCallId}:${getToolCallSignature(toolName, args)}`
               : getToolCallSignature(toolName, args);
           const emittedToolCallKeys = new Set<string>();
+          const consumedAnonymousStreamCallIndexes = new Set<number>();
+          const resolveStreamToolResultArgs = (
+            toolName: string,
+            toolCallId: string | undefined,
+            chunkArgs: unknown,
+          ): Record<string, unknown> => {
+            if (
+              chunkArgs &&
+              typeof chunkArgs === "object" &&
+              !Array.isArray(chunkArgs)
+            ) {
+              return chunkArgs as Record<string, unknown>;
+            }
+
+            if (toolCallId) {
+              return (
+                streamedPendingToolCalls.find(
+                  (call) =>
+                    call.toolCallId === toolCallId && call.name === toolName,
+                )?.args || {}
+              );
+            }
+
+            const matchingIndex = streamedPendingToolCalls.findIndex(
+              (call, index) =>
+                !consumedAnonymousStreamCallIndexes.has(index) &&
+                !call.toolCallId &&
+                call.name === toolName,
+            );
+            if (matchingIndex === -1) {
+              return {};
+            }
+
+            consumedAnonymousStreamCallIndexes.add(matchingIndex);
+            return streamedPendingToolCalls[matchingIndex].args || {};
+          };
 
           while (true) {
             const streamReadOrCancellation = await waitForResultOrCancellation(
@@ -3169,14 +3372,11 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                 typeof chunk.payload?.toolCallId === "string"
                   ? (chunk.payload.toolCallId as string)
                   : undefined;
-              const chunkArgs = chunk.payload?.args;
-              const resultArgs =
-                chunkArgs && typeof chunkArgs === "object" && !Array.isArray(chunkArgs)
-                  ? (chunkArgs as Record<string, unknown>)
-                  : streamedPendingToolCalls.find(
-                    (call) =>
-                      call.toolCallId === toolCallId && call.name === toolName,
-                  )?.args || {};
+              const resultArgs = resolveStreamToolResultArgs(
+                toolName,
+                toolCallId,
+                chunk.payload?.args,
+              );
 
               console.log("[DIFF-TRACE] API raw tool result", {
                 toolName,
@@ -4133,8 +4333,13 @@ _You have discovered the following in earlier interactions. Use this to avoid re
           toolCallId: toolResult.toolCallId,
           status: resolveToolExecutionStatus(toolResult.result),
         }));
-      const replayToolCalls = [...normalizedToolCalls];
-      const replayExecutedToolResults = [...normalizedExecutedToolResults];
+      const replayToolActions = buildOrderedPersistedToolActions(
+        result.steps,
+        normalizedToolCalls,
+        normalizedExecutedToolResults,
+        (toolName, args) =>
+          sanitizeToolArgsForWorkspace(toolName, args, isWebWorkspace),
+      );
 
       const uniqueThoughtSteps = Array.from(
         new Set(
@@ -4528,8 +4733,15 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             ),
           );
 
-          replayToolCalls.push(...autoFixNormalizedToolCalls);
-          replayExecutedToolResults.push(...autoFixNormalizedExecutedResults);
+          replayToolActions.push(
+            ...buildOrderedPersistedToolActions(
+              autoFixResult.steps,
+              autoFixNormalizedToolCalls,
+              autoFixNormalizedExecutedResults,
+              (toolName, args) =>
+                sanitizeToolArgsForWorkspace(toolName, args, isWebWorkspace),
+            ),
+          );
           normalizedToolCalls.length = 0;
           normalizedToolCalls.push(...autoFixNormalizedToolCalls);
           normalizedExecutedToolResults.length = 0;
@@ -4579,27 +4791,18 @@ _You have discovered the following in earlier interactions. Use this to avoid re
         policyMode: gitSafetyMode,
       };
 
-      await Promise.all([
-        ...replayToolCalls.map((toolCall) =>
-          persistToolEvent("tool_call", {
-            name: toolCall.name,
-            toolName: toolCall.name,
-            args: redactToolResult(toolCall.args).result,
-            toolCallId: toolCall.toolCallId,
-            status: toolCall.status,
-          }),
-        ),
-        ...replayExecutedToolResults.map((toolResult) =>
-          persistToolEvent("tool_result", {
-            name: toolResult.name,
-            toolName: toolResult.name,
-            args: redactToolResult(toolResult.args).result,
-            result: toolResult.result,
-            toolCallId: toolResult.toolCallId,
-            status: toolResult.status,
-          }),
-        ),
-      ]);
+      for (const action of replayToolActions) {
+        await persistToolEvent(action.eventType, {
+          name: action.name,
+          toolName: action.name,
+          args: redactToolResult(action.args).result,
+          ...(action.eventType === "tool_result"
+            ? { result: action.result }
+            : {}),
+          toolCallId: action.toolCallId,
+          status: action.status,
+        });
+      }
 
       logTokenUsageSource({
         mode: "non_stream",
