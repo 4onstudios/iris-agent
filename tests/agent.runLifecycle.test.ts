@@ -121,6 +121,29 @@ const stopServer = async (server: http.Server): Promise<void> => {
   });
 };
 
+const createMockFullStream = (chunks: Array<Record<string, unknown>>) => {
+  let index = 0;
+
+  return {
+    getReader() {
+      return {
+        async read() {
+          if (index >= chunks.length) {
+            return { value: undefined, done: true };
+          }
+
+          const value = chunks[index];
+          index += 1;
+          return { value, done: false };
+        },
+        async cancel() {
+          return undefined;
+        },
+      };
+    },
+  };
+};
+
 describe("agent run lifecycle APIs", () => {
   beforeEach(() => {
     mockGenerate.mockReset();
@@ -272,6 +295,7 @@ describe("agent run lifecycle APIs", () => {
             eventType: "tool_call",
             payload: {
               name: "grepSearch",
+              toolName: "grepSearch",
               args: {
                 searchText: "answer",
                 filePattern: "src/**/*.ts",
@@ -284,6 +308,7 @@ describe("agent run lifecycle APIs", () => {
             eventType: "tool_result",
             payload: {
               name: "readFile",
+              toolName: "readFile",
               args: {
                 filePath: "src/index.ts",
                 startLine: 1,
@@ -297,6 +322,221 @@ describe("agent run lifecycle APIs", () => {
               toolCallId: "read-1",
               status: "completed",
             },
+          }),
+        ]),
+      );
+    } finally {
+      await stopServer(server);
+    }
+  });
+
+  it("normalizes legacy persisted tool action names for replay clients", async () => {
+    const runId = `run-legacy-tool-action-${Date.now()}`;
+    await safePersistRunLifecycleEvent({
+      runId,
+      lifecycleState: "succeeded",
+      stopReason: "completed",
+      eventType: "tool_result",
+      payload: {
+        toolName: "readFile",
+        args: { filePath: "src/legacy.ts" },
+        result: { success: true, content: "legacy contents" },
+        status: "completed",
+      },
+    });
+
+    const { server, baseUrl } = await startServer();
+
+    try {
+      const eventsResponse = await requestJson(
+        baseUrl,
+        "GET",
+        `/api/agent/runs/${runId}/events`,
+      );
+      expect(eventsResponse.status).toBe(200);
+      expect(eventsResponse.body.events).toEqual([
+        expect.objectContaining({
+          eventType: "tool_result",
+          payload: {
+            name: "readFile",
+            toolName: "readFile",
+            args: { filePath: "src/legacy.ts" },
+            result: { success: true, content: "legacy contents" },
+            status: "completed",
+          },
+        }),
+      ]);
+
+      const snapshotResponse = await requestJson(
+        baseUrl,
+        "GET",
+        `/api/agent/runs/${runId}`,
+      );
+      expect(snapshotResponse.status).toBe(200);
+      expect(snapshotResponse.body.latestCheckpoint.payload).toMatchObject({
+        name: "readFile",
+        toolName: "readFile",
+      });
+    } finally {
+      await stopServer(server);
+    }
+  });
+
+  it("persists bounded streaming results with the matching call arguments", async () => {
+    const largeContent = "x".repeat(20 * 1024);
+    const runId = `run-stream-result-${Date.now()}`;
+    mockCreateCodingAgent.mockResolvedValueOnce({
+      generate: mockGenerate,
+      stream: jest.fn(async () => ({
+        fullStream: createMockFullStream([
+          {
+            type: "tool-call",
+            payload: {
+              toolName: "readFile",
+              toolCallId: "stream-read-1",
+              args: {
+                filePath: "src/large.ts",
+                startLine: 10,
+                endLine: 20,
+              },
+            },
+          },
+          {
+            type: "tool-result",
+            payload: {
+              toolName: "readFile",
+              toolCallId: "stream-read-1",
+              result: { success: true, content: largeContent },
+            },
+          },
+        ]),
+        text: Promise.resolve("Read complete."),
+        toolCalls: Promise.resolve([]),
+        steps: Promise.resolve([]),
+      })),
+    });
+
+    const { server, baseUrl } = await startServer();
+
+    try {
+      const chatResponse = await requestJson(baseUrl, "POST", "/api/agent/chat", {
+        runId,
+        message: "Read the large source file",
+        modelId: "gpt-4o",
+        workspaceRoot: `/tmp/stream-persistence-${runId}`,
+        isTauri: false,
+        stream: true,
+      });
+      expect(chatResponse.status).toBe(200);
+
+      const eventsResponse = await requestJson(
+        baseUrl,
+        "GET",
+        `/api/agent/runs/${runId}/events`,
+      );
+      expect(eventsResponse.status).toBe(200);
+      expect(eventsResponse.body.events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            eventType: "tool_result",
+            payload: expect.objectContaining({
+              name: "readFile",
+              args: {
+                filePath: "src/large.ts",
+                startLine: 10,
+                endLine: 20,
+              },
+              result: expect.objectContaining({
+                truncated: true,
+                originalByteLength: expect.any(Number),
+              }),
+            }),
+          }),
+        ]),
+      );
+    } finally {
+      await stopServer(server);
+    }
+  });
+
+  it("preserves actions from every reflection attempt in the replay timeline", async () => {
+    const runId = `run-reflection-actions-${Date.now()}`;
+    mockGenerate
+      .mockResolvedValueOnce({
+        text: "Initial validation failed.",
+        steps: [
+          {
+            content: [
+              {
+                type: "tool-result",
+                toolName: "writeFile",
+                result: {
+                  success: true,
+                  validation: {
+                    lint: { enabled: true, success: false, error: "lint failed" },
+                  },
+                },
+              },
+            ],
+            toolCalls: [],
+          },
+        ],
+        toolCalls: [],
+      })
+      .mockResolvedValueOnce({
+        text: "Repaired.",
+        steps: [
+          {
+            content: [
+              {
+                type: "tool-call",
+                toolName: "editFile",
+                toolCallId: "repair-edit-1",
+                args: { filePath: "src/fixed.ts" },
+              },
+              {
+                type: "tool-result",
+                toolName: "editFile",
+                toolCallId: "repair-edit-1",
+                result: { success: true },
+              },
+            ],
+            toolCalls: [],
+          },
+        ],
+        toolCalls: [],
+      });
+
+    const { server, baseUrl } = await startServer();
+
+    try {
+      const chatResponse = await requestJson(baseUrl, "POST", "/api/agent/chat", {
+        runId,
+        message: "Repair the validation error",
+        modelId: "gpt-4o",
+        workspaceRoot: `/tmp/reflection-persistence-${runId}`,
+        isTauri: false,
+      });
+      expect(chatResponse.status).toBe(200);
+
+      const eventsResponse = await requestJson(
+        baseUrl,
+        "GET",
+        `/api/agent/runs/${runId}/events`,
+      );
+      const toolResults = eventsResponse.body.events.filter(
+        (event: { eventType: string }) => event.eventType === "tool_result",
+      );
+      expect(toolResults).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            payload: expect.objectContaining({ name: "writeFile" }),
+          }),
+          expect.objectContaining({
+            payload: expect.objectContaining({
+              name: "editFile",
+              toolCallId: "repair-edit-1",
+            }),
           }),
         ]),
       );

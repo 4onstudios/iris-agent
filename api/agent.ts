@@ -1703,6 +1703,86 @@ const hasSuccessfulEditExecution = (
       EDIT_TOOL_NAMES.has(result.name) && result.status === "completed",
   );
 
+const MAX_PERSISTED_TOOL_RESULT_BYTES = 16 * 1024;
+const PERSISTED_TOOL_RESULT_PREVIEW_CHARS = 4 * 1024;
+
+const summarizeToolResultForPersistence = (result: unknown): unknown => {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(result);
+  } catch {
+    return {
+      truncated: true,
+      reason: "Tool result could not be serialized for persistence",
+    };
+  }
+
+  const originalByteLength = Buffer.byteLength(serialized, "utf8");
+  if (originalByteLength <= MAX_PERSISTED_TOOL_RESULT_BYTES) {
+    return result;
+  }
+
+  const summary: Record<string, unknown> = {
+    truncated: true,
+    originalByteLength,
+    preview: serialized.slice(0, PERSISTED_TOOL_RESULT_PREVIEW_CHARS),
+  };
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    return summary;
+  }
+
+  const record = result as Record<string, unknown>;
+  for (const key of [
+    "success",
+    "status",
+    "error",
+    "exitCode",
+    "filePath",
+    "path",
+    "totalFiles",
+    "filesWithMatches",
+    "totalMatches",
+  ]) {
+    const value = record[key];
+    if (
+      typeof value === "string" ||
+      typeof value === "number" ||
+      typeof value === "boolean"
+    ) {
+      summary[key] = value;
+    }
+  }
+
+  return summary;
+};
+
+const normalizeToolActionPayload = (
+  eventType: string,
+  payload: Record<string, unknown> | null,
+): Record<string, unknown> | null => {
+  if (
+    !payload ||
+    (eventType !== "tool_call" && eventType !== "tool_result")
+  ) {
+    return payload;
+  }
+
+  const name =
+    typeof payload.name === "string"
+      ? payload.name
+      : typeof payload.toolName === "string"
+        ? payload.toolName
+        : undefined;
+  if (!name) return payload;
+
+  return {
+    ...payload,
+    name,
+    toolName:
+      typeof payload.toolName === "string" ? payload.toolName : name,
+  };
+};
+
 /**
  * Format directory tree for display
  */
@@ -1860,13 +1940,18 @@ router.post(
       const persistToolEvent = async (
         eventType: "tool_call" | "tool_result",
         payload: Record<string, unknown>,
+        eventLifecycleState = lifecycleState,
       ): Promise<void> => {
+        const result =
+          "result" in payload
+            ? summarizeToolResultForPersistence(payload.result)
+            : undefined;
         await safePersistRunLifecycleEvent({
           runId: resolvedRunId,
-          lifecycleState,
+          lifecycleState: eventLifecycleState,
           stopReason,
           eventType,
-          payload,
+          payload: result === undefined ? payload : { ...payload, result },
           objective: typeof message === "string" ? message.slice(0, 2000) : "",
           workspacePath: workspaceRoot || process.cwd(),
           modelId,
@@ -3020,18 +3105,17 @@ _You have discovered the following in earlier interactions. Use this to avoid re
               };
 
               streamedPendingToolCalls.push(pendingCall);
-              void safePersistRunLifecycleEvent({
-                runId: resolvedRunId,
-                lifecycleState: "waiting_tool",
-                stopReason: "none",
-                eventType: "tool_call",
-                payload: {
+              void persistToolEvent(
+                "tool_call",
+                {
                   name: toolName,
+                  toolName,
                   args: redactToolResult(pendingCall.args).result,
                   toolCallId: pendingCall.toolCallId,
                   status: "pending",
                 },
-              });
+                "waiting_tool",
+              );
 
               const normalized = normalizeToolLifecycle(
                 streamedPendingToolCalls,
@@ -3081,6 +3165,18 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                 chunk.payload?.content ??
                 chunk.payload?.data;
               const safeToolResult = redactToolResult(toolResult).result;
+              const toolCallId =
+                typeof chunk.payload?.toolCallId === "string"
+                  ? (chunk.payload.toolCallId as string)
+                  : undefined;
+              const chunkArgs = chunk.payload?.args;
+              const resultArgs =
+                chunkArgs && typeof chunkArgs === "object" && !Array.isArray(chunkArgs)
+                  ? (chunkArgs as Record<string, unknown>)
+                  : streamedPendingToolCalls.find(
+                    (call) =>
+                      call.toolCallId === toolCallId && call.name === toolName,
+                  )?.args || {};
 
               console.log("[DIFF-TRACE] API raw tool result", {
                 toolName,
@@ -3094,20 +3190,11 @@ _You have discovered the following in earlier interactions. Use this to avoid re
 
               streamedExecutedToolResults.push({
                 name: toolName,
-                args: (chunk.payload?.args as Record<string, unknown>) || {},
+                args: resultArgs,
                 result: safeToolResult,
-                toolCallId:
-                  typeof chunk.payload?.toolCallId === "string"
-                    ? (chunk.payload.toolCallId as string)
-                    : undefined,
+                toolCallId,
               });
 
-              const toolCallId =
-                typeof chunk.payload?.toolCallId === "string"
-                  ? (chunk.payload.toolCallId as string)
-                  : undefined;
-              const resultArgs =
-                (chunk.payload?.args as Record<string, unknown>) || {};
               const emittedInvocationKey = getEmittedInvocationKey(
                 toolName,
                 toolCallId,
@@ -3131,19 +3218,18 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                 status: resolveToolExecutionStatus(safeToolResult),
               });
 
-              void safePersistRunLifecycleEvent({
-                runId: resolvedRunId,
-                lifecycleState: "running",
-                stopReason: "none",
-                eventType: "tool_result",
-                payload: {
+              void persistToolEvent(
+                "tool_result",
+                {
                   name: toolName,
+                  toolName,
                   args: redactToolResult(resultArgs).result,
                   result: safeToolResult,
                   toolCallId,
                   status: resolveToolExecutionStatus(safeToolResult),
                 },
-              });
+                "running",
+              );
 
               continue;
             }
@@ -4047,6 +4133,8 @@ _You have discovered the following in earlier interactions. Use this to avoid re
           toolCallId: toolResult.toolCallId,
           status: resolveToolExecutionStatus(toolResult.result),
         }));
+      const replayToolCalls = [...normalizedToolCalls];
+      const replayExecutedToolResults = [...normalizedExecutedToolResults];
 
       const uniqueThoughtSteps = Array.from(
         new Set(
@@ -4440,6 +4528,8 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             ),
           );
 
+          replayToolCalls.push(...autoFixNormalizedToolCalls);
+          replayExecutedToolResults.push(...autoFixNormalizedExecutedResults);
           normalizedToolCalls.length = 0;
           normalizedToolCalls.push(...autoFixNormalizedToolCalls);
           normalizedExecutedToolResults.length = 0;
@@ -4490,17 +4580,19 @@ _You have discovered the following in earlier interactions. Use this to avoid re
       };
 
       await Promise.all([
-        ...normalizedToolCalls.map((toolCall) =>
+        ...replayToolCalls.map((toolCall) =>
           persistToolEvent("tool_call", {
             name: toolCall.name,
+            toolName: toolCall.name,
             args: redactToolResult(toolCall.args).result,
             toolCallId: toolCall.toolCallId,
             status: toolCall.status,
           }),
         ),
-        ...normalizedExecutedToolResults.map((toolResult) =>
+        ...replayExecutedToolResults.map((toolResult) =>
           persistToolEvent("tool_result", {
             name: toolResult.name,
+            toolName: toolResult.name,
             args: redactToolResult(toolResult.args).result,
             result: toolResult.result,
             toolCallId: toolResult.toolCallId,
@@ -4895,7 +4987,10 @@ router.get(
           lifecycleState: snapshot.latestCheckpoint.lifecycle_state,
           stopReason: snapshot.latestCheckpoint.stop_reason,
           eventType: snapshot.latestCheckpoint.event_type,
-          payload: parsePayload(snapshot.latestCheckpoint.payload_json),
+          payload: normalizeToolActionPayload(
+            snapshot.latestCheckpoint.event_type,
+            parsePayload(snapshot.latestCheckpoint.payload_json),
+          ),
           createdAt: snapshot.latestCheckpoint.created_at,
         }
         : null,
@@ -4940,7 +5035,7 @@ router.get(
         lifecycleState: event.lifecycle_state,
         stopReason: event.stop_reason,
         eventType: event.event_type,
-        payload,
+        payload: normalizeToolActionPayload(event.event_type, payload),
         createdAt: event.created_at,
       };
     });
