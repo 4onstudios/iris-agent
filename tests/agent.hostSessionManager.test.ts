@@ -89,6 +89,99 @@ describe("HostSessionManager", () => {
         expect(runtime.endSession).toHaveBeenCalledWith("session-1");
     });
 
+    it("cancels an in-flight turn before running session end hooks during disconnect", async () => {
+        const events: string[] = [];
+        let markRunStarted: () => void = () => undefined;
+        const runStarted = new Promise<void>((resolve) => {
+            markRunStarted = resolve;
+        });
+        let rejectTurn: (reason?: unknown) => void = () => undefined;
+        const runtime = createRuntime({
+            runTurn: jest.fn(async () => {
+                events.push("run-turn");
+                markRunStarted();
+                return await new Promise<AgentTurnResult>((_resolve, reject) => {
+                    rejectTurn = reject;
+                });
+            }),
+            cancelTurn: jest.fn(async (sessionId) => {
+                events.push(`cancel:${sessionId}`);
+                rejectTurn(new Error("turn cancelled"));
+            }),
+            endSession: jest.fn(async (sessionId) => {
+                events.push(`end-runtime:${sessionId}`);
+            }),
+        });
+        const onSessionEnd = jest.fn(({ sessionId }) => {
+            events.push(`end-hook:${sessionId}`);
+        });
+        const onPostTurn = jest.fn();
+        const manager = new HostSessionManager(() => runtime, {
+            workspacePath: "/workspace",
+        });
+        const session = await manager.createSession({
+            sessionId: "session-in-flight",
+            hooks: { onSessionEnd, onPostTurn },
+        });
+
+        const turn = session.sendAndWait({ prompt: "keep working" });
+        await runStarted;
+
+        await session.disconnect();
+
+        await expect(turn).rejects.toThrow("turn cancelled");
+        expect(runtime.cancelTurn).toHaveBeenCalledWith("session-in-flight");
+        expect(runtime.endSession).toHaveBeenCalledWith("session-in-flight");
+        expect(onSessionEnd).toHaveBeenCalledWith(
+            { sessionId: "session-in-flight" },
+            { sessionId: "session-in-flight" },
+        );
+        expect(onPostTurn).not.toHaveBeenCalled();
+        expect(events).toEqual([
+            "run-turn",
+            "cancel:session-in-flight",
+            "end-hook:session-in-flight",
+            "end-runtime:session-in-flight",
+        ]);
+    });
+
+    it("still runs session end hooks and runtime cleanup when disconnect cancellation fails", async () => {
+        const events: string[] = [];
+        const runtime = createRuntime({
+            cancelTurn: jest.fn(async (sessionId) => {
+                events.push(`cancel:${sessionId}`);
+                throw new Error("cancel failed");
+            }),
+            endSession: jest.fn(async (sessionId) => {
+                events.push(`end-runtime:${sessionId}`);
+            }),
+        });
+        const onSessionEnd = jest.fn(({ sessionId }) => {
+            events.push(`end-hook:${sessionId}`);
+        });
+        const manager = new HostSessionManager(() => runtime, {
+            workspacePath: "/workspace",
+        });
+        const session = await manager.createSession({
+            sessionId: "session-cancel-fails",
+            hooks: { onSessionEnd },
+        });
+
+        await expect(session.disconnect()).rejects.toThrow("cancel failed");
+
+        expect(runtime.cancelTurn).toHaveBeenCalledWith("session-cancel-fails");
+        expect(onSessionEnd).toHaveBeenCalledWith(
+            { sessionId: "session-cancel-fails" },
+            { sessionId: "session-cancel-fails" },
+        );
+        expect(runtime.endSession).toHaveBeenCalledWith("session-cancel-fails");
+        expect(events).toEqual([
+            "cancel:session-cancel-fails",
+            "end-hook:session-cancel-fails",
+            "end-runtime:session-cancel-fails",
+        ]);
+    });
+
     it("rejects denied permission requests before running the turn", async () => {
         const runtime = createRuntime();
         const manager = new HostSessionManager(() => runtime, {

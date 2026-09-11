@@ -566,12 +566,35 @@ export class HostSessionManager<TRuntime extends AgentRuntime> {
     }
 
     this.sessions.delete(sessionId);
+    const errors: unknown[] = [];
+
+    try {
+      if (managed.runtime.cancelTurn) {
+        await managed.runtime.cancelTurn(sessionId);
+      }
+    } catch (error) {
+      errors.push(error);
+    }
+
     try {
       await Promise.resolve(
         managed.config.hooks?.onSessionEnd?.({ sessionId }, { sessionId }),
       );
+    } catch (error) {
+      errors.push(error);
     } finally {
-      await managed.runtime.endSession(sessionId);
+      try {
+        await managed.runtime.endSession(sessionId);
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+
+    if (errors.length === 1) {
+      throw errors[0];
+    }
+    if (errors.length > 1) {
+      throw new AggregateError(errors, `Failed to disconnect host session '${sessionId}'`);
     }
   }
 
