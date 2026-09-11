@@ -431,14 +431,60 @@ export const createAcpAgentApp = (
             return { toolCallId: allocateGeneratedToolCallId(toolName) };
           };
 
+          const finalizePendingToolInvocations = async (
+            reason: "cancelled" | "incomplete",
+          ): Promise<void> => {
+            const message =
+              reason === "cancelled"
+                ? "Tool call was cancelled before reporting a result."
+                : "Tool call did not report a result before the turn ended.";
+
+            for (const invocations of pendingToolInvocations.values()) {
+              for (const invocation of invocations) {
+                await ctx.client.notify(acp.methods.client.session.update, {
+                  sessionId: ctx.params.sessionId,
+                  update: {
+                    sessionUpdate: "tool_call_update",
+                    toolCallId: invocation.protocolToolCallId,
+                    status: "failed",
+                    content: [
+                      {
+                        type: "content",
+                        content: {
+                          type: "text",
+                          text: message,
+                        },
+                      },
+                    ],
+                  },
+                });
+              }
+            }
+            pendingToolInvocations.clear();
+          };
+
           while (true) {
             if (activeTurn.abortController.signal.aborted) {
               await reader.cancel().catch(() => undefined);
+              await finalizePendingToolInvocations("cancelled");
               return { stopReason: "cancelled" as const };
             }
 
-            const { value, done } = await raceWithAbort(() => reader.read());
+            let value: AgentStreamChunk | undefined;
+            let done = false;
+            try {
+              ({ value, done } = await raceWithAbort(() => reader.read()));
+            } catch (error) {
+              if (activeTurn.abortController.signal.aborted) {
+                await reader.cancel().catch(() => undefined);
+                await finalizePendingToolInvocations("cancelled");
+                return { stopReason: "cancelled" as const };
+              }
+              throw error;
+            }
             if (activeTurn.abortController.signal.aborted) {
+              await reader.cancel().catch(() => undefined);
+              await finalizePendingToolInvocations("cancelled");
               return { stopReason: "cancelled" as const };
             }
             if (done) break;
@@ -549,28 +595,7 @@ export const createAcpAgentApp = (
             }
           }
 
-          for (const invocations of pendingToolInvocations.values()) {
-            for (const invocation of invocations) {
-              await ctx.client.notify(acp.methods.client.session.update, {
-                sessionId: ctx.params.sessionId,
-                update: {
-                  sessionUpdate: "tool_call_update",
-                  toolCallId: invocation.protocolToolCallId,
-                  status: "failed",
-                  content: [
-                    {
-                      type: "content",
-                      content: {
-                        type: "text",
-                        text: "Tool call did not report a result before the turn ended.",
-                      },
-                    },
-                  ],
-                },
-              });
-            }
-          }
-          pendingToolInvocations.clear();
+          await finalizePendingToolInvocations("incomplete");
 
           const finalText = await raceWithAbort(() => streamResult.text);
           if (activeTurn.abortController.signal.aborted) {

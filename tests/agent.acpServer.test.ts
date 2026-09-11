@@ -685,6 +685,104 @@ describe("ACP server", () => {
         });
     });
 
+    it("finalizes pending tool calls when a turn is cancelled mid-stream", async () => {
+        let releaseSecondRead!: () => void;
+        const secondRead = new Promise<{
+            done: boolean;
+            value?: { type?: string; payload?: Record<string, unknown> };
+        }>((resolve) => {
+            releaseSecondRead = () => resolve({ done: true });
+        });
+        let readCount = 0;
+        let readerCancelled = false;
+
+        const runtime: AcpRuntimeAgent = {
+            stream: jest.fn(async () => ({
+                fullStream: {
+                    getReader: () => ({
+                        read: async () => {
+                            if (readCount === 0) {
+                                readCount += 1;
+                                return {
+                                    done: false,
+                                    value: {
+                                        type: "tool-call",
+                                        payload: {
+                                            toolName: "runCommand",
+                                            toolCallId: "pending-call",
+                                            args: { command: "sleep 1" },
+                                        },
+                                    },
+                                };
+                            }
+                            return await secondRead;
+                        },
+                        cancel: async () => {
+                            readerCancelled = true;
+                            releaseSecondRead();
+                        },
+                    }),
+                },
+                text: Promise.resolve(""),
+            })),
+        };
+        const updates: acp.SessionNotification[] = [];
+        const client = acp
+            .client({ name: "iris-agent-test-client" })
+            .onNotification(acp.methods.client.session.update, (ctx) => {
+                updates.push(ctx.params);
+            });
+
+        await client.connectWith(createAcpAgentApp(runtime), async (ctx) => {
+            await ctx.request(acp.methods.agent.initialize, {
+                protocolVersion: acp.PROTOCOL_VERSION,
+                clientCapabilities: {},
+            });
+            const session = await ctx.request(acp.methods.agent.session.new, {
+                cwd: "/workspace",
+                mcpServers: [],
+            });
+            const prompt = ctx.request(acp.methods.agent.session.prompt, {
+                sessionId: session.sessionId,
+                prompt: [{ type: "text", text: "Start and cancel" }],
+            });
+            for (let i = 0; i < 50; i += 1) {
+                if (
+                    updates.some(
+                        (entry) => entry.update.sessionUpdate === "tool_call",
+                    )
+                ) {
+                    break;
+                }
+                await Promise.resolve();
+            }
+
+            await ctx.notify(acp.methods.agent.session.cancel, {
+                sessionId: session.sessionId,
+            });
+            await expect(prompt).resolves.toEqual({ stopReason: "cancelled" });
+        });
+
+        expect(readerCancelled).toBe(true);
+        expect(updates).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({
+                    update: expect.objectContaining({
+                        sessionUpdate: "tool_call",
+                        toolCallId: "pending-call",
+                    }),
+                }),
+                expect.objectContaining({
+                    update: expect.objectContaining({
+                        sessionUpdate: "tool_call_update",
+                        toolCallId: "pending-call",
+                        status: "failed",
+                    }),
+                }),
+            ]),
+        );
+    });
+
     it("allocates a unique protocol id when a runtime call id is reused for a different signature", async () => {
         const runtime: AcpRuntimeAgent = {
             stream: jest.fn(async () => ({

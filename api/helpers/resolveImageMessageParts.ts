@@ -152,28 +152,25 @@ export const resolveImageMessageParts = async (
         );
         continue;
       }
-    } else if (!allowOutOfWorkspace && !isPathWithin(resolvedWorkspace, absolutePath)) {
-      console.warn(
-        "Skipping out-of-workspace absolute image path:",
-        filePathValue,
-      );
-      continue;
     }
 
     try {
-      const stats = await fs.stat(absolutePath);
-      if (!stats.isFile()) {
-        continue;
-      }
+      let readablePath = absolutePath;
       if (!allowOutOfWorkspace) {
         const realAbsolutePath = await fs.realpath(absolutePath);
         if (!isPathWithin(realWorkspace, realAbsolutePath)) {
           console.warn(
-            "Skipping symlinked out-of-workspace image path:",
+            "Skipping out-of-workspace image path:",
             filePathValue,
           );
           continue;
         }
+        readablePath = realAbsolutePath;
+      }
+
+      const stats = await fs.stat(readablePath);
+      if (!stats.isFile()) {
+        continue;
       }
       if (stats.size > MAX_IMAGE_FILE_SIZE_BYTES) {
         console.warn(
@@ -183,7 +180,7 @@ export const resolveImageMessageParts = async (
         );
         continue;
       }
-      const bytes = await fs.readFile(absolutePath);
+      const bytes = await fs.readFile(readablePath);
       parts.push({
         type: "image",
         image: toDataUrlFromBuffer(bytes, mediaType),
