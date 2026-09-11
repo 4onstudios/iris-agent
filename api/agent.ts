@@ -2630,7 +2630,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
       const generateBackendOnlySynthesis = async (
         completedToolResults: ExecutedToolResult[],
         stopReason?: ToolCallBudget["stopReason"] | "empty_final_response",
-      ): Promise<AgentGenerateResult> => {
+      ): Promise<AgentGenerateResult | CancelledDuringWait> => {
         const completedResults =
           completedToolResults.length > 0
             ? serializeToolResultsForContinuation(
@@ -2660,21 +2660,25 @@ _You have discovered the following in earlier interactions. Use this to avoid re
         };
 
         if (activeHostSession) {
-          return generateWithSessionRetry(
-            activeHostSession,
+          return await waitForResultOrCancellation(
+            generateWithSessionRetry(
+              activeHostSession,
+              synthesisPrompt,
+              synthesisOptions,
+              turnAbortController.signal,
+              modelProfile.generateRetryAttempts,
+            ),
+          );
+        }
+
+        return await waitForResultOrCancellation(
+          generateWithRetry(
+            agent,
             synthesisPrompt,
             synthesisOptions,
             turnAbortController.signal,
             modelProfile.generateRetryAttempts,
-          );
-        }
-
-        return generateWithRetry(
-          agent,
-          synthesisPrompt,
-          synthesisOptions,
-          turnAbortController.signal,
-          modelProfile.generateRetryAttempts,
+          ),
         );
       };
 
@@ -3532,10 +3536,42 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                 streamToolCallsUsed >= maxToolCalls
                 ? (toolCallBudget.stopReason ?? "limit")
                 : "empty_final_response";
-            const synthesisResult = await generateBackendOnlySynthesis(
-              normalizedStreamExecutedResults,
-              synthesisStopReason,
-            );
+            const synthesisResultOrCancellation =
+              await generateBackendOnlySynthesis(
+                normalizedStreamExecutedResults,
+                synthesisStopReason,
+              );
+            if (isCancelledWaitResult(synthesisResultOrCancellation)) {
+              await transitionToCancelled("during_stream_backend_synthesis");
+              writeEvent("lifecycle", {
+                runId: resolvedRunId,
+                lifecycleState,
+                stopReason,
+              });
+              writeEvent("done", {
+                success: false,
+                runId: resolvedRunId,
+                lifecycleState,
+                stopReason,
+                cancelled: true,
+                response: "Run cancelled",
+                toolCalls: [],
+                executedToolResults: [],
+                suspendedTools: streamedSuspendedTools,
+                thoughtSteps:
+                  thoughtBuffer.length > 0 ? [thoughtBuffer.join("")] : [],
+                model: modelId,
+                autoFixAttempted: false,
+                autoFixFailureCount: 0,
+                maxStepsReached: false,
+                stepsUsed: 0,
+                maxSteps,
+              });
+              stopKeepAlive();
+              res.end();
+              return;
+            }
+            const synthesisResult = synthesisResultOrCancellation;
             const synthesizedText =
               typeof synthesisResult.text === "string" &&
                 synthesisResult.text.trim().length > 0
@@ -4164,29 +4200,44 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             abortSignal: turnAbortController.signal,
           };
 
-          let autoFixResult: AgentGenerateResult;
+          let autoFixResultOrCancellation:
+            | AgentGenerateResult
+            | CancelledDuringWait;
           const admittedBeforeReflection = toolCallBudget.admitted;
           try {
-            autoFixResult = activeHostSession
-              ? await generateWithSessionRetry(
-                activeHostSession,
-                autoFixPrompt,
-                autoFixOptions,
-                turnAbortController.signal,
-                modelProfile.reflectionRetryAttempts,
-              )
-              : await generateWithRetry(
-                agent,
-                autoFixPrompt,
-                autoFixOptions,
-                turnAbortController.signal,
-                modelProfile.reflectionRetryAttempts,
-              );
+            autoFixResultOrCancellation = await waitForResultOrCancellation(
+              activeHostSession
+                ? generateWithSessionRetry(
+                  activeHostSession,
+                  autoFixPrompt,
+                  autoFixOptions,
+                  turnAbortController.signal,
+                  modelProfile.reflectionRetryAttempts,
+                )
+                : generateWithRetry(
+                  agent,
+                  autoFixPrompt,
+                  autoFixOptions,
+                  turnAbortController.signal,
+                  modelProfile.reflectionRetryAttempts,
+                ),
+            );
           } finally {
             agent.clearProcessedWorkspaceResults?.(
               workspaceMutationGenerationId,
             );
           }
+          if (isCancelledWaitResult(autoFixResultOrCancellation)) {
+            await transitionToCancelled("during_reflection_model_request");
+            return res.status(409).json({
+              success: false,
+              runId: resolvedRunId,
+              lifecycleState,
+              stopReason,
+              error: "Run was cancelled",
+            });
+          }
+          const autoFixResult = autoFixResultOrCancellation;
           if (await isCancelled()) {
             await transitionToCancelled("after_reflection_response");
             return res.status(409).json({
@@ -4581,10 +4632,21 @@ _You have discovered the following in earlier interactions. Use this to avoid re
         const synthesisStopReason = budgetLimitReached
           ? (toolCallBudget.stopReason ?? "limit")
           : "empty_final_response";
-        const synthesisResult = await generateBackendOnlySynthesis(
+        const synthesisResultOrCancellation = await generateBackendOnlySynthesis(
           normalizedExecutedToolResults,
           synthesisStopReason,
         );
+        if (isCancelledWaitResult(synthesisResultOrCancellation)) {
+          await transitionToCancelled("during_backend_synthesis");
+          return res.status(409).json({
+            success: false,
+            runId: resolvedRunId,
+            lifecycleState,
+            stopReason,
+            error: "Run was cancelled",
+          });
+        }
+        const synthesisResult = synthesisResultOrCancellation;
         const synthesizedText =
           typeof synthesisResult.text === "string" &&
             synthesisResult.text.trim().length > 0

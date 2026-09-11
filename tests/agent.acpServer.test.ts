@@ -71,7 +71,7 @@ describe("ACP server", () => {
             expect(response.stopReason).toBe("end_turn");
             expect(runtime.stream).toHaveBeenCalledWith("Read the README", {
                 workspaceRoot: "/workspace",
-                signal: expect.any(AbortSignal),
+                abortSignal: expect.any(AbortSignal),
             });
             expect(updates.map((entry) => entry.update.sessionUpdate)).toEqual([
                 "agent_thought_chunk",
@@ -373,7 +373,7 @@ describe("ACP server", () => {
         });
         const runtime: AcpRuntimeAgent = {
             generate: jest.fn(async (_input, options) => {
-                expect(options?.signal).toBeInstanceOf(AbortSignal);
+                expect(options?.abortSignal).toBeInstanceOf(AbortSignal);
                 return generateResult;
             }),
         };
@@ -411,7 +411,7 @@ describe("ACP server", () => {
     it("cancels a fallback turn even when generation never resolves", async () => {
         const runtime: AcpRuntimeAgent = {
             generate: jest.fn(async (_input, options) => {
-                expect(options?.signal).toBeInstanceOf(AbortSignal);
+                expect(options?.abortSignal).toBeInstanceOf(AbortSignal);
                 return new Promise<{ text: string }>(() => undefined);
             }),
         };
@@ -472,7 +472,7 @@ describe("ACP server", () => {
         let receivedSignal!: AbortSignal;
         const runtime: AcpRuntimeAgent = {
             stream: jest.fn(async (_input, options) => {
-                receivedSignal = options.signal as AbortSignal;
+                receivedSignal = options.abortSignal as AbortSignal;
                 return streamResult;
             }),
         };

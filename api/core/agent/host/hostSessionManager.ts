@@ -269,6 +269,9 @@ const createPreToolUseHook = (
   return async ({ toolName, toolCallId, toolArgs }) => {
     const keys = getResolutionKeys(toolName, toolCallId, toolArgs);
     const primaryKey = keys[0] as string;
+    const genericResolutionKey =
+      toolCallId ? `${toolCallId}:${toolName}:generic` : undefined;
+    const runtimeProvidedArgumentDetails = hasArgumentDetails(toolArgs);
 
     const declaredKeyToConsume = keys.find(
       (key) => (declaredRemainingByKey.get(key) || 0) > 0,
@@ -285,6 +288,13 @@ const createPreToolUseHook = (
     }
 
     const keyToReconcile = keys.find((key) => {
+      if (
+        runtimeProvidedArgumentDetails &&
+        genericResolutionKey &&
+        key === genericResolutionKey
+      ) {
+        return false;
+      }
       const declaredInvocations = declaredInvocationsByKey.get(key) || 0;
       const reconciledInvocations =
         reconciledRuntimeInvocationsByKey.get(key) || 0;

@@ -1,5 +1,6 @@
 import express from "express";
 import http from "http";
+import { randomUUID } from "crypto";
 
 const mockCreateCodingAgent = jest.fn();
 const mockAgentStream = jest.fn();
@@ -148,7 +149,13 @@ const startServer = async (): Promise<RunningServer> => {
 };
 
 const stopServer = async (server: http.Server): Promise<void> => {
+  const closeAllConnections = (
+    server as http.Server & { closeAllConnections?: () => void }
+  ).closeAllConnections;
   await new Promise<void>((resolve, reject) => {
+    if (typeof closeAllConnections === "function") {
+      closeAllConnections.call(server);
+    }
     server.close((err) => {
       if (err) {
         reject(err);
@@ -289,7 +296,7 @@ describe("agent chat streaming", () => {
     const { server, baseUrl } = await startServer();
 
     try {
-      const runId = "stream-cancel-after-chunks";
+      const runId = `stream-cancel-after-chunks-${randomUUID()}`;
       const streamResponsePromise = postStreaming(baseUrl, "/api/agent/chat", {
         runId,
         message: "hello",
@@ -334,17 +341,22 @@ describe("agent chat streaming", () => {
   }, 30000);
 
   it("settles an SSE stream when cancellation is requested while chunk reads are stalled", async () => {
+    let markReadStarted: (() => void) | undefined;
+    const readStarted = new Promise<void>((resolve) => {
+      markReadStarted = resolve;
+    });
     let releaseRead: (() => void) | undefined;
     const cancelRead = jest.fn(async () => {
       releaseRead?.();
     });
     const stalledReader = {
-      read: jest.fn(
-        async () =>
-          await new Promise<{ value: undefined; done: true }>((resolve) => {
-            releaseRead = () => resolve({ value: undefined, done: true });
-          }),
-      ),
+      read: jest.fn(async () => {
+        markReadStarted?.();
+        markReadStarted = undefined;
+        return await new Promise<{ value: undefined; done: true }>((resolve) => {
+          releaseRead = () => resolve({ value: undefined, done: true });
+        });
+      }),
       cancel: cancelRead,
     };
 
@@ -361,7 +373,7 @@ describe("agent chat streaming", () => {
     const { server, baseUrl } = await startServer();
 
     try {
-      const runId = "stream-cancel-stalled-reader";
+      const runId = `stream-cancel-stalled-reader-${randomUUID()}`;
       const streamResponsePromise = postStreaming(baseUrl, "/api/agent/chat", {
         runId,
         message: "hello",
@@ -371,14 +383,19 @@ describe("agent chat streaming", () => {
         stream: true,
       });
 
-      for (let attempt = 0; attempt < 20; attempt += 1) {
-        if (stalledReader.read.mock.calls.length > 0) break;
-        await new Promise((resolve) => setTimeout(resolve, 25));
-      }
+      await Promise.race([
+        readStarted,
+        new Promise<void>((_, reject) =>
+          setTimeout(
+            () => reject(new Error("The stream did not begin reading within the expected time")),
+            5000,
+          ),
+        ),
+      ]);
       expect(stalledReader.read).toHaveBeenCalled();
 
       let cancelResponse: JsonResponse | undefined;
-      for (let attempt = 0; attempt < 20; attempt += 1) {
+      for (let attempt = 0; attempt < 80; attempt += 1) {
         cancelResponse = await postJson(
           baseUrl,
           `/api/agent/runs/${runId}/cancel`,
@@ -406,6 +423,124 @@ describe("agent chat streaming", () => {
       expect(streamResponse.body).toContain("\"stopReason\":\"cancelled\"");
       expect(streamResponse.body).toContain("\"cancelled\":true");
       expect(cancelRead).toHaveBeenCalled();
+    } finally {
+      await stopServer(server);
+    }
+  }, 30000);
+
+  it("settles an SSE stream when cancellation is requested during stalled backend synthesis", async () => {
+    let markSynthesisStarted: (() => void) | undefined;
+    const synthesisStarted = new Promise<void>((resolve) => {
+      markSynthesisStarted = resolve;
+    });
+    let receivedSynthesisAbortSignal: AbortSignal | undefined;
+    const generate = jest
+      .fn()
+      .mockImplementationOnce(
+        async (_prompt: unknown, options?: Record<string, unknown>) => {
+          const signal =
+            options?.abortSignal instanceof AbortSignal
+              ? options.abortSignal
+              : undefined;
+          receivedSynthesisAbortSignal = signal;
+          markSynthesisStarted?.();
+          markSynthesisStarted = undefined;
+          return await new Promise<never>(() => undefined);
+        },
+      );
+
+    mockCreateCodingAgent.mockResolvedValueOnce({
+      generate,
+      stream: jest.fn(async () => ({
+        fullStream: createMockFullStream([
+          {
+            type: "tool-call",
+            payload: {
+              toolName: "read_file",
+              toolCallId: "tool_1",
+              args: { filePath: "README.md" },
+            },
+          },
+          {
+            type: "tool-result",
+            payload: {
+              toolName: "read_file",
+              toolCallId: "tool_1",
+              result: "README contents",
+            },
+          },
+        ]),
+        text: Promise.resolve(""),
+        toolCalls: Promise.resolve([]),
+        steps: Promise.resolve([
+          {
+            toolCalls: [{ toolName: "read_file" }],
+          },
+        ]),
+      })),
+    });
+
+    const { server, baseUrl } = await startServer();
+
+    try {
+      const runId = `stream-cancel-stalled-synthesis-${randomUUID()}`;
+      const streamResponsePromise = postStreaming(baseUrl, "/api/agent/chat", {
+        runId,
+        message: "Inspect the README",
+        modelId: "gpt-4o-mini",
+        workspaceRoot: "/tmp/stream-cancel-stalled-synthesis",
+        isTauri: false,
+        stream: true,
+        maxSteps: 2,
+      });
+
+      await Promise.race([
+        synthesisStarted,
+        new Promise<void>((_, reject) =>
+          setTimeout(
+            () =>
+              reject(
+                new Error("Backend synthesis did not begin within the expected time"),
+              ),
+            5000,
+          ),
+        ),
+      ]);
+      expect(receivedSynthesisAbortSignal).toBeDefined();
+
+      let cancelResponse: JsonResponse | undefined;
+      for (let attempt = 0; attempt < 80; attempt += 1) {
+        cancelResponse = await postJson(
+          baseUrl,
+          `/api/agent/runs/${runId}/cancel`,
+          {},
+        );
+        if (cancelResponse.status !== 404) break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+
+      expect(cancelResponse?.status).toBe(200);
+      expect(cancelResponse?.body.success).toBe(true);
+
+      const streamResponse = await Promise.race([
+        streamResponsePromise,
+        new Promise<StreamingResponse>((_, reject) =>
+          setTimeout(
+            () =>
+              reject(
+                new Error("Streaming response did not settle during stalled synthesis cancellation"),
+              ),
+            1200,
+          ),
+        ),
+      ]);
+
+      expect(streamResponse.status).toBe(200);
+      expect(streamResponse.contentType).toContain("text/event-stream");
+      expect(streamResponse.body).toContain("event: done");
+      expect(streamResponse.body).toContain("\"stopReason\":\"cancelled\"");
+      expect(streamResponse.body).toContain("\"cancelled\":true");
+      expect(receivedSynthesisAbortSignal?.aborted).toBe(true);
     } finally {
       await stopServer(server);
     }

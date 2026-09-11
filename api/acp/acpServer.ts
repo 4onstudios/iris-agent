@@ -34,6 +34,7 @@ export type AcpRuntimeAgent = {
   chat?: (request: {
     messages: Array<{ role: "user"; content: string }>;
     signal?: AbortSignal;
+    abortSignal?: AbortSignal;
   }) => Promise<unknown>;
 };
 
@@ -209,7 +210,7 @@ export const createAcpAgentApp = (
                 promptText,
                 {
                   workspaceRoot: session.cwd,
-                  signal: turnSignal,
+                  abortSignal: turnSignal,
                 },
               ) as Promise<AgentStreamResult>,
           );
@@ -620,12 +621,13 @@ export const createAcpAgentApp = (
           runtimeAgent.generate
             ? runtimeAgent.generate(promptText, {
               workspaceRoot: session.cwd,
-              signal: turnSignal,
+              abortSignal: turnSignal,
             })
             : runtimeAgent.chat
               ? runtimeAgent.chat({
                 messages: [{ role: "user", content: promptText }],
                 signal: turnSignal,
+                abortSignal: turnSignal,
               })
               : Promise.resolve(undefined),
         );

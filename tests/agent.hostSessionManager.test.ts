@@ -194,7 +194,7 @@ describe("HostSessionManager", () => {
         expect(onPreToolUse).toHaveBeenCalledTimes(2);
     });
 
-    it("reconciles identified declared/runtime callbacks when one side omits arguments", async () => {
+    it("re-invokes pre-tool hooks when a declared identified call omits runtime arguments", async () => {
         const onPreToolUse = jest.fn(() => ({ permissionDecision: "allow" as const }));
         const runtime = createRuntime({
             runTurn: jest.fn(async (request) => {
@@ -218,6 +218,59 @@ describe("HostSessionManager", () => {
             metadata: {
                 declaredToolCalls: [
                     { toolName: "readFile", toolCallId: "tool-omitted-args" },
+                ],
+            },
+        });
+
+        expect(onPreToolUse).toHaveBeenCalledTimes(2);
+        expect(onPreToolUse).toHaveBeenNthCalledWith(
+            1,
+            expect.objectContaining({
+                toolName: "readFile",
+                toolCallId: "tool-omitted-args",
+                toolArgs: undefined,
+            }),
+            { sessionId: session.sessionId },
+        );
+        expect(onPreToolUse).toHaveBeenNthCalledWith(
+            2,
+            expect.objectContaining({
+                toolName: "readFile",
+                toolCallId: "tool-omitted-args",
+                toolArgs: { path: "README.md" },
+            }),
+            { sessionId: session.sessionId },
+        );
+    });
+
+    it("reconciles identified declared/runtime callbacks when the declaration includes matching arguments", async () => {
+        const onPreToolUse = jest.fn(() => ({ permissionDecision: "allow" as const }));
+        const runtime = createRuntime({
+            runTurn: jest.fn(async (request) => {
+                await request.onPreToolUse?.({
+                    toolName: "readFile",
+                    toolCallId: "tool-with-args",
+                    toolArgs: { path: "README.md" },
+                });
+                return { text: "done" };
+            }),
+        });
+        const manager = new HostSessionManager(() => runtime, {
+            workspacePath: "/workspace",
+        });
+        const session = await manager.createSession({
+            hooks: { onPreToolUse },
+        });
+
+        await session.sendAndWait({
+            prompt: "read file",
+            metadata: {
+                declaredToolCalls: [
+                    {
+                        toolName: "readFile",
+                        toolCallId: "tool-with-args",
+                        toolArgs: { path: "README.md" },
+                    },
                 ],
             },
         });
