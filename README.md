@@ -391,6 +391,138 @@ Do not expose provider API keys or raw ACP stdio streams to a browser renderer.
 Keep the client in the trusted desktop/backend process and forward only the
 events and commands your IDE UI needs.
 
+### Direct ACP JSON-RPC Client
+
+Use `IrisClient` unless your integration must own the ACP process and
+JSON-RPC transport. The following Node.js example starts the published CLI
+with `npx`, performs the ACP v1 handshake, streams updates, and closes the
+session and child process reliably:
+
+```ts
+import { spawn } from "node:child_process";
+import readline from "node:readline";
+
+type JsonRpcResponse = {
+  id?: number;
+  result?: unknown;
+  error?: { code: number; message: string };
+  method?: string;
+  params?: {
+    update?: {
+      sessionUpdate?: string;
+      content?: { text?: string };
+      title?: string;
+    };
+  };
+};
+
+async function connectToIrisAcp() {
+  const workspaceRoot = process.cwd();
+  const agentProcess = spawn(
+    "npx",
+    ["--yes", "@4onstudios/iris-agent", "--workspace", workspaceRoot, "--acp"],
+    {
+      cwd: workspaceRoot,
+      stdio: ["pipe", "pipe", "inherit"],
+      env: process.env,
+    },
+  );
+
+  let nextMessageId = 1;
+  const pendingRequests = new Map<
+    number,
+    { resolve: (result: unknown) => void; reject: (error: Error) => void }
+  >();
+
+  const rejectPendingRequests = (error: Error) => {
+    for (const { reject } of pendingRequests.values()) reject(error);
+    pendingRequests.clear();
+  };
+
+  agentProcess.once("error", rejectPendingRequests);
+  agentProcess.once("exit", (code, signal) => {
+    rejectPendingRequests(
+      new Error(`Iris ACP process exited (${signal ?? `code ${code ?? "unknown"}`})`),
+    );
+  });
+
+  const sendRequest = (method: string, params?: unknown): Promise<unknown> => {
+    const id = nextMessageId++;
+    agentProcess.stdin.write(
+      `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`,
+    );
+    return new Promise((resolve, reject) => {
+      pendingRequests.set(id, { resolve, reject });
+    });
+  };
+
+  const lines = readline.createInterface({ input: agentProcess.stdout });
+  lines.on("line", (line) => {
+    if (!line.trim()) return;
+
+    const message = JSON.parse(line) as JsonRpcResponse;
+    if (typeof message.id === "number" && pendingRequests.has(message.id)) {
+      const request = pendingRequests.get(message.id)!;
+      pendingRequests.delete(message.id);
+      if (message.error) {
+        request.reject(new Error(message.error.message));
+      } else {
+        request.resolve(message.result);
+      }
+      return;
+    }
+
+    const update = message.params?.update;
+    if (message.method === "session/update") {
+      if (update?.sessionUpdate === "agent_message_chunk") {
+        process.stdout.write(update.content?.text ?? "");
+      } else if (update?.sessionUpdate === "tool_call") {
+        console.log(`\n[Executing tool: ${update.title ?? "unknown"}]`);
+      }
+    }
+  });
+
+  try {
+    await sendRequest("initialize", {
+      protocolVersion: 1,
+      clientInfo: { name: "my-custom-service", version: "1.0.0" },
+      clientCapabilities: {},
+    });
+
+    const session = (await sendRequest("session/new", {
+      cwd: workspaceRoot,
+      mcpServers: [],
+    })) as { sessionId: string };
+
+    await sendRequest("session/prompt", {
+      sessionId: session.sessionId,
+      prompt: [
+        {
+          type: "text",
+          text: "List all files in the root folder and summarize the project.",
+        },
+      ],
+    });
+
+    await sendRequest("session/close", { sessionId: session.sessionId });
+  } finally {
+    lines.close();
+    if (!agentProcess.killed) agentProcess.kill();
+  }
+}
+
+connectToIrisAcp().catch(console.error);
+```
+
+Set `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, or the API key for the selected
+provider in the environment before starting the client. Keep those credentials
+in the trusted Node.js process; do not pass them to a browser renderer.
+
+The CLI does not load MCP definitions from `AIRIS_MCP_SERVERS`. In the current
+ACP server, custom MCP servers are not yet applied from `session/new` either,
+so leave `mcpServers` empty as shown. To use custom MCP tools today, configure
+them through the authenticated HTTP agent API rather than this ACP example.
+
 #### Troubleshooting
 
 - `ENOENT` when calling `spawn()` means the configured `command` is not on
