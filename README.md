@@ -666,25 +666,14 @@ The project logo is available at
 community references. Keep the logo unchanged when using it as the project
 mark.
 
-## Package publishing
+## Package
 
-The package is configured for public npm publication:
-
-```sh
-npm login
-npm publish
-```
+The published package is available on [npm](https://www.npmjs.com/package/@4onstudios/iris-agent).
 
 Yarn users can install the published package with:
 
 ```sh
 yarn global add @4onstudios/iris-agent
 ```
-
-Publishing requires access to the `@4onstudios` npm scope. The package is
-configured with public access, but npm credentials and organization
-permissions must be supplied by the publisher.
-
-See [RELEASING.md](./RELEASING.md) for npm publication and versioning steps.
 
 This project is released under the [MIT License](LICENSE).
