@@ -551,7 +551,7 @@ const getModel = (modelId: string) => {
       apiKey: openrouterApiKey,
       // Optional attribution headers surface the app on OpenRouter leaderboards.
       headers: {
-        "HTTP-Referer": process.env.OPENROUTER_SITE_URL || "https://github.com/osimuka/iris",
+        "HTTP-Referer": process.env.OPENROUTER_SITE_URL || "https://github.com/4onstudios/iris-agent/",
         "X-Title": process.env.OPENROUTER_SITE_NAME || "Iris",
       },
       ...(isOpenRouterDebugEnabled
