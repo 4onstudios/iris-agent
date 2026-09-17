@@ -423,9 +423,9 @@ export const createAcpAgentApp = (
         assertAcpWorkspace({ cwd: ctx.params.cwd }, boundWorkspaceRoot);
       }
 
-      const requestedCwd = ctx.params.cwd
-        ? path.resolve(ctx.params.cwd)
-        : undefined;
+      const requestedCwd = boundWorkspaceRoot || (
+        ctx.params.cwd ? path.resolve(ctx.params.cwd) : undefined
+      );
       let entries: Dirent[];
       try {
         entries = await fs.readdir(CHAT_SESSIONS_DIR, {

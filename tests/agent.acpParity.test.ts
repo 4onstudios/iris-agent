@@ -436,4 +436,68 @@ describe("ACP parity features", () => {
             await fs.rm(chatSessionPath(chatSessionId), { force: true });
         }
     });
+
+    it("limits session discovery to the bound workspace when cwd is omitted", async () => {
+        const runtime: AcpRuntimeAgent = {};
+        const sessionIds = [
+            `bound-session-${Date.now()}`,
+            `other-session-${Date.now()}`,
+        ];
+        const boundWorkspace = path.resolve("/tmp/iris-bound-workspace");
+        const otherWorkspace = path.resolve("/tmp/iris-other-workspace");
+
+        try {
+            await fs.mkdir(path.dirname(chatSessionPath(sessionIds[0])), {
+                recursive: true,
+            });
+            await Promise.all([
+                fs.writeFile(
+                    chatSessionPath(sessionIds[0]),
+                    JSON.stringify({
+                        id: sessionIds[0],
+                        cwd: boundWorkspace,
+                        messages: [],
+                    }),
+                ),
+                fs.writeFile(
+                    chatSessionPath(sessionIds[1]),
+                    JSON.stringify({
+                        id: sessionIds[1],
+                        cwd: otherWorkspace,
+                        messages: [],
+                    }),
+                ),
+            ]);
+
+            const client = acp.client({ name: "iris-agent-test-client" });
+            await client.connectWith(
+                createAcpAgentApp(runtime, boundWorkspace),
+                async (ctx) => {
+                    const listed = await ctx.request(
+                        acp.methods.agent.session.list,
+                        {},
+                    );
+                    expect(listed.sessions).toEqual(
+                        expect.arrayContaining([
+                            expect.objectContaining({
+                                sessionId: sessionIds[0],
+                                cwd: boundWorkspace,
+                            }),
+                        ]),
+                    );
+                    expect(listed.sessions).not.toEqual(
+                        expect.arrayContaining([
+                            expect.objectContaining({ sessionId: sessionIds[1] }),
+                        ]),
+                    );
+                },
+            );
+        } finally {
+            await Promise.all(
+                sessionIds.map((sessionId) =>
+                    fs.rm(chatSessionPath(sessionId), { force: true }),
+                ),
+            );
+        }
+    });
 });
