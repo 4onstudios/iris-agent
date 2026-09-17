@@ -3,7 +3,7 @@
 /**
  * iris-agent CLI with ACP (Agent Client Protocol) support
  * Usage:
- *   iris-agent --workspace /path/to/workspace --modelId openrouter/openai/gpt-4o --acp
+ *   iris-agent --acp
  *   iris-agent --workspace /path/to/workspace --modelId openrouter/openai/gpt-4o --chat
  */
 
@@ -11,6 +11,7 @@ import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import { createCodingAgent } from "./api/core/agent/index.js";
 import { startAcpServer } from "./api/acp/acpServer.js";
+import { getMissingProviderSetup } from "./api/acp/providerSetup.js";
 
 const defaultModelId =
   process.env.MODEL_ID ||
@@ -22,7 +23,7 @@ const argv = yargs(hideBin(process.argv))
     alias: "w",
     type: "string",
     description: "Workspace root path",
-    required: true,
+    default: process.cwd(),
   })
   .option("acp", {
     alias: "a",
@@ -67,6 +68,10 @@ async function main() {
   console.log(`🤖 Model: ${modelId}`);
 
   if (argv.acp) {
+    const missingProviderSetup = getMissingProviderSetup(modelId);
+    if (missingProviderSetup) {
+      throw new Error(missingProviderSetup);
+    }
     console.log("🔗 Starting ACP server over stdio...");
     await startAcpServer(
       (requestedModelId, targetWorkspace) =>

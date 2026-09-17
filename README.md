@@ -142,15 +142,52 @@ standard error. Each ACP process is bound to the workspace supplied at startup.
 To switch workspaces, close the process and respawn `iris-agent` with the new
 `--workspace` path.
 
+When the current directory is the target workspace, `--workspace` is optional:
+
+```sh
+OPENROUTER_API_KEY=... npx -y @4onstudios/iris-agent@latest --acp
+```
+
+If the selected model's credentials are missing, Iris Agent stops before opening
+the ACP connection and prints the required environment variable, a terminal
+command, and a ready-to-paste VS Code ACP Client configuration. Configure API
+keys in `acp.agents.<name>.env`; do not put them in the argument list:
+
+```json
+{
+  "acp.agents": {
+    "Iris Agent": {
+      "command": "npx",
+      "args": ["-y", "@4onstudios/iris-agent@latest", "--acp"],
+      "env": {
+        "OPENROUTER_API_KEY": "your-openrouter-api-key"
+      }
+    }
+  }
+}
+```
+
+Use `--modelId` to select a direct provider: `openai/gpt-4o` with
+`OPENAI_API_KEY`, `anthropic/claude-sonnet-4-5` with `ANTHROPIC_API_KEY`,
+`google/gemini-2.5-pro` with `GOOGLE_GENERATIVE_AI_API_KEY`, or
+`huggingface/...` with `HF_TOKEN`. Local `ollama/<model>` sessions do not need
+a cloud API key.
+
+Iris Agent advertises ACP session loading and listing, so
+[VS Code ACP Client](https://github.com/formulahendry/vscode-acp) can display
+and restore persisted conversations for the current workspace. It also returns
+the per-session model configuration option required by the extension's composer
+controls.
+
 ## CLI Usage
 
 ```sh
-iris-agent --workspace <path> [--acp | --chat] [--modelId <model>]
+iris-agent [--workspace <path>] [--acp | --chat] [--modelId <model>]
 ```
 
 **Options:**
 
-- `--workspace` (required, `-w`) - Path to the workspace/project root
+- `--workspace` (`-w`) - Path to the workspace/project root; defaults to the current working directory
 - `--acp` (`-a`) - Start ACP protocol server (stdio-based)
 - `--chat` (`-c`) - Start interactive chat mode
 - `--modelId` - Model identifier used for chat/ACP sessions (default: `openrouter/openai/gpt-4o` or `MODEL_ID` / `OPENROUTER_MODEL` env vars)
@@ -168,6 +205,9 @@ npm run cli -- --workspace . --chat --modelId openrouter/anthropic/claude-3.7-so
 
 # ACP server for IDE integration
 npm run cli -- --workspace . --acp
+
+# ACP server from the current workspace
+npx -y @4onstudios/iris-agent@latest --acp
 
 # ACP server with custom default model
 npm run cli -- --workspace . --acp --modelId openrouter/openai/gpt-4o

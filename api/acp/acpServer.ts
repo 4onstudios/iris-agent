@@ -30,6 +30,7 @@ type PersistedChatMessage = {
 
 type PersistedChatSession = {
   id: string;
+  cwd?: string;
   title?: string;
   createdAt?: number;
   updatedAt?: number;
@@ -59,13 +60,15 @@ const loadPersistedChatSession = async (
 const savePersistedChatSession = async (
   sessionId: string,
   messages: PersistedChatMessage[],
+  session: Pick<AcpSessionState, "cwd" | "title">,
   existing?: PersistedChatSession,
 ): Promise<void> => {
   if (!isSafeChatSessionId(sessionId)) return;
   const timestamp = Date.now();
   const payload: PersistedChatSession = {
     id: sessionId,
-    title: existing?.title,
+    cwd: session.cwd,
+    title: session.title,
     createdAt: existing?.createdAt ?? timestamp,
     updatedAt: timestamp,
     messages,
@@ -187,6 +190,7 @@ type ActiveTurn = {
 type AcpSessionState = {
   cwd: string;
   modelId?: string;
+  title?: string;
   activeTurn?: ActiveTurn;
   history: PersistedChatMessage[];
 };
@@ -319,17 +323,31 @@ export const createAcpAgentApp = (
       .catch(() => undefined);
   };
 
+  const getConfigOptions = (modelId?: string): acp.SessionConfigOption[] => {
+    const currentModel = modelId || "default";
+    return [
+      {
+        id: "model",
+        name: "Model",
+        type: "select",
+        category: "model",
+        currentValue: currentModel,
+        options: [{ value: currentModel, name: currentModel }],
+      },
+    ];
+  };
+
   return acp
     .agent({ name: "iris-agent" })
     .onRequest(acp.methods.agent.initialize, async () => ({
       protocolVersion: acp.PROTOCOL_VERSION,
       agentCapabilities: {
         loadSession: true,
-        sessionCapabilities: { close: {} },
+        sessionCapabilities: { close: {}, list: {} },
       },
       agentInfo: {
         name: "iris-agent",
-        version: "0.1.0",
+        version: "0.2.0",
       },
     }))
     .onRequest(acp.methods.agent.session.new, async (ctx) => {
@@ -352,7 +370,10 @@ export const createAcpAgentApp = (
         history: [],
       });
       await notifyAvailableCommands(ctx, sessionId);
-      return { sessionId };
+      return {
+        sessionId,
+        configOptions: getConfigOptions(requestedModel),
+      };
     })
     .onRequest(acp.methods.agent.session.load, async (ctx) => {
       const sessionId = ctx.params.sessionId;
@@ -373,6 +394,7 @@ export const createAcpAgentApp = (
       sessions.set(sessionId, {
         cwd: boundWorkspaceRoot || ctx.params.cwd,
         modelId: requestedModel,
+        title: persisted.title,
         history,
       });
       for (const message of history) {
@@ -386,7 +408,51 @@ export const createAcpAgentApp = (
         });
       }
       await notifyAvailableCommands(ctx, sessionId);
-      return {};
+      return { configOptions: getConfigOptions(requestedModel) };
+    })
+    .onRequest(acp.methods.agent.session.list, async (ctx) => {
+      if (boundWorkspaceRoot) {
+        assertAcpWorkspace({ cwd: ctx.params.cwd }, boundWorkspaceRoot);
+      }
+
+      const requestedCwd = ctx.params.cwd
+        ? path.resolve(ctx.params.cwd)
+        : undefined;
+      const persistedSessions: acp.SessionInfo[] = [];
+      try {
+        const entries = await fs.readdir(CHAT_SESSIONS_DIR, {
+          withFileTypes: true,
+        });
+        for (const entry of entries) {
+          if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+          const sessionId = entry.name.slice(0, -".json".length);
+          const persisted = await loadPersistedChatSession(sessionId);
+          if (!persisted?.cwd) continue;
+          if (
+            requestedCwd &&
+            path.resolve(persisted.cwd) !== requestedCwd
+          ) {
+            continue;
+          }
+          persistedSessions.push({
+            sessionId: persisted.id,
+            cwd: persisted.cwd,
+            title: persisted.title,
+            updatedAt: persisted.updatedAt
+              ? new Date(persisted.updatedAt).toISOString()
+              : undefined,
+          });
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw error;
+        }
+      }
+
+      persistedSessions.sort((left, right) =>
+        (right.updatedAt || "").localeCompare(left.updatedAt || ""),
+      );
+      return { sessions: persistedSessions };
     })
     .onRequest(acp.methods.agent.session.setConfigOption, async (ctx) => {
       const sessionId = ctx.params.sessionId;
@@ -403,20 +469,7 @@ export const createAcpAgentApp = (
           session.modelId = undefined;
         }
       }
-      const currentModel = session.modelId || "default";
-      const configOptions: acp.SessionConfigOption[] = [
-        {
-          id: "model",
-          name: "Model",
-          type: "select",
-          category: "model",
-          currentValue: currentModel,
-          options: [
-            { value: currentModel, name: currentModel },
-          ],
-        },
-      ];
-      return { configOptions };
+      return { configOptions: getConfigOptions(session.modelId) };
     })
     .onRequest(acp.methods.agent.session.prompt, async (ctx) => {
       const sessionId = ctx.params.sessionId;
@@ -445,12 +498,16 @@ export const createAcpAgentApp = (
         session.history.push({ role: "user", content: promptText });
       }
       const persistTurn = async (assistantText: string): Promise<void> => {
+        if (promptText && !session.title) {
+          session.title = promptText.replace(/\s+/g, " ").slice(0, 120);
+        }
         if (assistantText) {
           session.history.push({ role: "assistant", content: assistantText });
         }
         await savePersistedChatSession(
           sessionId,
           session.history,
+          session,
           await loadPersistedChatSession(sessionId),
         );
       };
@@ -1103,6 +1160,6 @@ export async function startAcpServer(
     workspaceRoot,
   ).connect(acp.ndJsonStream(output, input));
 
-  console.error("ACP agent ready: iris-agent@0.1.0 (stdio)");
+  console.error("ACP agent ready: iris-agent@0.2.0 (stdio)");
   await connection.closed;
 }

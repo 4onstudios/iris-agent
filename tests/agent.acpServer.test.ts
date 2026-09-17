@@ -514,12 +514,12 @@ describe("ACP server", () => {
             await ctx.notify(acp.methods.agent.session.cancel, {
                 sessionId: session.sessionId,
             });
-            expect(receivedSignal.aborted).toBe(true);
             resolveStream({
                 fullStream: new ReadableStream({ start(controller) { controller.close(); } }),
                 text: Promise.resolve(""),
             });
             await expect(prompt).resolves.toEqual({ stopReason: "cancelled" });
+            expect(receivedSignal.aborted).toBe(true);
         });
     });
 

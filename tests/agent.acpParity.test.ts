@@ -53,12 +53,22 @@ describe("ACP parity features", () => {
                 clientCapabilities: {},
             });
             expect(initialized.agentCapabilities?.loadSession).toBe(true);
+            expect(
+                initialized.agentCapabilities?.sessionCapabilities?.list,
+            ).toEqual({});
 
-            await ctx.request(acp.methods.agent.session.new, {
+            const session = await ctx.request(acp.methods.agent.session.new, {
                 cwd: "/workspace",
                 mcpServers: [],
             });
 
+            expect(session.configOptions).toEqual([
+                expect.objectContaining({
+                    id: "model",
+                    category: "model",
+                    currentValue: "default",
+                }),
+            ]);
             expect(updates[0]?.update).toEqual(
                 expect.objectContaining({
                     sessionUpdate: "available_commands_update",
@@ -387,11 +397,28 @@ describe("ACP parity features", () => {
             await reloadClient.connectWith(
                 createAcpAgentApp(runtime),
                 async (ctx) => {
-                    await ctx.request(acp.methods.agent.session.load, {
+                    const listed = await ctx.request(acp.methods.agent.session.list, {
+                        cwd: "/workspace",
+                    });
+                    expect(listed.sessions).toEqual(expect.arrayContaining([
+                        expect.objectContaining({
+                            sessionId: chatSessionId,
+                            cwd: "/workspace",
+                            title: "Say hi",
+                        }),
+                    ]));
+
+                    const loaded = await ctx.request(acp.methods.agent.session.load, {
                         sessionId: chatSessionId,
                         cwd: "/workspace",
                         mcpServers: [],
                     });
+                    expect(loaded.configOptions).toEqual([
+                        expect.objectContaining({
+                            id: "model",
+                            currentValue: "default",
+                        }),
+                    ]);
 
                     const replayed = reloadUpdates.filter(
                         (entry) =>
