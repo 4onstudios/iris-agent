@@ -57,4 +57,27 @@ describe("ACP workspace binding", () => {
       ).resolves.toEqual({});
     });
   });
+
+  it("normalizes a relative bound workspace before running a session", async () => {
+    const runtime: AcpRuntimeAgent = {
+      generate: jest.fn(async () => ({ text: "done" })),
+    };
+    const client = acp.client({ name: "iris-agent-test-client" });
+
+    await client.connectWith(createAcpAgentApp(runtime, "."), async (ctx) => {
+      const session = await ctx.request(acp.methods.agent.session.new, {
+        cwd: process.cwd(),
+        mcpServers: [],
+      });
+      await ctx.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: "text", text: "Continue" }],
+      });
+    });
+
+    expect(runtime.generate).toHaveBeenCalledWith(
+      "Continue",
+      expect.objectContaining({ workspaceRoot: path.resolve(".") }),
+    );
+  });
 });

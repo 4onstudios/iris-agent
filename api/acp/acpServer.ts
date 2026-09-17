@@ -473,7 +473,7 @@ export const createAcpAgentApp = (
         : requestedWorkspace;
       if (
         boundWorkspaceRoot &&
-        sessionWorkspace !== boundWorkspaceRoot
+        path.resolve(sessionWorkspace) !== path.resolve(boundWorkspaceRoot)
       ) {
         throw new Error(
           `Persisted ACP session '${sessionId}' belongs to '${sessionWorkspace}', not this process's bound workspace '${boundWorkspaceRoot}'.`,
