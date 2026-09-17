@@ -387,6 +387,10 @@ describe("ACP parity features", () => {
                 { role: "user", content: "Say hi" },
                 { role: "assistant", content: "Hello there" },
             ]);
+            expect(persisted).toMatchObject({
+                cwd: "/workspace",
+                title: "Say hi",
+            });
 
             const reloadUpdates: acp.SessionNotification[] = [];
             const reloadClient = acp

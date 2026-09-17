@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { Dirent } from "node:fs";
 import { Readable, Writable } from "node:stream";
 import os from "node:os";
 import fs from "node:fs/promises";
@@ -67,8 +68,8 @@ const savePersistedChatSession = async (
   const timestamp = Date.now();
   const payload: PersistedChatSession = {
     id: sessionId,
-    cwd: session.cwd,
-    title: session.title,
+    cwd: path.resolve(session.cwd),
+    title: session.title ?? existing?.title,
     createdAt: existing?.createdAt ?? timestamp,
     updatedAt: timestamp,
     messages,
@@ -365,7 +366,7 @@ export const createAcpAgentApp = (
           ? irisMeta.chatSessionId
           : randomUUID();
       sessions.set(sessionId, {
-        cwd: boundWorkspaceRoot || ctx.params.cwd,
+        cwd: boundWorkspaceRoot || path.resolve(ctx.params.cwd),
         modelId: requestedModel,
         history: [],
       });
@@ -392,7 +393,7 @@ export const createAcpAgentApp = (
       }
       const history = persisted.messages.slice();
       sessions.set(sessionId, {
-        cwd: boundWorkspaceRoot || ctx.params.cwd,
+        cwd: boundWorkspaceRoot || path.resolve(ctx.params.cwd),
         modelId: requestedModel,
         title: persisted.title,
         history,
@@ -418,37 +419,42 @@ export const createAcpAgentApp = (
       const requestedCwd = ctx.params.cwd
         ? path.resolve(ctx.params.cwd)
         : undefined;
-      const persistedSessions: acp.SessionInfo[] = [];
+      let entries: Dirent[];
       try {
-        const entries = await fs.readdir(CHAT_SESSIONS_DIR, {
+        entries = await fs.readdir(CHAT_SESSIONS_DIR, {
           withFileTypes: true,
         });
-        for (const entry of entries) {
-          if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-          const sessionId = entry.name.slice(0, -".json".length);
-          const persisted = await loadPersistedChatSession(sessionId);
-          if (!persisted?.cwd) continue;
-          if (
-            requestedCwd &&
-            path.resolve(persisted.cwd) !== requestedCwd
-          ) {
-            continue;
-          }
-          persistedSessions.push({
-            sessionId: persisted.id,
-            cwd: persisted.cwd,
-            title: persisted.title,
-            updatedAt: persisted.updatedAt
-              ? new Date(persisted.updatedAt).toISOString()
-              : undefined,
-          });
-        }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
           throw error;
         }
+        return { sessions: [] };
       }
 
+      const persistedSessions = (
+        await Promise.all(
+          entries
+            .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+            .map((entry) =>
+              loadPersistedChatSession(entry.name.slice(0, -".json".length)),
+            ),
+        )
+      )
+        .filter(
+          (persisted): persisted is PersistedChatSession =>
+            Boolean(persisted?.cwd) &&
+            (!requestedCwd || path.resolve(persisted.cwd) === requestedCwd),
+        )
+        .map(
+          (persisted): acp.SessionInfo => ({
+            sessionId: persisted.id,
+            cwd: path.resolve(persisted.cwd as string),
+            title: persisted.title,
+            updatedAt: persisted.updatedAt
+              ? new Date(persisted.updatedAt).toISOString()
+              : undefined,
+          }),
+        );
       persistedSessions.sort((left, right) =>
         (right.updatedAt || "").localeCompare(left.updatedAt || ""),
       );

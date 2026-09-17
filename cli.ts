@@ -70,7 +70,9 @@ async function main() {
   if (argv.acp) {
     const missingProviderSetup = getMissingProviderSetup(modelId);
     if (missingProviderSetup) {
-      throw new Error(missingProviderSetup);
+      console.error(missingProviderSetup);
+      process.exitCode = 1;
+      return;
     }
     console.log("🔗 Starting ACP server over stdio...");
     await startAcpServer(
