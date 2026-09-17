@@ -21,6 +21,7 @@ import {
 } from "../helpers/tokenUsage";
 
 const DEFAULT_MAX_STEPS = 50;
+const MAX_CONCURRENT_SESSION_LOADS = 16;
 
 const CHAT_SESSIONS_DIR = path.join(os.homedir(), ".iris", "chat-sessions");
 
@@ -82,6 +83,36 @@ const loadPersistedChatSession = async (
   } catch {
     return undefined;
   }
+};
+
+const loadPersistedChatSessions = async (
+  sessionIds: string[],
+): Promise<Array<{ sessionId: string; persisted: PersistedChatSession }>> => {
+  const loaded = new Array<PersistedChatSession | undefined>(sessionIds.length);
+  let nextIndex = 0;
+
+  const worker = async (): Promise<void> => {
+    while (nextIndex < sessionIds.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      const sessionId = sessionIds[index];
+      if (sessionId) {
+        loaded[index] = await loadPersistedChatSession(sessionId);
+      }
+    }
+  };
+
+  await Promise.all(
+    Array.from(
+      { length: Math.min(MAX_CONCURRENT_SESSION_LOADS, sessionIds.length) },
+      worker,
+    ),
+  );
+
+  return loaded.flatMap((persisted, index) => {
+    const sessionId = sessionIds[index];
+    return persisted && sessionId ? [{ sessionId, persisted }] : [];
+  });
 };
 
 const savePersistedChatSession = async (
@@ -486,23 +517,20 @@ export const createAcpAgentApp = (
       }
 
       const persistedSessions = (
-        await Promise.all(
+        await loadPersistedChatSessions(
           entries
             .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
-            .map((entry) =>
-              loadPersistedChatSession(entry.name.slice(0, -".json".length)),
-            ),
+            .map((entry) => entry.name.slice(0, -".json".length)),
         )
       )
         .filter(
-          (persisted): persisted is PersistedChatSession =>
-            Boolean(persisted) &&
-            (!hasPersistedSessionCwd(persisted) ||
-              path.resolve(persisted.cwd) === requestedCwd),
+          ({ persisted }) =>
+            !hasPersistedSessionCwd(persisted) ||
+            path.resolve(persisted.cwd) === requestedCwd,
         )
         .map(
-          (persisted): acp.SessionInfo => ({
-            sessionId: persisted.id,
+          ({ sessionId, persisted }): acp.SessionInfo => ({
+            sessionId,
             cwd: hasPersistedSessionCwd(persisted)
               ? path.resolve(persisted.cwd)
               : requestedCwd,

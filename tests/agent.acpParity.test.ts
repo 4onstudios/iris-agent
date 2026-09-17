@@ -590,7 +590,7 @@ describe("ACP parity features", () => {
             await fs.writeFile(
                 chatSessionPath(sessionId),
                 JSON.stringify({
-                    id: sessionId,
+                    id: "mismatched-persisted-id",
                     cwd: workspace,
                     title: { unexpected: "title" },
                     updatedAt: "not-a-date",
