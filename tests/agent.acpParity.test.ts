@@ -500,4 +500,81 @@ describe("ACP parity features", () => {
             );
         }
     });
+
+    it("lists legacy sessions without cwd in the requested workspace", async () => {
+        const runtime: AcpRuntimeAgent = {};
+        const sessionId = `legacy-session-${Date.now()}`;
+        const workspace = path.resolve("/tmp/iris-legacy-workspace");
+
+        try {
+            await fs.mkdir(path.dirname(chatSessionPath(sessionId)), {
+                recursive: true,
+            });
+            await fs.writeFile(
+                chatSessionPath(sessionId),
+                JSON.stringify({ id: sessionId, messages: [] }),
+            );
+
+            const client = acp.client({ name: "iris-agent-test-client" });
+            await client.connectWith(
+                createAcpAgentApp(runtime, workspace),
+                async (ctx) => {
+                    const listed = await ctx.request(
+                        acp.methods.agent.session.list,
+                        {},
+                    );
+                    expect(listed.sessions).toEqual(
+                        expect.arrayContaining([
+                            expect.objectContaining({ sessionId, cwd: workspace }),
+                        ]),
+                    );
+                },
+            );
+        } finally {
+            await fs.rm(chatSessionPath(sessionId), { force: true });
+        }
+    });
+
+    it("uses the persisted workspace when loading a session", async () => {
+        const persistedWorkspace = path.resolve("/tmp/iris-persisted-workspace");
+        const requestedWorkspace = path.resolve("/tmp/iris-requested-workspace");
+        const sessionId = `persisted-workspace-${Date.now()}`;
+        const runtime: AcpRuntimeAgent = {
+            generate: jest.fn(async () => ({ text: "restored" })),
+        };
+
+        try {
+            await fs.mkdir(path.dirname(chatSessionPath(sessionId)), {
+                recursive: true,
+            });
+            await fs.writeFile(
+                chatSessionPath(sessionId),
+                JSON.stringify({
+                    id: sessionId,
+                    cwd: persistedWorkspace,
+                    messages: [],
+                }),
+            );
+
+            const client = acp.client({ name: "iris-agent-test-client" });
+            await client.connectWith(createAcpAgentApp(runtime), async (ctx) => {
+                await ctx.request(acp.methods.agent.session.load, {
+                    sessionId,
+                    cwd: requestedWorkspace,
+                    mcpServers: [],
+                });
+                await ctx.request(acp.methods.agent.session.prompt, {
+                    sessionId,
+                    prompt: [{ type: "text", text: "Continue" }],
+                });
+            });
+
+            expect(runtime.generate).toHaveBeenCalledWith(
+                "Continue",
+                expect.objectContaining({ workspaceRoot: persistedWorkspace }),
+            );
+        } finally {
+            await fs.rm(chatSessionPath(sessionId), { force: true });
+        }
+    });
 });

@@ -229,6 +229,24 @@ export function assertAcpWorkspace(
   }
 }
 
+const resolveAcpWorkspace = (
+  params: { workspaceRoot?: unknown; cwd?: unknown } | null | undefined,
+  boundWorkspaceRoot?: string,
+): string => {
+  if (boundWorkspaceRoot) {
+    assertAcpWorkspace(params, boundWorkspaceRoot);
+    return boundWorkspaceRoot;
+  }
+
+  const requestedWorkspace =
+    typeof params?.workspaceRoot === "string"
+      ? params.workspaceRoot
+      : typeof params?.cwd === "string"
+        ? params.cwd
+        : undefined;
+  return path.resolve(requestedWorkspace || process.cwd());
+};
+
 const toPromptText = (prompt: acp.ContentBlock[]): string =>
   prompt
     .map((block) => {
@@ -359,9 +377,10 @@ export const createAcpAgentApp = (
       },
     }))
     .onRequest(acp.methods.agent.session.new, async (ctx) => {
-      if (boundWorkspaceRoot) {
-        assertAcpWorkspace({ cwd: ctx.params.cwd }, boundWorkspaceRoot);
-      }
+      const sessionWorkspace = resolveAcpWorkspace(
+        ctx.params as { workspaceRoot?: unknown; cwd?: unknown },
+        boundWorkspaceRoot,
+      );
       const irisMeta = readIrisMeta(ctx.params._meta);
       const requestedModel =
         irisMeta.modelId ||
@@ -373,7 +392,7 @@ export const createAcpAgentApp = (
           ? irisMeta.chatSessionId
           : randomUUID();
       sessions.set(sessionId, {
-        cwd: boundWorkspaceRoot || path.resolve(ctx.params.cwd),
+        cwd: sessionWorkspace,
         modelId: requestedModel,
         history: [],
       });
@@ -385,9 +404,10 @@ export const createAcpAgentApp = (
     })
     .onRequest(acp.methods.agent.session.load, async (ctx) => {
       const sessionId = ctx.params.sessionId;
-      if (boundWorkspaceRoot) {
-        assertAcpWorkspace({ cwd: ctx.params.cwd }, boundWorkspaceRoot);
-      }
+      const requestedWorkspace = resolveAcpWorkspace(
+        ctx.params as { workspaceRoot?: unknown; cwd?: unknown },
+        boundWorkspaceRoot,
+      );
       const irisMeta = readIrisMeta(ctx.params._meta);
       const requestedModel =
         irisMeta.modelId ||
@@ -398,9 +418,20 @@ export const createAcpAgentApp = (
       if (!persisted) {
         throw new Error(`No persisted chat session found for '${sessionId}'`);
       }
+      const sessionWorkspace = hasPersistedSessionCwd(persisted)
+        ? path.resolve(persisted.cwd)
+        : requestedWorkspace;
+      if (
+        boundWorkspaceRoot &&
+        sessionWorkspace !== boundWorkspaceRoot
+      ) {
+        throw new Error(
+          `Persisted ACP session '${sessionId}' belongs to '${sessionWorkspace}', not this process's bound workspace '${boundWorkspaceRoot}'.`,
+        );
+      }
       const history = persisted.messages.slice();
       sessions.set(sessionId, {
-        cwd: boundWorkspaceRoot || path.resolve(ctx.params.cwd),
+        cwd: sessionWorkspace,
         modelId: requestedModel,
         title: persisted.title,
         history,
@@ -419,12 +450,9 @@ export const createAcpAgentApp = (
       return { configOptions: getConfigOptions(requestedModel) };
     })
     .onRequest(acp.methods.agent.session.list, async (ctx) => {
-      if (boundWorkspaceRoot) {
-        assertAcpWorkspace({ cwd: ctx.params.cwd }, boundWorkspaceRoot);
-      }
-
-      const requestedCwd = boundWorkspaceRoot || (
-        ctx.params.cwd ? path.resolve(ctx.params.cwd) : undefined
+      const requestedCwd = resolveAcpWorkspace(
+        ctx.params as { workspaceRoot?: unknown; cwd?: unknown },
+        boundWorkspaceRoot,
       );
       let entries: Dirent[];
       try {
@@ -448,14 +476,17 @@ export const createAcpAgentApp = (
         )
       )
         .filter(
-          (persisted): persisted is PersistedChatSessionWithCwd =>
-            hasPersistedSessionCwd(persisted) &&
-            (!requestedCwd || path.resolve(persisted.cwd) === requestedCwd),
+          (persisted): persisted is PersistedChatSession =>
+            Boolean(persisted) &&
+            (!hasPersistedSessionCwd(persisted) ||
+              path.resolve(persisted.cwd) === requestedCwd),
         )
         .map(
           (persisted): acp.SessionInfo => ({
             sessionId: persisted.id,
-            cwd: path.resolve(persisted.cwd),
+            cwd: hasPersistedSessionCwd(persisted)
+              ? path.resolve(persisted.cwd)
+              : requestedCwd,
             title: persisted.title,
             updatedAt: persisted.updatedAt
               ? new Date(persisted.updatedAt).toISOString()
