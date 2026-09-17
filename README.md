@@ -145,7 +145,7 @@ To switch workspaces, close the process and respawn `iris-agent` with the new
 When the current directory is the target workspace, `--workspace` is optional:
 
 ```sh
-OPENROUTER_API_KEY=... npx -y @4onstudios/iris-agent@latest --acp
+OPENROUTER_API_KEY=... npx @4onstudios/iris-agent@latest --acp
 ```
 
 If the selected model's credentials are missing, Iris Agent stops before opening
@@ -158,7 +158,7 @@ keys in `acp.agents.<name>.env`; do not put them in the argument list:
   "acp.agents": {
     "Iris Agent": {
       "command": "npx",
-      "args": ["-y", "@4onstudios/iris-agent@latest", "--acp"],
+      "args": ["@4onstudios/iris-agent@latest", "--acp"],
       "env": {
         "OPENROUTER_API_KEY": "your-openrouter-api-key"
       }
@@ -207,7 +207,7 @@ npm run cli -- --workspace . --chat --modelId openrouter/anthropic/claude-3.7-so
 npm run cli -- --workspace . --acp
 
 # ACP server from the current workspace
-npx -y @4onstudios/iris-agent@latest --acp
+npx @4onstudios/iris-agent@latest --acp
 
 # ACP server with custom default model
 npm run cli -- --workspace . --acp --modelId openrouter/openai/gpt-4o

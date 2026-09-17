@@ -143,7 +143,7 @@ export const getMissingProviderSetup = (
     `Iris Agent cannot start model '${modelId}' because ${credential} is not configured.`,
     "",
     `Provide ${description} before starting the agent:`,
-    `  ${credential}=<your-api-key> npx -y @4onstudios/iris-agent@latest --acp --modelId ${modelId}`,
+    `  ${credential}=<your-api-key> npx @4onstudios/iris-agent@latest --acp --modelId ${modelId}`,
     "",
     "For VS Code ACP Client, add the key to the agent's environment in settings.json:",
     JSON.stringify(
@@ -151,7 +151,7 @@ export const getMissingProviderSetup = (
         "acp.agents": {
           "Iris Agent": {
             command: "npx",
-            args: ["-y", "@4onstudios/iris-agent@latest", "--acp", "--modelId", modelId],
+            args: ["@4onstudios/iris-agent@latest", "--acp", "--modelId", modelId],
             env: { [credential]: "<your-api-key>" },
           },
         },
