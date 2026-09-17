@@ -577,4 +577,57 @@ describe("ACP parity features", () => {
             await fs.rm(chatSessionPath(sessionId), { force: true });
         }
     });
+
+    it("ignores malformed persisted metadata when listing and loading sessions", async () => {
+        const workspace = path.resolve("/tmp/iris-malformed-session-workspace");
+        const sessionId = `malformed-session-${Date.now()}`;
+        const runtime: AcpRuntimeAgent = {};
+
+        try {
+            await fs.mkdir(path.dirname(chatSessionPath(sessionId)), {
+                recursive: true,
+            });
+            await fs.writeFile(
+                chatSessionPath(sessionId),
+                JSON.stringify({
+                    id: sessionId,
+                    cwd: workspace,
+                    title: { unexpected: "title" },
+                    updatedAt: "not-a-date",
+                    messages: [],
+                }),
+            );
+
+            const client = acp.client({ name: "iris-agent-test-client" });
+            await client.connectWith(createAcpAgentApp(runtime), async (ctx) => {
+                const listed = await ctx.request(
+                    acp.methods.agent.session.list,
+                    { cwd: workspace },
+                );
+                expect(listed.sessions).toEqual(
+                    expect.arrayContaining([
+                        expect.objectContaining({
+                            sessionId,
+                            cwd: workspace,
+                            title: undefined,
+                            updatedAt: undefined,
+                        }),
+                    ]),
+                );
+                await expect(
+                    ctx.request(acp.methods.agent.session.load, {
+                        sessionId,
+                        cwd: workspace,
+                        mcpServers: [],
+                    }),
+                ).resolves.toEqual(
+                    expect.objectContaining({
+                        configOptions: expect.any(Array),
+                    }),
+                );
+            });
+        } finally {
+            await fs.rm(chatSessionPath(sessionId), { force: true });
+        }
+    });
 });

@@ -45,6 +45,25 @@ const hasPersistedSessionCwd = (
 ): persisted is PersistedChatSessionWithCwd =>
   typeof persisted?.cwd === "string" && persisted.cwd.length > 0;
 
+const getPersistedSessionTitle = (
+  persisted: PersistedChatSession | undefined,
+): string | undefined =>
+  typeof persisted?.title === "string" ? persisted.title : undefined;
+
+const getPersistedSessionUpdatedAt = (
+  persisted: PersistedChatSession,
+): string | undefined => {
+  if (
+    typeof persisted.updatedAt !== "number" &&
+    typeof persisted.updatedAt !== "string"
+  ) {
+    return undefined;
+  }
+
+  const timestamp = new Date(persisted.updatedAt);
+  return Number.isNaN(timestamp.getTime()) ? undefined : timestamp.toISOString();
+};
+
 const isSafeChatSessionId = (sessionId: string): boolean =>
   /^[A-Za-z0-9._:-]+$/.test(sessionId);
 
@@ -76,7 +95,7 @@ const savePersistedChatSession = async (
   const payload: PersistedChatSession = {
     id: sessionId,
     cwd: path.resolve(session.cwd),
-    title: session.title ?? existing?.title,
+    title: session.title ?? getPersistedSessionTitle(existing),
     createdAt: existing?.createdAt ?? timestamp,
     updatedAt: timestamp,
     messages,
@@ -433,7 +452,7 @@ export const createAcpAgentApp = (
       sessions.set(sessionId, {
         cwd: sessionWorkspace,
         modelId: requestedModel,
-        title: persisted.title,
+        title: getPersistedSessionTitle(persisted),
         history,
       });
       for (const message of history) {
@@ -487,10 +506,8 @@ export const createAcpAgentApp = (
             cwd: hasPersistedSessionCwd(persisted)
               ? path.resolve(persisted.cwd)
               : requestedCwd,
-            title: persisted.title,
-            updatedAt: persisted.updatedAt
-              ? new Date(persisted.updatedAt).toISOString()
-              : undefined,
+            title: getPersistedSessionTitle(persisted),
+            updatedAt: getPersistedSessionUpdatedAt(persisted),
           }),
         );
       persistedSessions.sort((left, right) =>
