@@ -38,6 +38,13 @@ type PersistedChatSession = {
   messages: PersistedChatMessage[];
 };
 
+type PersistedChatSessionWithCwd = PersistedChatSession & { cwd: string };
+
+const hasPersistedSessionCwd = (
+  persisted: PersistedChatSession | undefined,
+): persisted is PersistedChatSessionWithCwd =>
+  typeof persisted?.cwd === "string" && persisted.cwd.length > 0;
+
 const isSafeChatSessionId = (sessionId: string): boolean =>
   /^[A-Za-z0-9._:-]+$/.test(sessionId);
 
@@ -441,14 +448,14 @@ export const createAcpAgentApp = (
         )
       )
         .filter(
-          (persisted): persisted is PersistedChatSession =>
-            Boolean(persisted?.cwd) &&
+          (persisted): persisted is PersistedChatSessionWithCwd =>
+            hasPersistedSessionCwd(persisted) &&
             (!requestedCwd || path.resolve(persisted.cwd) === requestedCwd),
         )
         .map(
           (persisted): acp.SessionInfo => ({
             sessionId: persisted.id,
-            cwd: path.resolve(persisted.cwd as string),
+            cwd: path.resolve(persisted.cwd),
             title: persisted.title,
             updatedAt: persisted.updatedAt
               ? new Date(persisted.updatedAt).toISOString()
