@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { Dirent } from "node:fs";
 import { Readable, Writable } from "node:stream";
 import os from "node:os";
 import fs from "node:fs/promises";
@@ -20,6 +21,7 @@ import {
 } from "../helpers/tokenUsage";
 
 const DEFAULT_MAX_STEPS = 50;
+const MAX_CONCURRENT_SESSION_LOADS = 16;
 
 const CHAT_SESSIONS_DIR = path.join(os.homedir(), ".iris", "chat-sessions");
 
@@ -30,10 +32,37 @@ type PersistedChatMessage = {
 
 type PersistedChatSession = {
   id: string;
+  cwd?: string;
   title?: string;
-  createdAt?: number;
-  updatedAt?: number;
+  createdAt?: number | string;
+  updatedAt?: number | string;
   messages: PersistedChatMessage[];
+};
+
+type PersistedChatSessionWithCwd = PersistedChatSession & { cwd: string };
+
+const hasPersistedSessionCwd = (
+  persisted: PersistedChatSession | undefined,
+): persisted is PersistedChatSessionWithCwd =>
+  typeof persisted?.cwd === "string" && persisted.cwd.length > 0;
+
+const getPersistedSessionTitle = (
+  persisted: PersistedChatSession | undefined,
+): string | undefined =>
+  typeof persisted?.title === "string" ? persisted.title : undefined;
+
+const getPersistedSessionUpdatedAt = (
+  persisted: PersistedChatSession,
+): string | undefined => {
+  if (
+    typeof persisted.updatedAt !== "number" &&
+    typeof persisted.updatedAt !== "string"
+  ) {
+    return undefined;
+  }
+
+  const timestamp = new Date(persisted.updatedAt);
+  return Number.isNaN(timestamp.getTime()) ? undefined : timestamp.toISOString();
 };
 
 const isSafeChatSessionId = (sessionId: string): boolean =>
@@ -56,16 +85,48 @@ const loadPersistedChatSession = async (
   }
 };
 
+const loadPersistedChatSessions = async (
+  sessionIds: string[],
+): Promise<Array<{ sessionId: string; persisted: PersistedChatSession }>> => {
+  const loaded = new Array<PersistedChatSession | undefined>(sessionIds.length);
+  let nextIndex = 0;
+
+  const worker = async (): Promise<void> => {
+    while (nextIndex < sessionIds.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      const sessionId = sessionIds[index];
+      if (sessionId) {
+        loaded[index] = await loadPersistedChatSession(sessionId);
+      }
+    }
+  };
+
+  await Promise.all(
+    Array.from(
+      { length: Math.min(MAX_CONCURRENT_SESSION_LOADS, sessionIds.length) },
+      worker,
+    ),
+  );
+
+  return loaded.flatMap((persisted, index) => {
+    const sessionId = sessionIds[index];
+    return persisted && sessionId ? [{ sessionId, persisted }] : [];
+  });
+};
+
 const savePersistedChatSession = async (
   sessionId: string,
   messages: PersistedChatMessage[],
+  session: Pick<AcpSessionState, "cwd" | "title">,
   existing?: PersistedChatSession,
 ): Promise<void> => {
   if (!isSafeChatSessionId(sessionId)) return;
   const timestamp = Date.now();
   const payload: PersistedChatSession = {
     id: sessionId,
-    title: existing?.title,
+    cwd: path.resolve(session.cwd),
+    title: session.title ?? getPersistedSessionTitle(existing),
     createdAt: existing?.createdAt ?? timestamp,
     updatedAt: timestamp,
     messages,
@@ -187,6 +248,7 @@ type ActiveTurn = {
 type AcpSessionState = {
   cwd: string;
   modelId?: string;
+  title?: string;
   activeTurn?: ActiveTurn;
   history: PersistedChatMessage[];
 };
@@ -216,6 +278,24 @@ export function assertAcpWorkspace(
     );
   }
 }
+
+const resolveAcpWorkspace = (
+  params: { workspaceRoot?: unknown; cwd?: unknown } | null | undefined,
+  boundWorkspaceRoot?: string,
+): string => {
+  if (boundWorkspaceRoot) {
+    assertAcpWorkspace(params, boundWorkspaceRoot);
+    return boundWorkspaceRoot;
+  }
+
+  const requestedWorkspace =
+    typeof params?.workspaceRoot === "string"
+      ? params.workspaceRoot
+      : typeof params?.cwd === "string"
+        ? params.cwd
+        : undefined;
+  return path.resolve(requestedWorkspace || process.cwd());
+};
 
 const toPromptText = (prompt: acp.ContentBlock[]): string =>
   prompt
@@ -319,23 +399,38 @@ export const createAcpAgentApp = (
       .catch(() => undefined);
   };
 
+  const getConfigOptions = (modelId?: string): acp.SessionConfigOption[] => {
+    const currentModel = modelId || "default";
+    return [
+      {
+        id: "model",
+        name: "Model",
+        type: "select",
+        category: "model",
+        currentValue: currentModel,
+        options: [{ value: currentModel, name: currentModel }],
+      },
+    ];
+  };
+
   return acp
     .agent({ name: "iris-agent" })
     .onRequest(acp.methods.agent.initialize, async () => ({
       protocolVersion: acp.PROTOCOL_VERSION,
       agentCapabilities: {
         loadSession: true,
-        sessionCapabilities: { close: {} },
+        sessionCapabilities: { close: {}, list: {} },
       },
       agentInfo: {
         name: "iris-agent",
-        version: "0.1.0",
+        version: "0.2.0",
       },
     }))
     .onRequest(acp.methods.agent.session.new, async (ctx) => {
-      if (boundWorkspaceRoot) {
-        assertAcpWorkspace({ cwd: ctx.params.cwd }, boundWorkspaceRoot);
-      }
+      const sessionWorkspace = resolveAcpWorkspace(
+        ctx.params as { workspaceRoot?: unknown; cwd?: unknown },
+        boundWorkspaceRoot,
+      );
       const irisMeta = readIrisMeta(ctx.params._meta);
       const requestedModel =
         irisMeta.modelId ||
@@ -347,18 +442,22 @@ export const createAcpAgentApp = (
           ? irisMeta.chatSessionId
           : randomUUID();
       sessions.set(sessionId, {
-        cwd: boundWorkspaceRoot || ctx.params.cwd,
+        cwd: sessionWorkspace,
         modelId: requestedModel,
         history: [],
       });
       await notifyAvailableCommands(ctx, sessionId);
-      return { sessionId };
+      return {
+        sessionId,
+        configOptions: getConfigOptions(requestedModel),
+      };
     })
     .onRequest(acp.methods.agent.session.load, async (ctx) => {
       const sessionId = ctx.params.sessionId;
-      if (boundWorkspaceRoot) {
-        assertAcpWorkspace({ cwd: ctx.params.cwd }, boundWorkspaceRoot);
-      }
+      const requestedWorkspace = resolveAcpWorkspace(
+        ctx.params as { workspaceRoot?: unknown; cwd?: unknown },
+        boundWorkspaceRoot,
+      );
       const irisMeta = readIrisMeta(ctx.params._meta);
       const requestedModel =
         irisMeta.modelId ||
@@ -369,10 +468,22 @@ export const createAcpAgentApp = (
       if (!persisted) {
         throw new Error(`No persisted chat session found for '${sessionId}'`);
       }
+      const sessionWorkspace = hasPersistedSessionCwd(persisted)
+        ? path.resolve(persisted.cwd)
+        : requestedWorkspace;
+      if (
+        boundWorkspaceRoot &&
+        path.resolve(sessionWorkspace) !== path.resolve(boundWorkspaceRoot)
+      ) {
+        throw new Error(
+          `Persisted ACP session '${sessionId}' belongs to '${sessionWorkspace}', not this process's bound workspace '${boundWorkspaceRoot}'.`,
+        );
+      }
       const history = persisted.messages.slice();
       sessions.set(sessionId, {
-        cwd: boundWorkspaceRoot || ctx.params.cwd,
+        cwd: sessionWorkspace,
         modelId: requestedModel,
+        title: getPersistedSessionTitle(persisted),
         history,
       });
       for (const message of history) {
@@ -386,7 +497,51 @@ export const createAcpAgentApp = (
         });
       }
       await notifyAvailableCommands(ctx, sessionId);
-      return {};
+      return { configOptions: getConfigOptions(requestedModel) };
+    })
+    .onRequest(acp.methods.agent.session.list, async (ctx) => {
+      const requestedCwd = resolveAcpWorkspace(
+        ctx.params as { workspaceRoot?: unknown; cwd?: unknown },
+        boundWorkspaceRoot,
+      );
+      let entries: Dirent[];
+      try {
+        entries = await fs.readdir(CHAT_SESSIONS_DIR, {
+          withFileTypes: true,
+        });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw error;
+        }
+        return { sessions: [] };
+      }
+
+      const persistedSessions = (
+        await loadPersistedChatSessions(
+          entries
+            .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+            .map((entry) => entry.name.slice(0, -".json".length)),
+        )
+      )
+        .filter(
+          ({ persisted }) =>
+            !hasPersistedSessionCwd(persisted) ||
+            path.resolve(persisted.cwd) === requestedCwd,
+        )
+        .map(
+          ({ sessionId, persisted }): acp.SessionInfo => ({
+            sessionId,
+            cwd: hasPersistedSessionCwd(persisted)
+              ? path.resolve(persisted.cwd)
+              : requestedCwd,
+            title: getPersistedSessionTitle(persisted),
+            updatedAt: getPersistedSessionUpdatedAt(persisted),
+          }),
+        );
+      persistedSessions.sort((left, right) =>
+        (right.updatedAt || "").localeCompare(left.updatedAt || ""),
+      );
+      return { sessions: persistedSessions };
     })
     .onRequest(acp.methods.agent.session.setConfigOption, async (ctx) => {
       const sessionId = ctx.params.sessionId;
@@ -403,20 +558,7 @@ export const createAcpAgentApp = (
           session.modelId = undefined;
         }
       }
-      const currentModel = session.modelId || "default";
-      const configOptions: acp.SessionConfigOption[] = [
-        {
-          id: "model",
-          name: "Model",
-          type: "select",
-          category: "model",
-          currentValue: currentModel,
-          options: [
-            { value: currentModel, name: currentModel },
-          ],
-        },
-      ];
-      return { configOptions };
+      return { configOptions: getConfigOptions(session.modelId) };
     })
     .onRequest(acp.methods.agent.session.prompt, async (ctx) => {
       const sessionId = ctx.params.sessionId;
@@ -445,12 +587,16 @@ export const createAcpAgentApp = (
         session.history.push({ role: "user", content: promptText });
       }
       const persistTurn = async (assistantText: string): Promise<void> => {
+        if (promptText && !session.title) {
+          session.title = promptText.replace(/\s+/g, " ").slice(0, 120);
+        }
         if (assistantText) {
           session.history.push({ role: "assistant", content: assistantText });
         }
         await savePersistedChatSession(
           sessionId,
           session.history,
+          session,
           await loadPersistedChatSession(sessionId),
         );
       };
@@ -1103,6 +1249,6 @@ export async function startAcpServer(
     workspaceRoot,
   ).connect(acp.ndJsonStream(output, input));
 
-  console.error("ACP agent ready: iris-agent@0.1.0 (stdio)");
+  console.error("ACP agent ready: iris-agent@0.2.0 (stdio)");
   await connection.closed;
 }

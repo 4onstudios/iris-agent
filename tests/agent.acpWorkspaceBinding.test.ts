@@ -1,5 +1,10 @@
 import path from "path";
-import { assertAcpWorkspace } from "../api/acp/acpServer";
+import {
+  assertAcpWorkspace,
+  createAcpAgentApp,
+  type AcpRuntimeAgent,
+} from "../api/acp/acpServer";
+import * as acp from "@agentclientprotocol/sdk";
 
 describe("ACP workspace binding", () => {
   const workspaceRoot = path.resolve("/tmp/iris-workspace");
@@ -33,5 +38,46 @@ describe("ACP workspace binding", () => {
         workspaceRoot,
       ),
     ).toThrow(/Close it and respawn iris-agent/);
+  });
+
+  it("accepts workspaceRoot when creating a session", async () => {
+    const runtime: AcpRuntimeAgent = {};
+    const client = acp.client({ name: "iris-agent-test-client" });
+
+    await client.connectWith(createAcpAgentApp(runtime), async (ctx) => {
+      const session = await ctx.request(acp.methods.agent.session.new, {
+        cwd: workspaceRoot,
+        mcpServers: [],
+        workspaceRoot,
+      } as never);
+      await expect(
+        ctx.request(acp.methods.agent.session.close, {
+          sessionId: session.sessionId,
+        }),
+      ).resolves.toEqual({});
+    });
+  });
+
+  it("normalizes a relative bound workspace before running a session", async () => {
+    const runtime: AcpRuntimeAgent = {
+      generate: jest.fn(async () => ({ text: "done" })),
+    };
+    const client = acp.client({ name: "iris-agent-test-client" });
+
+    await client.connectWith(createAcpAgentApp(runtime, "."), async (ctx) => {
+      const session = await ctx.request(acp.methods.agent.session.new, {
+        cwd: process.cwd(),
+        mcpServers: [],
+      });
+      await ctx.request(acp.methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: "text", text: "Continue" }],
+      });
+    });
+
+    expect(runtime.generate).toHaveBeenCalledWith(
+      "Continue",
+      expect.objectContaining({ workspaceRoot: path.resolve(".") }),
+    );
   });
 });

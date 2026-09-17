@@ -53,12 +53,22 @@ describe("ACP parity features", () => {
                 clientCapabilities: {},
             });
             expect(initialized.agentCapabilities?.loadSession).toBe(true);
+            expect(
+                initialized.agentCapabilities?.sessionCapabilities?.list,
+            ).toEqual({});
 
-            await ctx.request(acp.methods.agent.session.new, {
+            const session = await ctx.request(acp.methods.agent.session.new, {
                 cwd: "/workspace",
                 mcpServers: [],
             });
 
+            expect(session.configOptions).toEqual([
+                expect.objectContaining({
+                    id: "model",
+                    category: "model",
+                    currentValue: "default",
+                }),
+            ]);
             expect(updates[0]?.update).toEqual(
                 expect.objectContaining({
                     sessionUpdate: "available_commands_update",
@@ -377,6 +387,10 @@ describe("ACP parity features", () => {
                 { role: "user", content: "Say hi" },
                 { role: "assistant", content: "Hello there" },
             ]);
+            expect(persisted).toMatchObject({
+                cwd: "/workspace",
+                title: "Say hi",
+            });
 
             const reloadUpdates: acp.SessionNotification[] = [];
             const reloadClient = acp
@@ -387,11 +401,28 @@ describe("ACP parity features", () => {
             await reloadClient.connectWith(
                 createAcpAgentApp(runtime),
                 async (ctx) => {
-                    await ctx.request(acp.methods.agent.session.load, {
+                    const listed = await ctx.request(acp.methods.agent.session.list, {
+                        cwd: "/workspace",
+                    });
+                    expect(listed.sessions).toEqual(expect.arrayContaining([
+                        expect.objectContaining({
+                            sessionId: chatSessionId,
+                            cwd: "/workspace",
+                            title: "Say hi",
+                        }),
+                    ]));
+
+                    const loaded = await ctx.request(acp.methods.agent.session.load, {
                         sessionId: chatSessionId,
                         cwd: "/workspace",
                         mcpServers: [],
                     });
+                    expect(loaded.configOptions).toEqual([
+                        expect.objectContaining({
+                            id: "model",
+                            currentValue: "default",
+                        }),
+                    ]);
 
                     const replayed = reloadUpdates.filter(
                         (entry) =>
@@ -403,6 +434,200 @@ describe("ACP parity features", () => {
             );
         } finally {
             await fs.rm(chatSessionPath(chatSessionId), { force: true });
+        }
+    });
+
+    it("limits session discovery to the bound workspace when cwd is omitted", async () => {
+        const runtime: AcpRuntimeAgent = {};
+        const sessionIds = [
+            `bound-session-${Date.now()}`,
+            `other-session-${Date.now()}`,
+        ];
+        const boundWorkspace = path.resolve("/tmp/iris-bound-workspace");
+        const otherWorkspace = path.resolve("/tmp/iris-other-workspace");
+
+        try {
+            await fs.mkdir(path.dirname(chatSessionPath(sessionIds[0])), {
+                recursive: true,
+            });
+            await Promise.all([
+                fs.writeFile(
+                    chatSessionPath(sessionIds[0]),
+                    JSON.stringify({
+                        id: sessionIds[0],
+                        cwd: boundWorkspace,
+                        messages: [],
+                    }),
+                ),
+                fs.writeFile(
+                    chatSessionPath(sessionIds[1]),
+                    JSON.stringify({
+                        id: sessionIds[1],
+                        cwd: otherWorkspace,
+                        messages: [],
+                    }),
+                ),
+            ]);
+
+            const client = acp.client({ name: "iris-agent-test-client" });
+            await client.connectWith(
+                createAcpAgentApp(runtime, boundWorkspace),
+                async (ctx) => {
+                    const listed = await ctx.request(
+                        acp.methods.agent.session.list,
+                        {},
+                    );
+                    expect(listed.sessions).toEqual(
+                        expect.arrayContaining([
+                            expect.objectContaining({
+                                sessionId: sessionIds[0],
+                                cwd: boundWorkspace,
+                            }),
+                        ]),
+                    );
+                    expect(listed.sessions).not.toEqual(
+                        expect.arrayContaining([
+                            expect.objectContaining({ sessionId: sessionIds[1] }),
+                        ]),
+                    );
+                },
+            );
+        } finally {
+            await Promise.all(
+                sessionIds.map((sessionId) =>
+                    fs.rm(chatSessionPath(sessionId), { force: true }),
+                ),
+            );
+        }
+    });
+
+    it("lists legacy sessions without cwd in the requested workspace", async () => {
+        const runtime: AcpRuntimeAgent = {};
+        const sessionId = `legacy-session-${Date.now()}`;
+        const workspace = path.resolve("/tmp/iris-legacy-workspace");
+
+        try {
+            await fs.mkdir(path.dirname(chatSessionPath(sessionId)), {
+                recursive: true,
+            });
+            await fs.writeFile(
+                chatSessionPath(sessionId),
+                JSON.stringify({ id: sessionId, messages: [] }),
+            );
+
+            const client = acp.client({ name: "iris-agent-test-client" });
+            await client.connectWith(
+                createAcpAgentApp(runtime, workspace),
+                async (ctx) => {
+                    const listed = await ctx.request(
+                        acp.methods.agent.session.list,
+                        {},
+                    );
+                    expect(listed.sessions).toEqual(
+                        expect.arrayContaining([
+                            expect.objectContaining({ sessionId, cwd: workspace }),
+                        ]),
+                    );
+                },
+            );
+        } finally {
+            await fs.rm(chatSessionPath(sessionId), { force: true });
+        }
+    });
+
+    it("uses the persisted workspace when loading a session", async () => {
+        const persistedWorkspace = path.resolve("/tmp/iris-persisted-workspace");
+        const requestedWorkspace = path.resolve("/tmp/iris-requested-workspace");
+        const sessionId = `persisted-workspace-${Date.now()}`;
+        const runtime: AcpRuntimeAgent = {
+            generate: jest.fn(async () => ({ text: "restored" })),
+        };
+
+        try {
+            await fs.mkdir(path.dirname(chatSessionPath(sessionId)), {
+                recursive: true,
+            });
+            await fs.writeFile(
+                chatSessionPath(sessionId),
+                JSON.stringify({
+                    id: sessionId,
+                    cwd: persistedWorkspace,
+                    messages: [],
+                }),
+            );
+
+            const client = acp.client({ name: "iris-agent-test-client" });
+            await client.connectWith(createAcpAgentApp(runtime), async (ctx) => {
+                await ctx.request(acp.methods.agent.session.load, {
+                    sessionId,
+                    cwd: requestedWorkspace,
+                    mcpServers: [],
+                });
+                await ctx.request(acp.methods.agent.session.prompt, {
+                    sessionId,
+                    prompt: [{ type: "text", text: "Continue" }],
+                });
+            });
+
+            expect(runtime.generate).toHaveBeenCalledWith(
+                "Continue",
+                expect.objectContaining({ workspaceRoot: persistedWorkspace }),
+            );
+        } finally {
+            await fs.rm(chatSessionPath(sessionId), { force: true });
+        }
+    });
+
+    it("ignores malformed persisted metadata when listing and loading sessions", async () => {
+        const workspace = path.resolve("/tmp/iris-malformed-session-workspace");
+        const sessionId = `malformed-session-${Date.now()}`;
+        const runtime: AcpRuntimeAgent = {};
+
+        try {
+            await fs.mkdir(path.dirname(chatSessionPath(sessionId)), {
+                recursive: true,
+            });
+            await fs.writeFile(
+                chatSessionPath(sessionId),
+                JSON.stringify({
+                    id: "mismatched-persisted-id",
+                    cwd: workspace,
+                    title: { unexpected: "title" },
+                    updatedAt: "not-a-date",
+                    messages: [],
+                }),
+            );
+
+            const client = acp.client({ name: "iris-agent-test-client" });
+            await client.connectWith(createAcpAgentApp(runtime), async (ctx) => {
+                const listed = await ctx.request(
+                    acp.methods.agent.session.list,
+                    { cwd: workspace },
+                );
+                expect(listed.sessions).toEqual(
+                    expect.arrayContaining([
+                        expect.objectContaining({
+                            sessionId,
+                            cwd: workspace,
+                            title: undefined,
+                            updatedAt: undefined,
+                        }),
+                    ]),
+                );
+                await expect(
+                    ctx.request(acp.methods.agent.session.load, {
+                        sessionId,
+                        cwd: workspace,
+                        mcpServers: [],
+                    }),
+                ).resolves.toEqual(
+                    expect.objectContaining({
+                        configOptions: expect.any(Array),
+                    }),
+                );
+            });
+        } finally {
+            await fs.rm(chatSessionPath(sessionId), { force: true });
         }
     });
 });

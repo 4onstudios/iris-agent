@@ -1017,7 +1017,7 @@ const createGeneratedAgentRuntimeAdapter = (
     descriptor: {
       id: "generated-agent-runtime",
       name: "Generated Agent Runtime",
-      version: "0.1.0",
+      version: "0.2.0",
       source: "external",
     },
     async startSession(context) {
