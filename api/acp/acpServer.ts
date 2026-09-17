@@ -34,8 +34,8 @@ type PersistedChatSession = {
   id: string;
   cwd?: string;
   title?: string;
-  createdAt?: number;
-  updatedAt?: number;
+  createdAt?: number | string;
+  updatedAt?: number | string;
   messages: PersistedChatMessage[];
 };
 
