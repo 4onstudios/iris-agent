@@ -82,6 +82,15 @@ const getRequiredProvider = (
       description: "a Google AI API key",
     };
   }
+  if (normalizedModelId.includes("/")) {
+    return getConfiguredKey(environment, ["OPENROUTER_API_KEY"])
+      ? undefined
+      : {
+          credential: "OPENROUTER_API_KEY",
+          modelExample: normalizedModelId,
+          description: "an OpenRouter API key",
+        };
+  }
   if (normalizedModelId.startsWith("claude")) {
     if (
       getConfiguredKey(environment, [

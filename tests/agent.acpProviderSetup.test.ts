@@ -15,6 +15,19 @@ describe("ACP provider setup", () => {
     ).toBeUndefined();
   });
 
+  it("requires OpenRouter credentials for un-namespaced slash models", () => {
+    expect(
+      getMissingProviderSetup("xiaomi/mimo-v2.5", {
+        OPENAI_API_KEY: "openai-key",
+      }),
+    ).toContain("OPENROUTER_API_KEY");
+    expect(
+      getMissingProviderSetup("xiaomi/mimo-v2.5", {
+        OPENROUTER_API_KEY: "openrouter-key",
+      }),
+    ).toBeUndefined();
+  });
+
   it("provides a VS Code ACP Client environment configuration", () => {
     expect(getMissingProviderSetup("anthropic/claude-sonnet-4-5", {})).toContain(
       '"env": {\n        "ANTHROPIC_API_KEY": "<your-api-key>"',
