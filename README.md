@@ -271,7 +271,7 @@ Provider-specific configuration:
 | `IRIS_DEBUG_TOKEN_USAGE_SOURCE` | Enable token-usage diagnostics. |
 | `IRIS_AGENT_STREAM_RETRY_ENABLED` | Enable stream retries. Related retry delay and limit variables are supported by the runtime. |
 | `IRIS_VERBOSE_SKILL_DISCOVERY` | Enable verbose skill-discovery logging. |
-| `PUPPETEER_EXECUTABLE_PATH` / `CHROME_EXECUTABLE_PATH` / `BROWSER_EXECUTABLE_PATH` | Chrome or Chromium executable path for browser-backed web search. Common macOS and Linux install paths are detected automatically. |
+| `PUPPETEER_EXECUTABLE_PATH` / `CHROME_EXECUTABLE_PATH` / `BROWSER_EXECUTABLE_PATH` | Chrome or Chromium executable path for browser-backed web search. Common macOS, Linux, and Windows install paths are detected automatically. |
 | `BROWSER_NO_SANDBOX` | Set to `true` only when browser automation must run without a sandbox. |
 
 Browser-backed web search uses `puppeteer-core`, so install Chrome/Chromium on
@@ -279,8 +279,11 @@ the host, provide one of the executable path variables above, or provision the
 Chrome build pinned by the installed `puppeteer-core` version:
 
 ```sh
-npm run browser:install
+npx iris-agent-install-browser
 ```
+
+For local development in this repository, `npm run browser:install` runs the
+same installer.
 
 Environment values can be supplied in a local `.env` file for the HTTP server
 because it loads `dotenv/config`. Do not commit `.env` files or API keys.

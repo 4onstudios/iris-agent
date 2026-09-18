@@ -25,6 +25,21 @@ const DEFAULT_BROWSER_EXECUTABLE_PATHS = [
   "/snap/bin/chromium",
 ];
 
+const getWindowsLocalBrowserExecutablePaths = (): string[] => {
+  const localAppDataCandidates = [
+    process.env.LOCALAPPDATA?.trim(),
+    process.env.USERPROFILE?.trim()
+      ? `${process.env.USERPROFILE.trim()}\\AppData\\Local`
+      : undefined,
+  ].filter((candidate): candidate is string => Boolean(candidate));
+
+  return [...new Set(localAppDataCandidates)].flatMap((basePath) => [
+    `${basePath}\\Google\\Chrome\\Application\\chrome.exe`,
+    `${basePath}\\Chromium\\Application\\chrome.exe`,
+    `${basePath}\\Microsoft\\Edge\\Application\\msedge.exe`,
+  ]);
+};
+
 const PATH_BROWSER_COMMANDS = [
   "google-chrome-stable",
   "google-chrome",
@@ -70,9 +85,10 @@ const resolveBrowserExecutablePath = async (
     }
   }
 
-  const detectedPath = DEFAULT_BROWSER_EXECUTABLE_PATHS.find((candidate) =>
-    fs.existsSync(candidate),
-  );
+  const detectedPath = [
+    ...getWindowsLocalBrowserExecutablePaths(),
+    ...DEFAULT_BROWSER_EXECUTABLE_PATHS,
+  ].find((candidate) => fs.existsSync(candidate));
   if (detectedPath) {
     return detectedPath;
   }
@@ -87,7 +103,7 @@ const resolveBrowserExecutablePath = async (
   }
 
   throw new Error(
-    "Browser executable not found. Install Chrome/Chromium, run `npm run browser:install`, or set PUPPETEER_EXECUTABLE_PATH, CHROME_EXECUTABLE_PATH, or BROWSER_EXECUTABLE_PATH.",
+    "Browser executable not found. Install Chrome/Chromium, run `npx iris-agent-install-browser`, or set PUPPETEER_EXECUTABLE_PATH, CHROME_EXECUTABLE_PATH, or BROWSER_EXECUTABLE_PATH.",
   );
 };
 
