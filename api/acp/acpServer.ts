@@ -1249,6 +1249,6 @@ export async function startAcpServer(
     workspaceRoot,
   ).connect(acp.ndJsonStream(output, input));
 
-  console.error("ACP agent ready: iris-agent@0.2.0 (stdio)");
+  console.error("ACP agent ready: iris-agent (stdio)");
   await connection.closed;
 }

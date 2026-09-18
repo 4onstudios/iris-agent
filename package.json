@@ -1,6 +1,6 @@
 {
   "name": "@4onstudios/iris-agent",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": false,
   "description": "Standalone HTTP coding-agent service and CLI with ACP (Agent Client Protocol) support.",
   "type": "module",
