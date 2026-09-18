@@ -25,7 +25,6 @@ const installedBrowser = await install({
   buildId: chromeRevision,
   cacheDir,
   platform,
-  downloadProgressCallback: "default",
 });
 
 console.log(`Installed Chrome ${chromeRevision} at ${installedBrowser.executablePath}`);
