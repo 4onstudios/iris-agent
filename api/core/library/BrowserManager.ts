@@ -1,7 +1,15 @@
 import fs from "node:fs";
-import { execFileSync } from "node:child_process";
+import * as childProcess from "node:child_process";
+import os from "node:os";
+import path from "node:path";
 
+import {
+  Browser as PuppeteerBrowser,
+  computeExecutablePath,
+  detectBrowserPlatform,
+} from "@puppeteer/browsers";
 import type { Browser, Page, PuppeteerNode } from "puppeteer-core";
+import { PUPPETEER_REVISIONS } from "puppeteer-core/internal/revisions.js";
 
 const BROWSER_EXECUTABLE_ENV_KEYS = [
   "PUPPETEER_EXECUTABLE_PATH",
@@ -52,11 +60,41 @@ const PATH_BROWSER_COMMANDS = [
   "msedge.exe",
 ];
 
+export const BROWSER_INSTALL_COMMAND =
+  "npx --yes --package @4onstudios/iris-agent@latest iris-agent-install-browser";
+
+export const getBrowserCacheDirectory = (): string =>
+  process.env.PUPPETEER_CACHE_DIR?.trim() ||
+  path.join(os.homedir(), ".cache", "puppeteer");
+
+const resolveCachedBrowserExecutablePath = (): string | undefined => {
+  const platform = detectBrowserPlatform();
+  const chromeRevision = PUPPETEER_REVISIONS.chrome;
+  if (!platform || !chromeRevision) {
+    return undefined;
+  }
+
+  try {
+    const cachedExecutablePath = computeExecutablePath({
+      browser: PuppeteerBrowser.CHROME,
+      buildId: chromeRevision,
+      cacheDir: getBrowserCacheDirectory(),
+      platform,
+    });
+
+    return fs.existsSync(cachedExecutablePath)
+      ? cachedExecutablePath
+      : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
 const resolveCommandFromPath = (command: string): string | undefined => {
   const resolver = process.platform === "win32" ? "where" : "which";
 
   try {
-    return execFileSync(resolver, [command], {
+    return childProcess.execFileSync(resolver, [command], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     })
@@ -68,7 +106,7 @@ const resolveCommandFromPath = (command: string): string | undefined => {
   }
 };
 
-const resolveBrowserExecutablePath = async (
+export const resolveBrowserExecutablePath = async (
   puppeteer: PuppeteerNode,
 ): Promise<string> => {
   for (const key of BROWSER_EXECUTABLE_ENV_KEYS) {
@@ -93,6 +131,11 @@ const resolveBrowserExecutablePath = async (
     return detectedPath;
   }
 
+  const cachedExecutablePath = resolveCachedBrowserExecutablePath();
+  if (cachedExecutablePath) {
+    return cachedExecutablePath;
+  }
+
   try {
     const cachedExecutablePath = await puppeteer.executablePath();
     if (cachedExecutablePath && fs.existsSync(cachedExecutablePath)) {
@@ -103,7 +146,7 @@ const resolveBrowserExecutablePath = async (
   }
 
   throw new Error(
-    "Browser executable not found. Install Chrome/Chromium, run `npx iris-agent-install-browser`, or set PUPPETEER_EXECUTABLE_PATH, CHROME_EXECUTABLE_PATH, or BROWSER_EXECUTABLE_PATH.",
+    `Browser executable not found. Install Chrome/Chromium, run \`${BROWSER_INSTALL_COMMAND}\`, or set PUPPETEER_EXECUTABLE_PATH, CHROME_EXECUTABLE_PATH, or BROWSER_EXECUTABLE_PATH.`,
   );
 };
 

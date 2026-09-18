@@ -279,7 +279,7 @@ the host, provide one of the executable path variables above, or provision the
 Chrome build pinned by the installed `puppeteer-core` version:
 
 ```sh
-npx iris-agent-install-browser
+npx --yes --package @4onstudios/iris-agent@latest iris-agent-install-browser
 ```
 
 For local development in this repository, `npm run browser:install` runs the
