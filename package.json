@@ -44,7 +44,9 @@
     "prepare": "npm run build",
     "test": "jest --config jest.config.cjs",
     "test:package-consumer": "npm run build && node scripts/test-package-consumer.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "release": "node scripts/release.mjs",
+    "release:publish": "node scripts/release.mjs --publish"
   },
   "files": [
     "dist"

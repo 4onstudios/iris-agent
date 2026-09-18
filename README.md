@@ -680,6 +680,18 @@ npm run build
 npm test
 ```
 
+Release validation and publishing are scripted:
+
+```sh
+npm run release
+NPM_CONFIG_OTP=<code> npm run release:publish
+```
+
+`npm run release` requires a clean worktree, runs type checking, tests, build,
+and `npm pack --dry-run`. `npm run release:publish` performs the same checks
+before publishing with public npm access. Use Node.js `>=22.13.0`, matching the
+package engine requirement.
+
 The repository also provides Make targets:
 
 ```sh
