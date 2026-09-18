@@ -1,6 +1,43 @@
-//creating a class to manage the browsing activities and how it will be handled
+import fs from "node:fs";
 
-import type { Browser, Page } from "puppeteer";
+import type { Browser, Page } from "puppeteer-core";
+
+const BROWSER_EXECUTABLE_ENV_KEYS = [
+  "PUPPETEER_EXECUTABLE_PATH",
+  "CHROME_EXECUTABLE_PATH",
+  "BROWSER_EXECUTABLE_PATH",
+];
+
+const DEFAULT_BROWSER_EXECUTABLE_PATHS = [
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  "/Applications/Chromium.app/Contents/MacOS/Chromium",
+  "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+  "/usr/bin/google-chrome-stable",
+  "/usr/bin/google-chrome",
+  "/usr/bin/chromium-browser",
+  "/usr/bin/chromium",
+  "/snap/bin/chromium",
+];
+
+const resolveBrowserExecutablePath = (): string => {
+  for (const key of BROWSER_EXECUTABLE_ENV_KEYS) {
+    const configuredPath = process.env[key]?.trim();
+    if (configuredPath) {
+      return configuredPath;
+    }
+  }
+
+  const detectedPath = DEFAULT_BROWSER_EXECUTABLE_PATHS.find((candidate) =>
+    fs.existsSync(candidate),
+  );
+  if (detectedPath) {
+    return detectedPath;
+  }
+
+  throw new Error(
+    "Browser executable not found. Install Chrome/Chromium or set PUPPETEER_EXECUTABLE_PATH, CHROME_EXECUTABLE_PATH, or BROWSER_EXECUTABLE_PATH.",
+  );
+};
 
 class BrowserManager {
   static instance: BrowserManager | null = null;
@@ -31,7 +68,7 @@ class BrowserManager {
     // --no-sandbox / --disable-setuid-sandbox disable a major Chromium security
     // boundary and should only be used in constrained environments (e.g. CI/Docker)
     // where the OS sandbox is unavailable. Set BROWSER_NO_SANDBOX=true to opt in.
-    const { default: puppeteer } = await import("puppeteer");
+    const { default: puppeteer } = await import("puppeteer-core");
 
     const noSandboxArgs =
       process.env.BROWSER_NO_SANDBOX === "true"
@@ -40,6 +77,7 @@ class BrowserManager {
 
     this.browser = await puppeteer.launch({
       headless: true,
+      executablePath: resolveBrowserExecutablePath(),
       args: noSandboxArgs,
     });
   }

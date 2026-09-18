@@ -271,6 +271,7 @@ Provider-specific configuration:
 | `IRIS_DEBUG_TOKEN_USAGE_SOURCE` | Enable token-usage diagnostics. |
 | `IRIS_AGENT_STREAM_RETRY_ENABLED` | Enable stream retries. Related retry delay and limit variables are supported by the runtime. |
 | `IRIS_VERBOSE_SKILL_DISCOVERY` | Enable verbose skill-discovery logging. |
+| `PUPPETEER_EXECUTABLE_PATH` / `CHROME_EXECUTABLE_PATH` / `BROWSER_EXECUTABLE_PATH` | Chrome or Chromium executable path for browser-backed web search. Common macOS and Linux install paths are detected automatically. |
 | `BROWSER_NO_SANDBOX` | Set to `true` only when browser automation must run without a sandbox. |
 
 Environment values can be supplied in a local `.env` file for the HTTP server
