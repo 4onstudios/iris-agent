@@ -77,9 +77,13 @@ const resolveBrowserExecutablePath = async (
     return detectedPath;
   }
 
-  const cachedExecutablePath = await puppeteer.executablePath();
-  if (cachedExecutablePath && fs.existsSync(cachedExecutablePath)) {
-    return cachedExecutablePath;
+  try {
+    const cachedExecutablePath = await puppeteer.executablePath();
+    if (cachedExecutablePath && fs.existsSync(cachedExecutablePath)) {
+      return cachedExecutablePath;
+    }
+  } catch {
+    // Fall through to the actionable installation/configuration guidance below.
   }
 
   throw new Error(

@@ -275,8 +275,8 @@ Provider-specific configuration:
 | `BROWSER_NO_SANDBOX` | Set to `true` only when browser automation must run without a sandbox. |
 
 Browser-backed web search uses `puppeteer-core`, so install Chrome/Chromium on
-the host, provide one of the executable path variables above, or provision a
-compatible browser for local development:
+the host, provide one of the executable path variables above, or provision the
+Chrome build pinned by the installed `puppeteer-core` version:
 
 ```sh
 npm run browser:install

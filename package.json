@@ -40,7 +40,7 @@
     "cli": "tsx cli.ts",
     "cli:dev": "tsx watch cli.ts",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "browser:install": "npx @puppeteer/browsers install chrome@stable",
+    "browser:install": "node scripts/install-browser.mjs",
     "build": "npm run clean && tsc -p tsconfig.build.json && node scripts/fix-esm-import-specifiers.mjs && node scripts/copy-skill-assets.mjs",
     "prepare": "npm run build",
     "test": "jest --config jest.config.cjs",
@@ -50,7 +50,8 @@
     "release:publish": "node scripts/release.mjs --publish"
   },
   "files": [
-    "dist"
+    "dist",
+    "scripts/install-browser.mjs"
   ],
   "license": "MIT",
   "repository": {
@@ -71,6 +72,7 @@
     "@mastra/memory": "^1.28.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@openrouter/ai-sdk-provider": "^2.10.0",
+    "@puppeteer/browsers": "3.2.2",
     "ajv": "^6.15.0",
     "diff": "^9.0.0",
     "dotenv": "^8.6.0",
