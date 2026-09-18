@@ -5,7 +5,8 @@
   "description": "Standalone HTTP coding-agent service and CLI with ACP (Agent Client Protocol) support.",
   "type": "module",
   "bin": {
-    "iris-agent": "./dist/cli.js"
+    "iris-agent": "./dist/cli.js",
+    "iris-agent-install-browser": "./scripts/install-browser.mjs"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -40,6 +41,7 @@
     "cli": "tsx cli.ts",
     "cli:dev": "tsx watch cli.ts",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "browser:install": "node scripts/install-browser.mjs",
     "build": "npm run clean && tsc -p tsconfig.build.json && node scripts/fix-esm-import-specifiers.mjs && node scripts/copy-skill-assets.mjs",
     "prepare": "npm run build",
     "test": "jest --config jest.config.cjs",
@@ -49,7 +51,8 @@
     "release:publish": "node scripts/release.mjs --publish"
   },
   "files": [
-    "dist"
+    "dist",
+    "scripts/install-browser.mjs"
   ],
   "license": "MIT",
   "repository": {
@@ -70,13 +73,14 @@
     "@mastra/memory": "^1.28.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@openrouter/ai-sdk-provider": "^2.10.0",
+    "@puppeteer/browsers": "3.2.2",
     "ajv": "^6.15.0",
     "diff": "^9.0.0",
     "dotenv": "^8.6.0",
     "express": "^5.2.1",
     "glob": "^13.0.0",
     "isomorphic-git": "^1.41.9",
-    "puppeteer": "^25.11.0",
+    "puppeteer-core": "^25.11.0",
     "sqlite": "^5.1.1",
     "sqlite3": "^6.0.1",
     "yargs": "^18.0.0",
