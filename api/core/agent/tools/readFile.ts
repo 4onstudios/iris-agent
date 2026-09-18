@@ -422,6 +422,10 @@ export const readFileTool = {
   name: "read_file",
   description:
     "Read up to 500 lines of a file. Use startLine and endLine with the returned next range to continue reading large files",
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
   parameters: z.object({
     filePath: z
       .string()

@@ -425,10 +425,14 @@ export const executeMcpToolByKey = async (
         };
       }
 
-      console.log("🚀 Calling MCP tool with input:", input);
+      console.log("🚀 Calling MCP tool with input keys:", Object.keys(input));
       const result = await callServerTool(server, workspacePath, tool.name, input);
-      console.log("✅ MCP tool call completed");
-      console.log("📤 Result:", result);
+      console.log("✅ MCP tool call completed:", {
+        server: result.server,
+        tool: result.tool,
+        success: result.success,
+        isError: result.isError,
+      });
       return result;
     }
   }

@@ -2156,8 +2156,11 @@ router.post(
   async (req: Request<{}, {}, AgentChatRequestBody>, res: Response) => {
     console.log("🔍 === REQUEST RECEIVED ===");
     console.log("Body keys:", Object.keys(req.body));
-    console.log("Message:", req.body.message?.substring(0, 100));
-    console.log("FilesInContext:", req.body.filesInContext);
+    console.log("Message length:", req.body.message?.length ?? 0);
+    console.log(
+      "Files in context:",
+      Array.isArray(req.body.filesInContext) ? req.body.filesInContext.length : 0,
+    );
 
     let requestedModelId = "gpt-4o";
     let activeRunId: string | undefined;
@@ -4318,10 +4321,11 @@ _You have discovered the following in earlier interactions. Use this to avoid re
       let usageSummary = normalizeTokenUsage(result.usage);
       let usageSeenFromFinal = Boolean(usageSummary);
 
-      console.log("=== AGENT RESULT ===");
-      console.log("Text:", result.text);
-      console.log("Steps:", result.steps?.length || 0);
-      console.log("Tool calls:", result.toolCalls?.length || 0);
+      console.log("=== AGENT RESULT ===", {
+        responseLength: result.text?.length ?? 0,
+        stepCount: result.steps?.length ?? 0,
+        toolCallCount: result.toolCalls?.length ?? 0,
+      });
 
       // Truncate response if it's too long to prevent context overflow
       let responseText = result.text || "";
@@ -4341,9 +4345,11 @@ _You have discovered the following in earlier interactions. Use this to avoid re
 
       // Check steps for tool execution details
       if (result.steps && result.steps.length > 0) {
-        // Log all steps for debugging
         result.steps.forEach((step, index) => {
-          console.log(`Step ${index}:`, JSON.stringify(step, null, 2));
+          console.log(`Step ${index} metadata:`, {
+            contentItemCount: step.content?.length ?? 0,
+            toolCallCount: step.toolCalls?.length ?? 0,
+          });
 
           // Collect ALL executed tools from all steps (not just last step)
           if (step.content && Array.isArray(step.content)) {
@@ -4402,13 +4408,18 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                 } else {
                   toolResult = undefined;
                 }
-                console.log(`  Tool result name: ${item.toolName}`);
-                console.log(
-                  "  Tool result raw item:",
-                  JSON.stringify(item, null, 2),
-                );
-                console.log("  Tool result value:", toolResult);
-                console.log("  Tool args:", args);
+                console.log("Tool result metadata:", {
+                  toolName: item.toolName,
+                  toolCallId: item.toolCallId,
+                  argumentKeys: Object.keys(args),
+                  resultType: typeof toolResult,
+                  resultKeys:
+                    toolResult &&
+                    typeof toolResult === "object" &&
+                    !Array.isArray(toolResult)
+                      ? Object.keys(toolResult as Record<string, unknown>)
+                      : [],
+                });
                 const safeToolResult = redactToolResult(toolResult).result;
                 executedToolResults.push({
                   name: item.toolName,
@@ -5951,7 +5962,10 @@ router.post(
     console.log("Tool name:", req.body?.toolName);
     console.log("Args keys:", Object.keys(req.body?.args || {}));
     console.log("Workspace root:", req.body?.workspaceRoot);
-    console.log("MCP servers:", req.body?.mcpServers);
+    console.log(
+      "MCP server count:",
+      Array.isArray(req.body?.mcpServers) ? req.body.mcpServers.length : 0,
+    );
 
     const toolName =
       typeof req.body?.toolName === "string" ? req.body.toolName.trim() : "";
@@ -5988,7 +6002,16 @@ router.post(
         toolName,
         args,
       );
-      console.log("✅ MCP tool execution result:", result);
+      console.log("✅ MCP tool execution result:", {
+        success: result.success,
+        ...("server" in result && typeof result.server === "string"
+          ? { server: result.server }
+          : {}),
+        ...("tool" in result && typeof result.tool === "string"
+          ? { tool: result.tool }
+          : {}),
+        isError: result.isError,
+      });
       return res.json(result);
     } catch (error) {
       const err = error as Error;
