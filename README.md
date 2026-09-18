@@ -274,6 +274,14 @@ Provider-specific configuration:
 | `PUPPETEER_EXECUTABLE_PATH` / `CHROME_EXECUTABLE_PATH` / `BROWSER_EXECUTABLE_PATH` | Chrome or Chromium executable path for browser-backed web search. Common macOS and Linux install paths are detected automatically. |
 | `BROWSER_NO_SANDBOX` | Set to `true` only when browser automation must run without a sandbox. |
 
+Browser-backed web search uses `puppeteer-core`, so install Chrome/Chromium on
+the host, provide one of the executable path variables above, or provision a
+compatible browser for local development:
+
+```sh
+npm run browser:install
+```
+
 Environment values can be supplied in a local `.env` file for the HTTP server
 because it loads `dotenv/config`. Do not commit `.env` files or API keys.
 
