@@ -1,7 +1,10 @@
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
-import { readFile as readFileToolExecute } from "../api/core/agent/tools/readFile";
+import {
+  readFile as readFileToolExecute,
+  readFileTool,
+} from "../api/core/agent/tools/readFile";
 import { searchFiles as searchFilesToolExecute } from "../api/core/agent/tools/searchFiles";
 
 describe("agent file tool terminal fallback", () => {
@@ -16,6 +19,15 @@ describe("agent file tool terminal fallback", () => {
   afterEach(async () => {
     process.chdir(originalCwd);
     await fs.rm(tempRoot, { recursive: true, force: true });
+  });
+
+  it("declares complete non-mutating tool annotations", () => {
+    expect(readFileTool).toMatchObject({
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    });
   });
 
   it("finds hidden files with searchFiles pattern lookup", async () => {

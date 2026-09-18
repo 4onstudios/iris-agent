@@ -5,7 +5,7 @@
  * This script uses tsx to run the CLI TypeScript code
  */
 
-import { execSync } from "child_process";
+import { spawnSync } from "child_process";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 
@@ -13,14 +13,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const projectRoot = join(__dirname, "..");
 
-try {
-  execSync(
-    `tsx ${join(projectRoot, "cli.ts")} ${process.argv.slice(2).join(" ")}`,
-    {
-      stdio: "inherit",
-      cwd: projectRoot,
-    }
-  );
-} catch (error) {
+const tsxCliPath = join(projectRoot, "node_modules", "tsx", "dist", "cli.mjs");
+const result = spawnSync(process.execPath, [tsxCliPath, join(projectRoot, "cli.ts"), ...process.argv.slice(2)], {
+  stdio: "inherit",
+  cwd: projectRoot,
+});
+
+if (result.error) {
+  console.error("Failed to start Iris Agent CLI:", result.error.message);
   process.exit(1);
 }
+
+process.exit(result.status ?? 1);
