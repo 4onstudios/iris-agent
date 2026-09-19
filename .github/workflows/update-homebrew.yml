@@ -1,0 +1,55 @@
+name: Update Homebrew tap
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Optional npm version to publish to the tap"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Iris Agent
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check out Homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: 4onstudios/homebrew-iris-agent
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update formula
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          node scripts/update-homebrew-formula.mjs \
+            homebrew-tap/Formula/iris-agent.rb \
+            "$REQUESTED_VERSION"
+
+      - name: Publish formula update
+        working-directory: homebrew-tap
+        run: |
+          if git diff --quiet -- Formula/iris-agent.rb; then
+            echo "Formula is already current."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/iris-agent.rb
+          git commit -m "Update Iris Agent formula"
+          git push origin main

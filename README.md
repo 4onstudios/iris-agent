@@ -185,6 +185,42 @@ controls.
 iris-agent [--workspace <path>] [--acp | --chat] [--modelId <model>]
 ```
 
+### Homebrew
+
+On macOS or Linux, install the CLI through the Iris Agent Homebrew tap:
+
+```sh
+brew tap 4onstudios/iris-agent
+brew install iris-agent
+```
+
+Then start an interactive session or an ACP server:
+
+```sh
+iris-agent --chat
+OPENROUTER_API_KEY=... iris-agent --acp
+```
+
+Install the browser used by browser-backed tools when needed:
+
+```sh
+iris-agent-install-browser
+```
+
+The Homebrew formula installs Node.js 22 and keeps Iris Agent and its
+dependencies under Homebrew's managed prefix. Upgrade it with:
+
+```sh
+brew update
+brew upgrade iris-agent
+```
+
+The tap is updated automatically by GitHub Actions when a newer version is
+published to npm. The updater runs daily and can also be started manually from
+the repository's **Actions** tab. It requires a repository secret named
+`HOMEBREW_TAP_TOKEN` with permission to push to
+`4onstudios/homebrew-iris-agent`.
+
 **Options:**
 
 - `--workspace` (`-w`) - Path to the workspace/project root; defaults to the current working directory
