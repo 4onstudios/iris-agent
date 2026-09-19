@@ -136,8 +136,6 @@ async function startChatMode(agent: any, workspaceRoot?: string) {
 
         if (typeof agent.stream === "function") {
           const streamResult = await agent.stream(trimmedInput, options);
-          stopSpinner();
-          stopSpinner = () => {};
           const reader = streamResult.fullStream.getReader();
           let hasOutput = false;
 
