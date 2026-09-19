@@ -187,8 +187,13 @@ async function startChatMode(agent: any, workspaceRoot?: string) {
                 typeof value.payload?.toolCallId === "string"
                   ? value.payload.toolCallId
                   : undefined;
+              const toolResultPayload =
+                value.payload?.result ??
+                value.payload?.output ??
+                value.payload?.content ??
+                value.payload?.data;
               const executionStatus = resolveToolExecutionStatus(
-                value.payload?.result,
+                toolResultPayload,
               );
               const isSettled =
                 executionStatus !== "pending" &&
