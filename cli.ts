@@ -137,7 +137,7 @@ async function startChatMode(agent: any, workspaceRoot?: string) {
         if (typeof agent.stream === "function") {
           const streamResult = await agent.stream(trimmedInput, options);
           const reader = streamResult.fullStream.getReader();
-          const pendingToolCallIds = new Set<string>();
+          const pendingToolCallIds = new Map<string, number>();
           let anonymousToolCalls = 0;
           let hasOutput = false;
 
@@ -165,7 +165,10 @@ async function startChatMode(agent: any, workspaceRoot?: string) {
                   ? value.payload.toolCallId
                   : undefined;
               if (toolCallId) {
-                pendingToolCallIds.add(toolCallId);
+                pendingToolCallIds.set(
+                  toolCallId,
+                  (pendingToolCallIds.get(toolCallId) || 0) + 1,
+                );
               } else {
                 anonymousToolCalls += 1;
               }
@@ -181,11 +184,21 @@ async function startChatMode(agent: any, workspaceRoot?: string) {
                   ? value.payload.toolCallId
                   : undefined;
               if (toolCallId) {
-                pendingToolCallIds.delete(toolCallId);
+                const pendingCount = pendingToolCallIds.get(toolCallId) || 0;
+                if (pendingCount > 1) {
+                  pendingToolCallIds.set(toolCallId, pendingCount - 1);
+                } else if (pendingCount === 1) {
+                  pendingToolCallIds.delete(toolCallId);
+                }
               } else if (anonymousToolCalls > 0) {
                 anonymousToolCalls -= 1;
               }
-              if (pendingToolCallIds.size + anonymousToolCalls === 0) {
+              const pendingToolCount =
+                [...pendingToolCallIds.values()].reduce(
+                  (total, count) => total + count,
+                  0,
+                ) + anonymousToolCalls;
+              if (pendingToolCount === 0) {
                 stopSpinner();
                 stopSpinner = startCliSpinner("Thinking...");
               }
