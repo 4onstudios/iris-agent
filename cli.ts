@@ -186,6 +186,8 @@ async function startChatMode(agent: any, workspaceRoot?: string) {
           throw new Error("Agent does not support streaming or text generation");
         }
       } catch (error) {
+        stopSpinner();
+        stopSpinner = () => {};
         console.error("❌ Error:", error);
       } finally {
         stopSpinner();
