@@ -42,7 +42,11 @@ const updatedFormula = formula
     /url "https:\/\/registry\.npmjs\.org\/@4onstudios\/iris-agent\/-\/iris-agent-[^"]+\.tgz"/,
     `url "${tarballUrl}"`,
   )
-  .replace(/sha256 "[a-f0-9]+"/, `sha256 "${sha256}"`);
+  .replace(/sha256 "[a-f0-9]+"/, `sha256 "${sha256}"`)
+  .replace(
+    'system "npm", "install", *std_npm_args, url',
+    'system "npm", "install", *std_npm_args',
+  );
 
 if (updatedFormula === formula) {
   console.log(`Homebrew formula already points to ${version}.`);

@@ -10,7 +10,7 @@ class IrisAgent < Formula
   def install
     ENV["PATH"] = "#{formula_opt_bin("node@22")}:#{ENV["PATH"]}"
 
-    system "npm", "install", *std_npm_args, url
+    system "npm", "install", *std_npm_args
     bin.install_symlink libexec/"bin/iris-agent"
     bin.install_symlink libexec/"bin/iris-agent-install-browser"
   end
