@@ -12,6 +12,11 @@ import { hideBin } from "yargs/helpers";
 import { createCodingAgent } from "./api/core/agent/index.js";
 import { startAcpServer } from "./api/acp/acpServer.js";
 import { getMissingProviderSetup } from "./api/acp/providerSetup.js";
+import { resolveToolExecutionStatus } from "./api/core/agent/utils/toolLifecycle.js";
+import {
+  isCliSpinnerEnabled,
+  startCliSpinner,
+} from "./api/core/library/cliSpinner.js";
 
 const defaultModelId =
   process.env.MODEL_ID ||
@@ -122,9 +127,8 @@ async function startChatMode(agent: any, workspaceRoot?: string) {
         break;
       }
 
+      let stopSpinner = (): void => {};
       try {
-        console.log("🤔 Processing...\n");
-
         const options: Record<string, unknown> = {
           threadId,
           resourceId,
@@ -132,9 +136,13 @@ async function startChatMode(agent: any, workspaceRoot?: string) {
           workspaceRoot,
         };
 
+        stopSpinner = startCliSpinner("Thinking...");
+
         if (typeof agent.stream === "function") {
           const streamResult = await agent.stream(trimmedInput, options);
           const reader = streamResult.fullStream.getReader();
+          const pendingToolCallIds = new Map<string, number>();
+          let anonymousToolCalls = 0;
           let hasOutput = false;
 
           while (true) {
@@ -144,20 +152,83 @@ async function startChatMode(agent: any, workspaceRoot?: string) {
             if (value?.type === "text-delta" || value?.type === "reasoning-delta") {
               const text = String(value.payload?.text || "");
               if (text) {
+                stopSpinner();
+                stopSpinner = () => {};
                 process.stdout.write(text);
                 hasOutput = true;
               }
             } else if (value?.type === "tool-call") {
+              stopSpinner();
+              process.stdout.write("\n");
               const toolName =
                 typeof value.payload?.toolName === "string"
                   ? value.payload.toolName
                   : "tool";
-              process.stdout.write(`\n⚙️  [Calling tool: ${toolName}]... `);
+              const toolCallId =
+                typeof value.payload?.toolCallId === "string"
+                  ? value.payload.toolCallId
+                  : undefined;
+              if (toolCallId) {
+                pendingToolCallIds.set(
+                  toolCallId,
+                  (pendingToolCallIds.get(toolCallId) || 0) + 1,
+                );
+              } else {
+                anonymousToolCalls += 1;
+              }
+              process.stdout.write(`⚙️  [Calling tool: ${toolName}]...\n`);
+              stopSpinner = startCliSpinner(
+                pendingToolCallIds.size + anonymousToolCalls > 1
+                  ? "Running tools..."
+                  : `Running ${toolName}...`,
+              );
             } else if (value?.type === "tool-result") {
-              process.stdout.write(`done.\n`);
+              const toolCallId =
+                typeof value.payload?.toolCallId === "string"
+                  ? value.payload.toolCallId
+                  : undefined;
+              const toolResultPayload =
+                value.payload?.result ??
+                value.payload?.output ??
+                value.payload?.content ??
+                value.payload?.data;
+              const executionStatus = resolveToolExecutionStatus(
+                toolResultPayload,
+              );
+              const isSettled =
+                executionStatus !== "pending" &&
+                executionStatus !== "in_progress";
+
+              if (isSettled) {
+                if (toolCallId) {
+                  const pendingCount = pendingToolCallIds.get(toolCallId) || 0;
+                  if (pendingCount > 1) {
+                    pendingToolCallIds.set(toolCallId, pendingCount - 1);
+                  } else if (pendingCount === 1) {
+                    pendingToolCallIds.delete(toolCallId);
+                  }
+                } else if (anonymousToolCalls > 0) {
+                  anonymousToolCalls -= 1;
+                }
+                if (!isCliSpinnerEnabled()) {
+                  // Preserve a completion marker for redirected/CI output
+                  // where the animated spinner itself never renders anything.
+                  process.stdout.write("done.\n");
+                }
+              }
+              const pendingToolCount =
+                [...pendingToolCallIds.values()].reduce(
+                  (total, count) => total + count,
+                  0,
+                ) + anonymousToolCalls;
+              if (pendingToolCount === 0) {
+                stopSpinner();
+                stopSpinner = startCliSpinner("Thinking...");
+              }
             }
           }
 
+          stopSpinner();
           if (!hasOutput && streamResult.text) {
             const final = await streamResult.text;
             if (final) {
@@ -167,6 +238,7 @@ async function startChatMode(agent: any, workspaceRoot?: string) {
           console.log();
         } else if (typeof agent.generate === "function") {
           const result = await agent.generate(trimmedInput, options);
+          stopSpinner();
           const text =
             typeof result === "string"
               ? result
@@ -176,7 +248,11 @@ async function startChatMode(agent: any, workspaceRoot?: string) {
           throw new Error("Agent does not support streaming or text generation");
         }
       } catch (error) {
+        stopSpinner();
+        stopSpinner = () => {};
         console.error("❌ Error:", error);
+      } finally {
+        stopSpinner();
       }
     }
   } finally {
