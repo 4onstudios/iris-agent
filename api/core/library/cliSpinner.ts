@@ -2,6 +2,11 @@ import cliSpinners from "cli-spinners";
 
 const DEFAULT_TERMINAL_WIDTH = 80;
 
+// Shared gate so callers can decide whether to print a static fallback
+// message when the animated spinner itself is a no-op (redirected/CI output).
+export const isCliSpinnerEnabled = (): boolean =>
+  Boolean(process.stdout.isTTY) && !process.env.CI;
+
 const truncateLabel = (label: string): string => {
   const terminalWidth =
     typeof process.stdout.columns === "number" && process.stdout.columns > 0
@@ -21,7 +26,7 @@ const truncateLabel = (label: string): string => {
 };
 
 export const startCliSpinner = (label: string): (() => void) => {
-  if (!process.stdout.isTTY || process.env.CI) {
+  if (!isCliSpinnerEnabled()) {
     return () => {};
   }
 

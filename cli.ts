@@ -12,7 +12,10 @@ import { hideBin } from "yargs/helpers";
 import { createCodingAgent } from "./api/core/agent/index.js";
 import { startAcpServer } from "./api/acp/acpServer.js";
 import { getMissingProviderSetup } from "./api/acp/providerSetup.js";
-import { startCliSpinner } from "./api/core/library/cliSpinner.js";
+import {
+  isCliSpinnerEnabled,
+  startCliSpinner,
+} from "./api/core/library/cliSpinner.js";
 
 const defaultModelId =
   process.env.MODEL_ID ||
@@ -146,10 +149,10 @@ async function startChatMode(agent: any, workspaceRoot?: string) {
             if (done) break;
 
             if (value?.type === "text-delta" || value?.type === "reasoning-delta") {
-              stopSpinner();
-              stopSpinner = () => {};
               const text = String(value.payload?.text || "");
               if (text) {
+                stopSpinner();
+                stopSpinner = () => {};
                 process.stdout.write(text);
                 hasOutput = true;
               }
@@ -192,6 +195,11 @@ async function startChatMode(agent: any, workspaceRoot?: string) {
                 }
               } else if (anonymousToolCalls > 0) {
                 anonymousToolCalls -= 1;
+              }
+              if (!isCliSpinnerEnabled()) {
+                // Preserve a completion marker for redirected/CI output where
+                // the animated spinner itself never renders anything.
+                process.stdout.write("done.\n");
               }
               const pendingToolCount =
                 [...pendingToolCallIds.values()].reduce(

@@ -1,4 +1,7 @@
-import { startCliSpinner } from "../api/core/library/cliSpinner";
+import {
+  isCliSpinnerEnabled,
+  startCliSpinner,
+} from "../api/core/library/cliSpinner";
 
 const originalIsTTYDescriptor = Object.getOwnPropertyDescriptor(
   process.stdout,
@@ -97,5 +100,47 @@ describe("startCliSpinner", () => {
 
     expect(write.mock.calls[0][0].slice(1)).toHaveLength(20);
     stop();
+  });
+});
+
+describe("isCliSpinnerEnabled", () => {
+  beforeEach(() => {
+    Object.defineProperty(process.stdout, "isTTY", {
+      configurable: true,
+      value: true,
+    });
+    delete process.env.CI;
+  });
+
+  afterEach(() => {
+    if (originalIsTTYDescriptor) {
+      Object.defineProperty(process.stdout, "isTTY", originalIsTTYDescriptor);
+    } else {
+      delete (process.stdout as { isTTY?: boolean }).isTTY;
+    }
+    if (originalCI === undefined) {
+      delete process.env.CI;
+    } else {
+      process.env.CI = originalCI;
+    }
+  });
+
+  it("is true for an interactive terminal outside CI", () => {
+    expect(isCliSpinnerEnabled()).toBe(true);
+  });
+
+  it("is false when stdout is not a TTY", () => {
+    Object.defineProperty(process.stdout, "isTTY", {
+      configurable: true,
+      value: false,
+    });
+
+    expect(isCliSpinnerEnabled()).toBe(false);
+  });
+
+  it("is false when CI is set", () => {
+    process.env.CI = "true";
+
+    expect(isCliSpinnerEnabled()).toBe(false);
   });
 });
