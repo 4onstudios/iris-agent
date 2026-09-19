@@ -12,6 +12,7 @@ import { hideBin } from "yargs/helpers";
 import { createCodingAgent } from "./api/core/agent/index.js";
 import { startAcpServer } from "./api/acp/acpServer.js";
 import { getMissingProviderSetup } from "./api/acp/providerSetup.js";
+import { resolveToolExecutionStatus } from "./api/core/agent/utils/toolLifecycle.js";
 import {
   isCliSpinnerEnabled,
   startCliSpinner,
@@ -186,20 +187,29 @@ async function startChatMode(agent: any, workspaceRoot?: string) {
                 typeof value.payload?.toolCallId === "string"
                   ? value.payload.toolCallId
                   : undefined;
-              if (toolCallId) {
-                const pendingCount = pendingToolCallIds.get(toolCallId) || 0;
-                if (pendingCount > 1) {
-                  pendingToolCallIds.set(toolCallId, pendingCount - 1);
-                } else if (pendingCount === 1) {
-                  pendingToolCallIds.delete(toolCallId);
+              const executionStatus = resolveToolExecutionStatus(
+                value.payload?.result,
+              );
+              const isSettled =
+                executionStatus !== "pending" &&
+                executionStatus !== "in_progress";
+
+              if (isSettled) {
+                if (toolCallId) {
+                  const pendingCount = pendingToolCallIds.get(toolCallId) || 0;
+                  if (pendingCount > 1) {
+                    pendingToolCallIds.set(toolCallId, pendingCount - 1);
+                  } else if (pendingCount === 1) {
+                    pendingToolCallIds.delete(toolCallId);
+                  }
+                } else if (anonymousToolCalls > 0) {
+                  anonymousToolCalls -= 1;
                 }
-              } else if (anonymousToolCalls > 0) {
-                anonymousToolCalls -= 1;
-              }
-              if (!isCliSpinnerEnabled()) {
-                // Preserve a completion marker for redirected/CI output where
-                // the animated spinner itself never renders anything.
-                process.stdout.write("done.\n");
+                if (!isCliSpinnerEnabled()) {
+                  // Preserve a completion marker for redirected/CI output
+                  // where the animated spinner itself never renders anything.
+                  process.stdout.write("done.\n");
+                }
               }
               const pendingToolCount =
                 [...pendingToolCallIds.values()].reduce(
