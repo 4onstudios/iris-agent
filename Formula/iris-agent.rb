@@ -12,7 +12,6 @@ class IrisAgent < Formula
 
     system "npm", "install", *std_npm_args
     bin.install_symlink libexec/"bin/iris-agent"
-    bin.install_symlink libexec/"bin/iris-agent-install-browser"
   end
 
   test do
