@@ -12,6 +12,7 @@ import { hideBin } from "yargs/helpers";
 import { createCodingAgent } from "./api/core/agent/index.js";
 import { startAcpServer } from "./api/acp/acpServer.js";
 import { getMissingProviderSetup } from "./api/acp/providerSetup.js";
+import { startCliSpinner } from "./api/core/library/cliSpinner.js";
 
 const defaultModelId =
   process.env.MODEL_ID ||
@@ -122,9 +123,8 @@ async function startChatMode(agent: any, workspaceRoot?: string) {
         break;
       }
 
+      let stopSpinner = (): void => {};
       try {
-        console.log("🤔 Processing...\n");
-
         const options: Record<string, unknown> = {
           threadId,
           resourceId,
@@ -132,8 +132,12 @@ async function startChatMode(agent: any, workspaceRoot?: string) {
           workspaceRoot,
         };
 
+        stopSpinner = startCliSpinner("Thinking...");
+
         if (typeof agent.stream === "function") {
           const streamResult = await agent.stream(trimmedInput, options);
+          stopSpinner();
+          stopSpinner = () => {};
           const reader = streamResult.fullStream.getReader();
           let hasOutput = false;
 
@@ -142,22 +146,29 @@ async function startChatMode(agent: any, workspaceRoot?: string) {
             if (done) break;
 
             if (value?.type === "text-delta" || value?.type === "reasoning-delta") {
+              stopSpinner();
+              stopSpinner = () => {};
               const text = String(value.payload?.text || "");
               if (text) {
                 process.stdout.write(text);
                 hasOutput = true;
               }
             } else if (value?.type === "tool-call") {
+              stopSpinner();
+              process.stdout.write("\n");
               const toolName =
                 typeof value.payload?.toolName === "string"
                   ? value.payload.toolName
                   : "tool";
-              process.stdout.write(`\n⚙️  [Calling tool: ${toolName}]... `);
+              process.stdout.write(`⚙️  [Calling tool: ${toolName}]...\n`);
+              stopSpinner = startCliSpinner(`Running ${toolName}...`);
             } else if (value?.type === "tool-result") {
-              process.stdout.write(`done.\n`);
+              stopSpinner();
+              stopSpinner = startCliSpinner("Thinking...");
             }
           }
 
+          stopSpinner();
           if (!hasOutput && streamResult.text) {
             const final = await streamResult.text;
             if (final) {
@@ -167,6 +178,7 @@ async function startChatMode(agent: any, workspaceRoot?: string) {
           console.log();
         } else if (typeof agent.generate === "function") {
           const result = await agent.generate(trimmedInput, options);
+          stopSpinner();
           const text =
             typeof result === "string"
               ? result
@@ -177,6 +189,8 @@ async function startChatMode(agent: any, workspaceRoot?: string) {
         }
       } catch (error) {
         console.error("❌ Error:", error);
+      } finally {
+        stopSpinner();
       }
     }
   } finally {

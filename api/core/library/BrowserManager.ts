@@ -10,6 +10,7 @@ import {
 } from "@puppeteer/browsers";
 import type { Browser, Page, PuppeteerNode } from "puppeteer-core";
 import { PUPPETEER_REVISIONS } from "puppeteer-core/internal/revisions.js";
+import { startCliSpinner } from "./cliSpinner";
 
 const BROWSER_EXECUTABLE_ENV_KEYS = [
   "PUPPETEER_EXECUTABLE_PATH",
@@ -175,22 +176,28 @@ class BrowserManager {
   }
 
   async init(): Promise<void> {
-    // Running in headless mode so no visible browser window is opened.
-    // --no-sandbox / --disable-setuid-sandbox disable a major Chromium security
-    // boundary and should only be used in constrained environments (e.g. CI/Docker)
-    // where the OS sandbox is unavailable. Set BROWSER_NO_SANDBOX=true to opt in.
-    const { default: puppeteer } = await import("puppeteer-core");
+    const stopSpinner = startCliSpinner("Launching browser...");
 
-    const noSandboxArgs =
-      process.env.BROWSER_NO_SANDBOX === "true"
-        ? ["--no-sandbox", "--disable-setuid-sandbox"]
-        : [];
+    try {
+      // Running in headless mode so no visible browser window is opened.
+      // --no-sandbox / --disable-setuid-sandbox disable a major Chromium security
+      // boundary and should only be used in constrained environments (e.g. CI/Docker)
+      // where the OS sandbox is unavailable. Set BROWSER_NO_SANDBOX=true to opt in.
+      const { default: puppeteer } = await import("puppeteer-core");
 
-    this.browser = await puppeteer.launch({
-      headless: true,
-      executablePath: await resolveBrowserExecutablePath(puppeteer),
-      args: noSandboxArgs,
-    });
+      const noSandboxArgs =
+        process.env.BROWSER_NO_SANDBOX === "true"
+          ? ["--no-sandbox", "--disable-setuid-sandbox"]
+          : [];
+
+      this.browser = await puppeteer.launch({
+        headless: true,
+        executablePath: await resolveBrowserExecutablePath(puppeteer),
+        args: noSandboxArgs,
+      });
+    } finally {
+      stopSpinner();
+    }
   }
 
   async newPage(): Promise<Page> {
