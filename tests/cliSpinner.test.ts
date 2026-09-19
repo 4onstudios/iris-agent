@@ -2,6 +2,7 @@ import { startCliSpinner } from "../api/core/library/cliSpinner";
 
 const originalIsTTY = process.stdout.isTTY;
 const originalCI = process.env.CI;
+const originalColumns = process.stdout.columns;
 
 describe("startCliSpinner", () => {
   const write = jest
@@ -14,6 +15,10 @@ describe("startCliSpinner", () => {
       configurable: true,
       value: true,
     });
+    Object.defineProperty(process.stdout, "columns", {
+      configurable: true,
+      value: 80,
+    });
     delete process.env.CI;
     write.mockClear();
   });
@@ -23,6 +28,10 @@ describe("startCliSpinner", () => {
     Object.defineProperty(process.stdout, "isTTY", {
       configurable: true,
       value: originalIsTTY,
+    });
+    Object.defineProperty(process.stdout, "columns", {
+      configurable: true,
+      value: originalColumns,
     });
     if (originalCI === undefined) {
       delete process.env.CI;
@@ -68,5 +77,17 @@ describe("startCliSpinner", () => {
     expect(write).toHaveBeenLastCalledWith("\r\x1b[2K");
     jest.advanceTimersByTime(80);
     expect(write).toHaveBeenCalledTimes(3);
+  });
+
+  it("truncates labels to the terminal width", () => {
+    Object.defineProperty(process.stdout, "columns", {
+      configurable: true,
+      value: 20,
+    });
+
+    const stop = startCliSpinner("Running a very long MCP tool name...");
+
+    expect(write.mock.calls[0][0].slice(1)).toHaveLength(20);
+    stop();
   });
 });

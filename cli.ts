@@ -137,6 +137,8 @@ async function startChatMode(agent: any, workspaceRoot?: string) {
         if (typeof agent.stream === "function") {
           const streamResult = await agent.stream(trimmedInput, options);
           const reader = streamResult.fullStream.getReader();
+          const pendingToolCallIds = new Set<string>();
+          let anonymousToolCalls = 0;
           let hasOutput = false;
 
           while (true) {
@@ -158,11 +160,35 @@ async function startChatMode(agent: any, workspaceRoot?: string) {
                 typeof value.payload?.toolName === "string"
                   ? value.payload.toolName
                   : "tool";
+              const toolCallId =
+                typeof value.payload?.toolCallId === "string"
+                  ? value.payload.toolCallId
+                  : undefined;
+              if (toolCallId) {
+                pendingToolCallIds.add(toolCallId);
+              } else {
+                anonymousToolCalls += 1;
+              }
               process.stdout.write(`⚙️  [Calling tool: ${toolName}]...\n`);
-              stopSpinner = startCliSpinner(`Running ${toolName}...`);
+              stopSpinner = startCliSpinner(
+                pendingToolCallIds.size + anonymousToolCalls > 1
+                  ? "Running tools..."
+                  : `Running ${toolName}...`,
+              );
             } else if (value?.type === "tool-result") {
-              stopSpinner();
-              stopSpinner = startCliSpinner("Thinking...");
+              const toolCallId =
+                typeof value.payload?.toolCallId === "string"
+                  ? value.payload.toolCallId
+                  : undefined;
+              if (toolCallId) {
+                pendingToolCallIds.delete(toolCallId);
+              } else if (anonymousToolCalls > 0) {
+                anonymousToolCalls -= 1;
+              }
+              if (pendingToolCallIds.size + anonymousToolCalls === 0) {
+                stopSpinner();
+                stopSpinner = startCliSpinner("Thinking...");
+              }
             }
           }
 
