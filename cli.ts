@@ -4,7 +4,7 @@
  * iris-agent CLI with ACP (Agent Client Protocol) support
  * Usage:
  *   iris-agent --acp
- *   iris-agent --workspace /path/to/workspace --modelId openrouter/openai/gpt-4o --chat
+ *   iris-agent --workspace /path/to/workspace --modelId openrouter/openai/gpt-5.3-codex --chat
  */
 
 import yargs from "yargs";
@@ -21,7 +21,7 @@ import {
 const defaultModelId =
   process.env.MODEL_ID ||
   process.env.OPENROUTER_MODEL ||
-  "openrouter/openai/gpt-4o";
+  "openrouter/openai/gpt-5.3-codex";
 
 const argv = yargs(hideBin(process.argv))
   .option("workspace", {
