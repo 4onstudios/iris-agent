@@ -250,8 +250,31 @@ async function startChatMode(agent: any, workspaceRoot?: string, modelId?: strin
     output: process.stdout,
   });
 
+  // Track whether the underlying input stream has ended (e.g. Ctrl+D, piped
+  // input reaching EOF, or the terminal disconnecting) so we never call
+  // `rl.question()` again once readline is closed — doing so throws a
+  // synchronous `ERR_USE_AFTER_CLOSE` ("readline was closed") that would
+  // otherwise crash the process as an uncaught error.
+  let rlClosed = false;
+  rl.on("close", () => {
+    rlClosed = true;
+  });
+
   const question = (prompt: string) =>
-    new Promise<string>((resolve) => rl.question(prompt, resolve));
+    new Promise<string | null>((resolve) => {
+      if (rlClosed) {
+        resolve(null);
+        return;
+      }
+      try {
+        rl.question(prompt, resolve);
+      } catch {
+        // Defensive: guards against a race where `rlClosed` hasn't been set
+        // yet but the interface was closed between the check above and the
+        // call to `rl.question()`.
+        resolve(null);
+      }
+    });
 
   const threadId = `cli-chat-${Date.now()}`;
   const resourceId = `cli-session`;
@@ -259,6 +282,12 @@ async function startChatMode(agent: any, workspaceRoot?: string, modelId?: strin
   try {
     while (true) {
       const input = await question("\n> ");
+
+      if (input === null) {
+        console.log("\n👋 Goodbye!");
+        break;
+      }
+
       const trimmedInput = input.trim();
 
       if (!trimmedInput) {
@@ -409,11 +438,19 @@ async function startChatMode(agent: any, workspaceRoot?: string, modelId?: strin
   }
 }
 
-main().catch((error) => {
-  console.error(`❌ Fatal error: ${formatCliError(error)}`);
-  const hint = getCliErrorHint(error);
-  if (hint) {
-    console.error(hint);
-  }
-  process.exit(1);
-});
+main()
+  .then(() => {
+    // Force-exit once the CLI's own work is done. Mastra's Memory (LibSQL
+    // store/vector) and provider HTTP clients can leave open handles behind
+    // after a conversation, which would otherwise keep the event loop alive
+    // indefinitely and make "exit" appear to hang.
+    process.exit(0);
+  })
+  .catch((error) => {
+    console.error(`❌ Fatal error: ${formatCliError(error)}`);
+    const hint = getCliErrorHint(error);
+    if (hint) {
+      console.error(hint);
+    }
+    process.exit(1);
+  });
