@@ -134,32 +134,42 @@ const getRequiredProvider = (
 export const getMissingProviderSetup = (
   modelId: string,
   environment: Environment = process.env,
+  mode: "acp" | "chat" = "acp",
 ): string | undefined => {
   const requiredProvider = getRequiredProvider(modelId, environment);
   if (!requiredProvider) return undefined;
 
   const { credential, description, modelExample } = requiredProvider;
-  return [
+  const modeFlag = mode === "chat" ? "--chat" : "--acp";
+  const lines = [
     `Iris Agent cannot start model '${modelId}' because ${credential} is not configured.`,
     "",
     `Provide ${description} before starting the agent:`,
-    `  ${credential}=<your-api-key> npx @4onstudios/iris-agent@latest --acp --modelId ${modelId}`,
+    `  ${credential}=<your-api-key> npx @4onstudios/iris-agent@latest ${modeFlag} --modelId ${modelId}`,
     "",
-    "For VS Code ACP Client, add the key to the agent's environment in settings.json:",
-    JSON.stringify(
-      {
-        "acp.agents": {
-          "Iris Agent": {
-            command: "npx",
-            args: ["@4onstudios/iris-agent@latest", "--acp", "--modelId", modelId],
-            env: { [credential]: "<your-api-key>" },
+  ];
+
+  if (mode === "acp") {
+    lines.push(
+      "For VS Code ACP Client, add the key to the agent's environment in settings.json:",
+      JSON.stringify(
+        {
+          "acp.agents": {
+            "Iris Agent": {
+              command: "npx",
+              args: ["@4onstudios/iris-agent@latest", "--acp", "--modelId", modelId],
+              env: { [credential]: "<your-api-key>" },
+            },
           },
         },
-      },
-      null,
-      2,
-    ),
-    "",
+        null,
+        2,
+      ),
+      "",
+    );
+  }
+
+  lines.push(
     "Supported provider options:",
     "  OpenRouter: OPENROUTER_API_KEY with --modelId openrouter/openai/gpt-4o",
     "  OpenAI: OPENAI_API_KEY with --modelId openai/gpt-4o",
@@ -168,5 +178,7 @@ export const getMissingProviderSetup = (
     "  Hugging Face: HF_TOKEN with --modelId huggingface/Qwen/Qwen2.5-Coder-32B-Instruct",
     "  Local Ollama: no cloud key; use --modelId ollama/<model> (optionally set OLLAMA_BASE_URL).",
     `Example selected-model identifier: ${modelExample}`,
-  ].join("\n");
+  );
+
+  return lines.join("\n");
 };
