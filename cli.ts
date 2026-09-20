@@ -4,14 +4,14 @@
  * iris-agent CLI with ACP (Agent Client Protocol) support
  * Usage:
  *   iris-agent --acp
- *   iris-agent --workspace /path/to/workspace --modelId openrouter/openai/gpt-4o --chat
+ *   iris-agent --workspace /path/to/workspace --modelId openrouter/openai/gpt-5.3-codex --chat
  */
 
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import { createCodingAgent } from "./api/core/agent/index.js";
 import { startAcpServer } from "./api/acp/acpServer.js";
-import { getMissingProviderSetup } from "./api/acp/providerSetup.js";
+import { getMissingProviderSetup } from "./api/core/library/providerSetup.js";
 import { resolveToolExecutionStatus } from "./api/core/agent/utils/toolLifecycle.js";
 import {
   isCliSpinnerEnabled,
@@ -21,7 +21,7 @@ import {
 const defaultModelId =
   process.env.MODEL_ID ||
   process.env.OPENROUTER_MODEL ||
-  "openrouter/openai/gpt-4o";
+  "openrouter/openai/gpt-5.3-codex";
 
 const argv = yargs(hideBin(process.argv))
   .option("workspace", {
@@ -90,9 +90,15 @@ async function main() {
     );
   } else if (argv.chat) {
     // Interactive chat mode
+    const missingProviderSetup = getMissingProviderSetup(modelId, process.env, "chat");
+    if (missingProviderSetup) {
+      console.error(missingProviderSetup);
+      process.exitCode = 1;
+      return;
+    }
     const agent = await createCodingAgent(modelId, workspaceRoot);
     console.log(`💬 Entering chat mode (type "exit" to quit)`);
-    await startChatMode(agent, workspaceRoot);
+    await startChatMode(agent, workspaceRoot, modelId);
   } else {
     // Default: show help
     yargs(hideBin(process.argv))
@@ -100,15 +106,175 @@ async function main() {
   }
 }
 
-async function startChatMode(agent: any, workspaceRoot?: string) {
+/**
+ * Extract a short, human-readable message from an error thrown by the agent
+ * (including AI SDK `APICallError` instances from provider calls), instead of
+ * dumping the full error object with headers, request/response bodies, and
+ * stack traces to the terminal.
+ */
+function formatCliError(error: unknown): string {
+  if (!error || typeof error !== "object") {
+    return String(error);
+  }
+
+  const err = error as Record<string, unknown>;
+  const parts: string[] = [];
+
+  const baseMessage = typeof err.message === "string" ? err.message.trim() : "";
+  if (baseMessage) {
+    parts.push(baseMessage);
+  }
+
+  // AI SDK `APICallError` (and similar) expose statusCode/url/responseBody.
+  // Surface a compact "(HTTP <code> from <url>)" suffix when available.
+  const statusCode = typeof err.statusCode === "number" ? err.statusCode : undefined;
+  const url = typeof err.url === "string" ? err.url : undefined;
+  if (statusCode || url) {
+    const location = [
+      statusCode ? `HTTP ${statusCode}` : undefined,
+      url ? `from ${url}` : undefined,
+    ]
+      .filter(Boolean)
+      .join(" ");
+    if (location) {
+      parts.push(`(${location})`);
+    }
+  }
+
+  // Try to pull a more specific message out of the provider's response body,
+  // which is often more actionable than the generic AI SDK message.
+  const providerMessage = extractProviderErrorMessage(err);
+  if (providerMessage && providerMessage !== baseMessage) {
+    parts.push(`- ${providerMessage}`);
+  }
+
+  if (parts.length === 0) {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  const cause = (err as { cause?: unknown }).cause;
+  const causeMessage =
+    cause && cause !== error ? formatCliError(cause) : undefined;
+
+  return causeMessage && !parts.join(" ").includes(causeMessage)
+    ? `${parts.join(" ")} (caused by: ${causeMessage})`
+    : parts.join(" ");
+}
+
+function extractProviderErrorMessage(
+  err: Record<string, unknown>,
+): string | undefined {
+  const data = err.data as { error?: { message?: unknown } } | undefined;
+  if (typeof data?.error?.message === "string") {
+    return data.error.message;
+  }
+
+  const responseBody = err.responseBody;
+  if (typeof responseBody === "string") {
+    try {
+      const parsed = JSON.parse(responseBody) as {
+        error?: { message?: unknown };
+      };
+      if (typeof parsed?.error?.message === "string") {
+        return parsed.error.message;
+      }
+    } catch {
+      // responseBody wasn't JSON; ignore.
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Produce an actionable one-line hint for common, recognizable failure
+ * modes (bad model ID, missing/invalid API key, rate limiting, network
+ * issues) so users aren't left staring at a raw provider error message.
+ */
+function getCliErrorHint(error: unknown, modelId?: string): string | undefined {
+  if (!error || typeof error !== "object") {
+    return undefined;
+  }
+
+  const err = error as Record<string, unknown>;
+  const statusCode = typeof err.statusCode === "number" ? err.statusCode : undefined;
+  const message = (
+    (typeof err.message === "string" ? err.message : "") +
+    " " +
+    (extractProviderErrorMessage(err) || "")
+  ).toLowerCase();
+  const code = typeof err.code === "string" ? err.code : undefined;
+
+  const modelHint = modelId ? ` (currently "${modelId}")` : "";
+
+  if (
+    statusCode === 404 &&
+    (message.includes("no endpoints found") || message.includes("not found"))
+  ) {
+    return `💡 The model ID${modelHint} doesn't exist or isn't available from the provider. Double-check the spelling/provider prefix (e.g. "openrouter/anthropic/claude-sonnet-4.5") and pass a valid one via --modelId.`;
+  }
+
+  if (statusCode === 401 || message.includes("unauthorized") || message.includes("invalid api key")) {
+    return "💡 Authentication failed. Check that the API key for this provider is set (e.g. OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY) and hasn't expired.";
+  }
+
+  if (statusCode === 403) {
+    return "💡 The request was forbidden. Your API key may lack access to this model or your account may need billing/credits set up.";
+  }
+
+  if (statusCode === 429 || message.includes("rate limit")) {
+    return "💡 You've hit a rate limit or quota. Wait a moment and try again, or check your provider's usage/billing dashboard.";
+  }
+
+  if (statusCode && statusCode >= 500) {
+    return "💡 The model provider is having issues on its end. Try again shortly, or switch to a different model/provider with --modelId.";
+  }
+
+  if (
+    code === "ENOTFOUND" ||
+    code === "ECONNREFUSED" ||
+    code === "ETIMEDOUT" ||
+    message.includes("fetch failed") ||
+    message.includes("network")
+  ) {
+    return "💡 Couldn't reach the model provider. Check your internet connection (and any proxy/firewall settings) and try again.";
+  }
+
+  return undefined;
+}
+
+async function startChatMode(agent: any, workspaceRoot?: string, modelId?: string) {
   const readline = await import("readline");
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
   });
 
+  // Track whether the underlying input stream has ended (e.g. Ctrl+D, piped
+  // input reaching EOF, or the terminal disconnecting) so we never call
+  // `rl.question()` again once readline is closed — doing so throws a
+  // synchronous `ERR_USE_AFTER_CLOSE` ("readline was closed") that would
+  // otherwise crash the process as an uncaught error.
+  let rlClosed = false;
+  rl.on("close", () => {
+    rlClosed = true;
+  });
+
   const question = (prompt: string) =>
-    new Promise<string>((resolve) => rl.question(prompt, resolve));
+    new Promise<string | null>((resolve) => {
+      if (rlClosed) {
+        resolve(null);
+        return;
+      }
+      try {
+        rl.question(prompt, resolve);
+      } catch {
+        // Defensive: guards against a race where `rlClosed` hasn't been set
+        // yet but the interface was closed between the check above and the
+        // call to `rl.question()`.
+        resolve(null);
+      }
+    });
 
   const threadId = `cli-chat-${Date.now()}`;
   const resourceId = `cli-session`;
@@ -116,6 +282,12 @@ async function startChatMode(agent: any, workspaceRoot?: string) {
   try {
     while (true) {
       const input = await question("\n> ");
+
+      if (input === null) {
+        console.log("\n👋 Goodbye!");
+        break;
+      }
+
       const trimmedInput = input.trim();
 
       if (!trimmedInput) {
@@ -130,8 +302,10 @@ async function startChatMode(agent: any, workspaceRoot?: string) {
       let stopSpinner = (): void => {};
       try {
         const options: Record<string, unknown> = {
-          threadId,
-          resourceId,
+          // Use the preferred nested `memory` scope (flat threadId/resourceId
+          // is deprecated) so conversation history is reliably threaded
+          // across turns within this chat session.
+          memory: { thread: threadId, resource: resourceId },
           maxSteps: 50,
           workspaceRoot,
         };
@@ -250,7 +424,11 @@ async function startChatMode(agent: any, workspaceRoot?: string) {
       } catch (error) {
         stopSpinner();
         stopSpinner = () => {};
-        console.error("❌ Error:", error);
+        console.error(`❌ Error: ${formatCliError(error)}`);
+        const hint = getCliErrorHint(error, modelId);
+        if (hint) {
+          console.error(hint);
+        }
       } finally {
         stopSpinner();
       }
@@ -260,7 +438,57 @@ async function startChatMode(agent: any, workspaceRoot?: string) {
   }
 }
 
-main().catch((error) => {
-  console.error("❌ Fatal error:", error);
-  process.exit(1);
-});
+/**
+ * Force-exit the process with the given code once pending stdout/stderr
+ * writes have been flushed. This is needed because Mastra's Memory (LibSQL
+ * store/vector) and provider HTTP clients can leave open handles behind
+ * after a conversation, which would otherwise keep the event loop alive
+ * indefinitely and make the CLI appear to hang after finishing its work.
+ *
+ * `process.exit()` on its own can truncate output when stdout/stderr are
+ * piped or redirected, since writes to those streams are asynchronous in
+ * that case. Writing an empty chunk and waiting for its callback ensures any
+ * previously queued writes have actually been flushed before we exit.
+ */
+function exitAfterFlush(code: number): void {
+  process.exitCode = code;
+
+  let pending = 0;
+  let settled = false;
+  const finish = () => {
+    pending -= 1;
+    if (pending <= 0 && !settled) {
+      settled = true;
+      process.exit(code);
+    }
+  };
+
+  for (const stream of [process.stdout, process.stderr]) {
+    pending += 1;
+    stream.write("", finish);
+  }
+
+  // Safety net in case a stream's callback never fires (e.g. it's already
+  // closed) so the CLI doesn't hang waiting to exit.
+  setTimeout(() => {
+    if (!settled) {
+      settled = true;
+      process.exit(code);
+    }
+  }, 1000).unref();
+}
+
+main()
+  .then(() => {
+    // Preserve any non-zero exit code `main()` already set (e.g. for
+    // missing provider setup) instead of always forcing a success exit.
+    exitAfterFlush(process.exitCode ? Number(process.exitCode) : 0);
+  })
+  .catch((error) => {
+    console.error(`❌ Fatal error: ${formatCliError(error)}`);
+    const hint = getCliErrorHint(error);
+    if (hint) {
+      console.error(hint);
+    }
+    exitAfterFlush(1);
+  });

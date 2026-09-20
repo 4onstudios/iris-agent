@@ -32,7 +32,7 @@ a browser renderer.
 
 ## Quick Start
 
-This project can be installed and run with either npm or Yarn. Configure your provider API key (such as `OPENROUTER_API_KEY` or `OPENAI_API_KEY`). By default, Iris Agent routes through OpenRouter (`openrouter/openai/gpt-4o`) when `OPENROUTER_API_KEY` is provided or configured.
+This project can be installed and run with either npm or Yarn. Configure your provider API key (such as `OPENROUTER_API_KEY` or `OPENAI_API_KEY`). By default, Iris Agent routes through OpenRouter (`openrouter/openai/gpt-5.3-codex`) when `OPENROUTER_API_KEY` is provided or configured.
 
 ```sh
 # npm
@@ -120,7 +120,7 @@ without relying on the live stream.
 ### CLI Mode
 
 ```sh
-# Interactive chat with default model (openrouter/openai/gpt-4o)
+# Interactive chat with default model (openrouter/openai/gpt-5.3-codex)
 OPENROUTER_API_KEY=... npm run cli -- --workspace /path/to/project --chat
 
 # Interactive chat with a specific model
@@ -220,7 +220,7 @@ the repository's **Actions** tab. It requires a repository secret named
 - `--workspace` (`-w`) - Path to the workspace/project root; defaults to the current working directory
 - `--acp` (`-a`) - Start ACP protocol server (stdio-based)
 - `--chat` (`-c`) - Start interactive chat mode
-- `--modelId` - Model identifier used for chat/ACP sessions (default: `openrouter/openai/gpt-4o` or `MODEL_ID` / `OPENROUTER_MODEL` env vars)
+- `--modelId` - Model identifier used for chat/ACP sessions (default: `openrouter/openai/gpt-5.3-codex` or `MODEL_ID` / `OPENROUTER_MODEL` env vars)
 
 Running the CLI without `--chat` or `--acp` prints help.
 

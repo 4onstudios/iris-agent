@@ -1,6 +1,6 @@
-import { getMissingProviderSetup } from "../api/acp/providerSetup";
+import { getMissingProviderSetup } from "../api/core/library/providerSetup";
 
-describe("ACP provider setup", () => {
+describe("provider setup", () => {
   it("reports how to configure the selected OpenRouter model", () => {
     expect(
       getMissingProviderSetup("openrouter/openai/gpt-4o", {}),
