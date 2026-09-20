@@ -438,13 +438,51 @@ async function startChatMode(agent: any, workspaceRoot?: string, modelId?: strin
   }
 }
 
+/**
+ * Force-exit the process with the given code once pending stdout/stderr
+ * writes have been flushed. This is needed because Mastra's Memory (LibSQL
+ * store/vector) and provider HTTP clients can leave open handles behind
+ * after a conversation, which would otherwise keep the event loop alive
+ * indefinitely and make the CLI appear to hang after finishing its work.
+ *
+ * `process.exit()` on its own can truncate output when stdout/stderr are
+ * piped or redirected, since writes to those streams are asynchronous in
+ * that case. Writing an empty chunk and waiting for its callback ensures any
+ * previously queued writes have actually been flushed before we exit.
+ */
+function exitAfterFlush(code: number): void {
+  process.exitCode = code;
+
+  let pending = 0;
+  let settled = false;
+  const finish = () => {
+    pending -= 1;
+    if (pending <= 0 && !settled) {
+      settled = true;
+      process.exit(code);
+    }
+  };
+
+  for (const stream of [process.stdout, process.stderr]) {
+    pending += 1;
+    stream.write("", finish);
+  }
+
+  // Safety net in case a stream's callback never fires (e.g. it's already
+  // closed) so the CLI doesn't hang waiting to exit.
+  setTimeout(() => {
+    if (!settled) {
+      settled = true;
+      process.exit(code);
+    }
+  }, 1000).unref();
+}
+
 main()
   .then(() => {
-    // Force-exit once the CLI's own work is done. Mastra's Memory (LibSQL
-    // store/vector) and provider HTTP clients can leave open handles behind
-    // after a conversation, which would otherwise keep the event loop alive
-    // indefinitely and make "exit" appear to hang.
-    process.exit(0);
+    // Preserve any non-zero exit code `main()` already set (e.g. for
+    // missing provider setup) instead of always forcing a success exit.
+    exitAfterFlush(process.exitCode ? Number(process.exitCode) : 0);
   })
   .catch((error) => {
     console.error(`❌ Fatal error: ${formatCliError(error)}`);
@@ -452,5 +490,5 @@ main()
     if (hint) {
       console.error(hint);
     }
-    process.exit(1);
+    exitAfterFlush(1);
   });
