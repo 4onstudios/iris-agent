@@ -15,6 +15,7 @@ describe("renderCliMarkdown", () => {
     expect(output).toContain("second");
     expect(output).not.toContain("**Ready**");
     expect(output).not.toContain("- first");
+    expect(output).not.toMatch(/<(?:h1|p|ul|li)>/);
   });
 
   it("renders fenced code blocks without Markdown fences", () => {
@@ -24,6 +25,8 @@ describe("renderCliMarkdown", () => {
 
     expect(output).toContain("const answer = 42;");
     expect(output).not.toContain("```");
+    expect(output).not.toContain("<pre>");
+    expect(output).not.toContain("<code");
   });
 
   it("renders inline formatting nested inside list items", () => {

@@ -328,8 +328,6 @@ async function startChatMode(agent: any, workspaceRoot?: string, modelId?: strin
             if (value?.type === "text-delta") {
               const text = String(value.payload?.text || "");
               if (text) {
-                stopSpinner();
-                stopSpinner = () => {};
                 markdownOutput += text;
                 hasOutput = true;
               }
