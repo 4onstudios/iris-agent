@@ -165,6 +165,7 @@ type AgentChatRequestBody = {
   useMastraObservationalMemory?: boolean;
   observationalMemorySettings?: ObservationalMemorySettingsPayload;
   streamErrorRetry?: StreamErrorRetryRequest;
+  readPdfPassword?: string;
 };
 
 type CommandConfirmationRequestBody = {
@@ -3070,6 +3071,10 @@ _You have discovered the following in earlier interactions. Use this to avoid re
         isWebWorkspace,
         gitDetected,
         modelId,
+        readPdfPassword:
+          typeof req.body.readPdfPassword === "string"
+            ? req.body.readPdfPassword
+            : undefined,
         contextFilesMeta: safeFilesInContext.map((file) => ({
           name: typeof file?.name === "string" ? file.name : undefined,
           path: typeof file?.path === "string" ? file.path : undefined,
