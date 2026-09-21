@@ -1,7 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { createHash } from "node:crypto";
-import { createRequire } from "node:module";
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import type {
   PDFDocumentLoadingTask,
@@ -10,9 +9,17 @@ import type {
   TextItem,
 } from "pdfjs-dist/types/src/display/api.js";
 
-const require = createRequire(import.meta.url);
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
 const PARSE_TIMEOUT_MS = 30_000;
+const PASSWORD_CONTINUATION_TTL_MS = 10 * 60_000;
+const PDFJS_MODULE = "pdfjs-dist/legacy/build/pdf.mjs";
+const passwordContinuations = new Map<string, { password: string; expiresAt: number }>();
+
+// Babel-Jest rewrites import() to require(), but PDF.js only publishes this ESM entrypoint.
+const loadPdfJs = () =>
+  Function("modulePath", "return import(modulePath)")(PDFJS_MODULE) as Promise<
+    typeof import("pdfjs-dist/legacy/build/pdf.mjs")
+  >;
 
 /** Matches the Zod-based parameters/execute convention in the supplied tools. */
 export const readPdfParameters = z.object({
@@ -31,6 +38,8 @@ export const readPdfParameters = z.object({
   caseSensitive: z.boolean().default(false).describe("Whether literal search is case-sensitive"),
   maxMatches: z.number().int().min(1).max(100).default(20).describe("Maximum search matches returned per call"),
   password: z.string().optional().describe("Password for an encrypted PDF; never echoed in results"),
+  continuationToken: z.string().uuid().optional()
+    .describe("Opaque server-side token that preserves an encrypted PDF password for nextRequest"),
   expectedSha256: z.string().regex(/^[a-f0-9]{64}$/).optional()
     .describe("Copy from nextRequest to reject continuation if the file has changed"),
 });
@@ -90,6 +99,23 @@ class PdfToolError extends Error {
   constructor(public readonly code: ReadPdfErrorCode, message: string) {
     super(message);
   }
+}
+
+function getContinuationPassword(token: string | undefined): string | undefined {
+  const now = Date.now();
+  for (const [key, continuation] of passwordContinuations) {
+    if (continuation.expiresAt <= now) passwordContinuations.delete(key);
+  }
+  return token ? passwordContinuations.get(token)?.password : undefined;
+}
+
+function createPasswordContinuation(password: string): string {
+  const token = randomUUID();
+  passwordContinuations.set(token, {
+    password,
+    expiresAt: Date.now() + PASSWORD_CONTINUATION_TTL_MS,
+  });
+  return token;
 }
 
 /** Preserve PDF.js content order and line endings, with conservative gap spacing. */
@@ -218,11 +244,15 @@ export async function readPdf(params: ReadPdfParams, context: ReadPdfContext = {
     if (!parsed.success) throw new PdfToolError("INVALID_INPUT", parsed.error.issues
       .map(issue => `${issue.path.join(".") || "input"}: ${issue.message}`).join("; "));
     const input = parsed.data;
-    passwordProvided = input.password !== undefined;
+    const password = input.password ?? getContinuationPassword(input.continuationToken);
+    passwordProvided = password !== undefined;
     if (/^(?:https?|file|data):/i.test(input.filePath)) throw new PdfToolError("INVALID_INPUT", "filePath must be a local filesystem path, not a URL.");
     if (input.action === "search" && !input.query) throw new PdfToolError("INVALID_INPUT", "query is required for search.");
     if (input.action !== "search" && input.query !== undefined) throw new PdfToolError("INVALID_INPUT", "Set action to search when providing query.");
     if (input.endPage !== undefined && input.endPage < input.startPage) throw new PdfToolError("INVALID_INPUT", "endPage must be greater than or equal to startPage.");
+    if (input.action === "search" && input.query.length > input.maxChars) {
+      throw new PdfToolError("INVALID_INPUT", "maxChars must be at least the search query length.");
+    }
 
     const absolutePath = path.resolve(input.cwd ?? process.cwd(), input.filePath);
     const stats = await fs.stat(absolutePath);
@@ -234,19 +264,14 @@ export async function readPdf(params: ReadPdfParams, context: ReadPdfContext = {
     const sha256 = createHash("sha256").update(data).digest("hex");
     if (input.expectedSha256 && input.expectedSha256 !== sha256) throw new PdfToolError("DOCUMENT_CHANGED", "PDF changed since the previous call. Restart reading without the old continuation.");
 
-    const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const pdfjs = await loadPdfJs();
     signal.throwIfAborted();
-    const assetRoot = path.dirname(require.resolve("pdfjs-dist/package.json"));
     loadingTask = pdfjs.getDocument({
       data: new Uint8Array(data),
-      password: input.password,
+      password,
       isEvalSupported: false,
       disableFontFace: true,
       useWorkerFetch: false,
-      cMapUrl: path.join(assetRoot, "cmaps") + path.sep,
-      cMapPacked: true,
-      standardFontDataUrl: path.join(assetRoot, "standard_fonts") + path.sep,
-      wasmUrl: path.join(assetRoot, "wasm") + path.sep,
       stopAtErrors: true,
       verbosity: 0,
     });
@@ -265,9 +290,13 @@ export async function readPdf(params: ReadPdfParams, context: ReadPdfContext = {
     const pagesWithoutText: number[] = [];
     let remaining = input.maxChars;
     let nextRequest: PdfContinuation | null = null;
+    const continuationToken = input.password
+      ? createPasswordContinuation(input.password)
+      : input.continuationToken;
     const continuation = (startPage: number, startOffset = 0): PdfContinuation => ({
       filePath: absolutePath, action: input.action, startPage, endPage, startOffset,
       maxPages: input.maxPages, maxChars: input.maxChars, expectedSha256: sha256,
+      ...(continuationToken ? { continuationToken } : {}),
       ...(input.action === "search" ? { query: input.query, caseSensitive: input.caseSensitive, maxMatches: input.maxMatches } : {}),
     });
     // Escaping makes query a literal phrase; it cannot inject a costly regular expression.

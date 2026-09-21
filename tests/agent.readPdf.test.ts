@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { PDFDocument, PDFName, PDFString, StandardFonts } from "pdf-lib";
 import readPdfTool, {
   readPdf,
   type ReadPdfParams,
   type ReadPdfResult,
-} from "../api/core/agent/tools/readPdf.js";
+} from "../api/core/agent/tools/readPdf";
+
+jest.setTimeout(30_000);
 
 let directory: string;
 let filePath: string;
@@ -17,7 +17,7 @@ function success(result: ReadPdfResult): asserts result is Extract<ReadPdfResult
   assert.equal(result.success, true, JSON.stringify(result));
 }
 
-before(async () => {
+beforeAll(async () => {
   directory = await fs.mkdtemp(path.join(process.cwd(), "pdf-test-"));
   filePath = path.join(directory, "sample report.pdf");
   const doc = await PDFDocument.create();
@@ -51,7 +51,7 @@ before(async () => {
   await fs.writeFile(filePath, await doc.save());
 });
 
-after(async () => { await fs.rm(directory, { recursive: true, force: true }); });
+afterAll(async () => { await fs.rm(directory, { recursive: true, force: true }); });
 
 test("matches the provided tool interface and reads real PDF page text", async () => {
   assert.equal(readPdfTool.execute, readPdf);
@@ -169,6 +169,7 @@ test("validates direct calls and reports missing, non-PDF, directory and range e
     [{ filePath: invalid }, "INVALID_PDF"],
     [{ filePath, endPage: 5 }, "PAGE_OUT_OF_RANGE"],
     [{ filePath, startOffset: 100_000 }, "OFFSET_OUT_OF_RANGE"],
+    [{ filePath, action: "search", query: "x".repeat(101), maxChars: 100 }, "INVALID_INPUT"],
   ];
   for (const [input, code] of cases) {
     const result = await readPdf(input);
@@ -209,7 +210,7 @@ test("rejects stale continuation after file contents change", async () => {
   assert.equal(resumed.code, "DOCUMENT_CHANGED");
 });
 
-test("supports agent cancellation and does not echo passwords in continuations", async () => {
+test("supports agent cancellation and preserves passwords through opaque continuations", async () => {
   const controller = new AbortController();
   controller.abort();
   const cancelled = await readPdf({ filePath }, { abortSignal: controller.signal });
@@ -219,10 +220,16 @@ test("supports agent cancellation and does not echo passwords in continuations",
   const result = await readPdf({ filePath, password: "private-secret", maxChars: 100 });
   success(result);
   assert.equal(JSON.stringify(result).includes("private-secret"), false);
+  if (result.action !== "read") assert.fail("expected read");
+  assert.ok(result.nextRequest);
+  assert.ok(result.nextRequest.continuationToken);
+  const resumed = await readPdf(result.nextRequest);
+  success(resumed);
+  assert.equal(JSON.stringify(resumed).includes("private-secret"), false);
 });
 
 test("encrypted PDFs require the right password and recover after failed attempts", async () => {
-  const encrypted = fileURLToPath(new URL("./fixtures/encrypted.pdf", import.meta.url));
+  const encrypted = path.join(process.cwd(), "tests", "fixtures", "encrypted.pdf");
   const missing = await readPdf({ filePath: encrypted });
   assert.equal(missing.success, false);
   if (missing.success) assert.fail("expected password error");
