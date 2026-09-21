@@ -335,7 +335,9 @@ generated as `mcp_<server name>_<tool name>` and must start with `mcp_`.
 #### Server configuration
 
 Each server config has an `id`, `name`, `enabled` flag, and either a local
-`command` or a remote `url` (exactly one connection mode is required):
+`command` or a remote `url` (exactly one connection mode is required). If
+both are supplied, `url` takes precedence and `command` is dropped during
+sanitization to avoid an ambiguous configuration.
 
 | Field | Type | Applies to | Description |
 | --- | --- | --- | --- |
@@ -378,6 +380,11 @@ Streamable HTTP):
 
 Only use remote URLs and credentials from trusted configuration. Remote MCP
 servers can execute actions and return untrusted content on the agent's behalf.
+Prefer the `headers` field for auth tokens over embedding them in the URL's
+query string or userinfo — Iris redacts query strings, userinfo, and
+fragments from URLs shown in model-facing tool descriptions, generated docs,
+and warning logs, but the raw `url` (including any embedded credentials) is
+still used for the actual connection and returned as-is by `/mcp/inspect`.
 
 #### Discovering tools: `POST /api/agent/mcp/inspect`
 

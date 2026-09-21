@@ -9,7 +9,7 @@ import {
   type StdioServerParameters,
 } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { McpServerConfig } from "../../library/mcpSettings";
+import { redactMcpUrlForDisplay, type McpServerConfig } from "../../library/mcpSettings";
 
 const MCP_TIMEOUT_MS = 20000;
 
@@ -533,7 +533,7 @@ export const generateMcpToolsDocs = async (
     sections.push(`## ${server.name}`);
     sections.push(
       server.url
-        ? `- **URL**: \`${server.url}\``
+        ? `- **URL**: \`${redactMcpUrlForDisplay(server.url)}\``
         : `- **Command**: \`${server.command || ""}\``,
     );
     sections.push(`- **Tools**: ${tools.length}`);
@@ -583,7 +583,7 @@ export const buildMcpTools = async (
     } catch (error) {
       const err = error as Error;
       console.warn(
-        `[mcp] Failed to list tools for ${server.name} (${server.url || server.command || "unknown"}): ${err.message}`,
+        `[mcp] Failed to list tools for ${server.name} (${server.url ? redactMcpUrlForDisplay(server.url) : server.command || "unknown"}): ${err.message}`,
       );
       continue;
     }
@@ -614,7 +614,7 @@ export const buildMcpTools = async (
       registered[key] = createTool({
         id: key,
         description:
-          `MCP tool from server '${server.name}' (${server.url || server.command || "unknown"}) named '${tool.name}'. ` +
+          `MCP tool from server '${server.name}' (${server.url ? redactMcpUrlForDisplay(server.url) : server.command || "unknown"}) named '${tool.name}'. ` +
           `Pass the tool arguments directly as fields in the input object and match the declared schema exactly.` +
           `\n\nDeclared input schema:\n${schemaPreview}`,
         inputSchema: toolInputSchema,

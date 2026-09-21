@@ -102,6 +102,34 @@ const sanitizeUrl = (value: unknown): string | undefined => {
   }
 };
 
+/**
+ * Produces a credential-safe version of a remote MCP server URL for use in
+ * model-facing tool descriptions, generated docs, and logs. Strips any
+ * userinfo (`user:pass@`) and query string/fragment, since those commonly
+ * carry API keys or tokens (e.g. `?api_key=...`, `?access_token=...`). The
+ * raw `server.url` (with headers/query intact) must still be used for the
+ * actual transport connection - only use this for anything surfaced outside
+ * the server-side process.
+ */
+export const redactMcpUrlForDisplay = (url: string): string => {
+  try {
+    const parsed = new URL(url);
+    const hadSensitiveParts =
+      parsed.username.length > 0 ||
+      parsed.password.length > 0 ||
+      parsed.search.length > 0 ||
+      parsed.hash.length > 0;
+    parsed.username = "";
+    parsed.password = "";
+    parsed.search = "";
+    parsed.hash = "";
+    const base = parsed.toString();
+    return hadSensitiveParts ? `${base} (redacted)` : base;
+  } catch {
+    return url;
+  }
+};
+
 const getDefaultId = (index: number): string => `mcp-${Date.now()}-${index}`;
 
 const normalizeMcpServerDraft = (
@@ -112,8 +140,12 @@ const normalizeMcpServerDraft = (
 
   const raw = input as Record<string, unknown>;
   const id = safeString(raw.id, 120) || getDefaultId(index);
-  const command = safeString(raw.command, MAX_COMMAND_LENGTH);
   const url = sanitizeUrl(raw.url);
+  // A server config connects via exactly one transport. When both a command
+  // and a URL are supplied, `connectClient` silently prefers the URL, so
+  // drop the stale/ambiguous `command` here rather than keep it around
+  // unused and unvalidated.
+  const command = url ? "" : safeString(raw.command, MAX_COMMAND_LENGTH);
   const name = safeString(raw.name, MAX_NAME_LENGTH) || command || url || "New MCP Server";
 
   return {
@@ -146,8 +178,10 @@ export const sanitizeMcpServer = (input: unknown, index = 0): McpServerConfig | 
   if (!input || typeof input !== "object" || Array.isArray(input)) return null;
 
   const raw = input as Record<string, unknown>;
-  const command = safeString(raw.command, MAX_COMMAND_LENGTH);
   const url = sanitizeUrl(raw.url);
+  // See normalizeMcpServerDraft: exactly one transport is allowed, so a
+  // supplied URL always wins over a stale/ambiguous command.
+  const command = url ? "" : safeString(raw.command, MAX_COMMAND_LENGTH);
   if (!command && !url) return null;
 
   const id = safeString(raw.id, 120) || getDefaultId(index);

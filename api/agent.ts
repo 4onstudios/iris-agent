@@ -13,6 +13,7 @@ import {
 import {
   sanitizeMcpServers,
   toStableMcpFingerprint,
+  redactMcpUrlForDisplay,
   type McpServerConfig,
 } from "./core/library/mcpSettings";
 import {
@@ -1430,22 +1431,24 @@ const formatMcpContext = (summaries: McpDiscoverySummary[]): string => {
   const lines = ["", "**MCP SERVER STATUS:**"];
 
   for (const summary of summaries) {
+    const target = summary.command || (summary.url ? redactMcpUrlForDisplay(summary.url) : "unknown");
+
     if (summary.error) {
       lines.push(
-        `- **${summary.name}** (${summary.command}): unavailable - ${summary.error}`,
+        `- **${summary.name}** (${target}): unavailable - ${summary.error}`,
       );
       continue;
     }
 
     if (summary.toolNames.length === 0) {
       lines.push(
-        `- **${summary.name}** (${summary.command}): connected but exposed no tools`,
+        `- **${summary.name}** (${target}): connected but exposed no tools`,
       );
       continue;
     }
 
     lines.push(
-      `- **${summary.name}** (${summary.command}): ${summary.toolNames.length} tool(s) available - ${summary.toolNames.join(", ")}`,
+      `- **${summary.name}** (${target}): ${summary.toolNames.length} tool(s) available - ${summary.toolNames.join(", ")}`,
     );
   }
 
