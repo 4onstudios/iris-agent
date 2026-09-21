@@ -5943,7 +5943,10 @@ router.post(
           id: server.id,
           name: server.name,
           command: server.command,
-          url: server.url,
+          // Redact userinfo/query/fragment before returning to the caller -
+          // this response can be logged, and the raw url may embed
+          // credentials (e.g. `?api_key=...`).
+          url: server.url ? redactMcpUrlForDisplay(server.url) : server.url,
         },
         tools: tools.map((tool) => ({
           name: tool.name,

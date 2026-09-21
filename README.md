@@ -386,8 +386,8 @@ servers can execute actions and return untrusted content on the agent's behalf.
 Prefer the `headers` field for auth tokens over embedding them in the URL's
 query string or userinfo — Iris redacts query strings, userinfo, and
 fragments from URLs shown in model-facing tool descriptions, generated docs,
-and warning logs, but the raw `url` (including any embedded credentials) is
-still used for the actual connection and returned as-is by `/mcp/inspect`.
+warning logs, and the `/mcp/inspect` response; the raw `url` (including any
+embedded credentials) is only ever used for the actual transport connection.
 
 #### Discovering tools: `POST /api/agent/mcp/inspect`
 
@@ -410,6 +410,11 @@ Response body:
   "toolCount": 1
 }
 ```
+
+`server.url` in the response is redacted (userinfo, query string, and
+fragment stripped) even though the real, unredacted `url` was used to
+connect - the same redaction applied everywhere else a remote URL is
+surfaced (see above).
 
 On failure (e.g. connection or auth error), the response is
 `{ "success": false, "error": "..." }` with a `500` status.
