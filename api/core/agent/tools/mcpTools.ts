@@ -8,7 +8,8 @@ import {
   StdioClientTransport,
   type StdioServerParameters,
 } from "@modelcontextprotocol/sdk/client/stdio.js";
-import type { McpServerConfig } from "../../library/mcpSettings";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { redactMcpUrlForDisplay, type McpServerConfig } from "../../library/mcpSettings";
 
 const MCP_TIMEOUT_MS = 20000;
 
@@ -202,7 +203,7 @@ const createTransportParams = (
   env.PATH = buildAugmentedPath();
 
   return {
-    command: server.command.trim(),
+    command: server.command!.trim(),
     args: [...server.args],
     env,
     cwd: workspacePath,
@@ -210,10 +211,48 @@ const createTransportParams = (
   };
 };
 
+type McpTransport = StdioClientTransport | StreamableHTTPClientTransport;
+
+const createRemoteTransport = (server: McpServerConfig): McpTransport => {
+  if (!server.url) {
+    throw new Error(`MCP server '${server.name}' has no remote URL`);
+  }
+
+  const url = new URL(server.url);
+  const requestInit: RequestInit = {
+    headers: server.headers,
+  };
+
+  return new StreamableHTTPClientTransport(url, { requestInit });
+};
+
+const connectRemoteClient = async (
+  server: McpServerConfig,
+): Promise<{ client: Client; transport: McpTransport }> => {
+  const client = new Client({ name: "iris-mcp", version: "1.0.0" });
+  const transport = createRemoteTransport(server);
+
+  try {
+    await client.connect(transport, { timeout: MCP_TIMEOUT_MS });
+    return { client, transport };
+  } catch (error) {
+    await closeTransport(transport);
+    throw error;
+  }
+};
+
 const connectClient = async (
   server: McpServerConfig,
   workspacePath: string,
-): Promise<{ client: Client; transport: StdioClientTransport }> => {
+): Promise<{ client: Client; transport: McpTransport }> => {
+  if (server.url) {
+    return connectRemoteClient(server);
+  }
+
+  if (!server.command?.trim()) {
+    throw new Error(`MCP server '${server.name}' must define either command or url`);
+  }
+
   const command = server.command.trim();
   const args = [...server.args];
   const commandCandidates = getCommandCandidates(command);
@@ -288,7 +327,7 @@ const connectClient = async (
   throw new Error("Failed to start MCP client transport");
 };
 
-const closeTransport = async (transport?: StdioClientTransport) => {
+const closeTransport = async (transport?: McpTransport) => {
   if (!transport) return;
   try {
     await transport.close();
@@ -301,7 +340,7 @@ export const listMcpServerTools = async (
   server: McpServerConfig,
   workspacePath: string,
 ): Promise<McpToolDefinition[]> => {
-  let transport: StdioClientTransport | undefined;
+  let transport: McpTransport | undefined;
 
   try {
     const { client, transport: activeTransport } = await connectClient(
@@ -327,7 +366,7 @@ const callServerTool = async (
   toolName: string,
   input: Record<string, unknown>,
 ) => {
-  let transport: StdioClientTransport | undefined;
+  let transport: McpTransport | undefined;
 
   try {
     const { client, transport: activeTransport } = await connectClient(
@@ -492,7 +531,11 @@ export const generateMcpToolsDocs = async (
     hasAnyTools = true;
 
     sections.push(`## ${server.name}`);
-    sections.push(`- **Command**: \`${server.command}\``);
+    sections.push(
+      server.url
+        ? `- **URL**: \`${redactMcpUrlForDisplay(server.url)}\``
+        : `- **Command**: \`${server.command || ""}\``,
+    );
     sections.push(`- **Tools**: ${tools.length}`);
     sections.push(`- **Status**: ✅ Connected`);
     sections.push("");
@@ -540,7 +583,7 @@ export const buildMcpTools = async (
     } catch (error) {
       const err = error as Error;
       console.warn(
-        `[mcp] Failed to list tools for ${server.name} (${server.command}): ${err.message}`,
+        `[mcp] Failed to list tools for ${server.name} (${server.url ? redactMcpUrlForDisplay(server.url) : server.command || "unknown"}): ${err.message}`,
       );
       continue;
     }
@@ -571,7 +614,7 @@ export const buildMcpTools = async (
       registered[key] = createTool({
         id: key,
         description:
-          `MCP tool from server '${server.name}' (${server.command}) named '${tool.name}'. ` +
+          `MCP tool from server '${server.name}' (${server.url ? redactMcpUrlForDisplay(server.url) : server.command || "unknown"}) named '${tool.name}'. ` +
           `Pass the tool arguments directly as fields in the input object and match the declared schema exactly.` +
           `\n\nDeclared input schema:\n${schemaPreview}`,
         inputSchema: toolInputSchema,

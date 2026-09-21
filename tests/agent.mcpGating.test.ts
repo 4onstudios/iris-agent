@@ -417,4 +417,36 @@ describe("MCP chat gating", () => {
       await stopServer(server);
     }
   });
+
+  it("redacts credentials from the URL returned by /mcp/inspect for remote servers", async () => {
+    process.env.TAURI_BUNDLED = "1";
+    process.env.IRIS_DESKTOP_TOKEN = "desktop-secret";
+    mockListMcpServerTools.mockResolvedValue([
+      { name: "search", description: "Search the knowledge base" },
+    ]);
+    const { server, baseUrl } = await startServer();
+
+    try {
+      const response = await postJson(
+        baseUrl,
+        "/api/agent/mcp/inspect",
+        {
+          server: {
+            id: "remote-tools",
+            name: "Remote tools",
+            url: "https://example.com/mcp?api_key=super-secret",
+            enabled: true,
+          },
+        },
+        { "x-desktop-token": "desktop-secret" },
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.body.success).toBe(true);
+      expect(response.body.server.url).toBe("https://example.com/mcp (redacted)");
+      expect(response.body.server.url).not.toContain("super-secret");
+    } finally {
+      await stopServer(server);
+    }
+  });
 });

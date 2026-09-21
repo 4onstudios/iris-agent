@@ -326,9 +326,117 @@ managed through the desktop synchronization routes.
 
 ### MCP and approvals
 
-MCP servers are supplied in chat requests or MCP route payloads. Use
-`POST /api/agent/mcp/inspect` to discover tools before calling
-`POST /api/agent/mcp/call`. MCP tool names must start with `mcp_`.
+MCP servers are supplied in chat requests (`mcpServers` field) or MCP route
+payloads. Use `POST /api/agent/mcp/inspect` to discover tools before calling
+`POST /api/agent/mcp/call`. Both routes require desktop authentication (see
+[Desktop authentication](#desktop-authentication)). MCP tool names are
+generated as `mcp_<server name>_<tool name>` and must start with `mcp_`.
+
+#### Server configuration
+
+Each server config has an `id`, `name`, `enabled` flag, and either a local
+`command` or a remote `url` (exactly one connection mode is required). If
+both are supplied, `url` takes precedence and `command` is dropped during
+sanitization to avoid an ambiguous configuration. If `url` is present but
+malformed or unsupported (not `http`/`https`), the whole config is rejected
+rather than silently falling back to `command` - a saved remote server must
+never be resurrected as a local process launch.
+
+| Field | Type | Applies to | Description |
+| --- | --- | --- | --- |
+| `id` | `string` | both | Stable identifier for the server (auto-generated if omitted). |
+| `name` | `string` | both | Display name; also used to build tool keys (`mcp_<name>_<tool>`). If omitted for a remote server, defaults to the URL's hostname (not the full URL) to avoid leaking embedded credentials. |
+| `enabled` | `boolean` | both | Servers with `enabled: false` are skipped. |
+| `command` | `string` | local | Executable to spawn (e.g. `npx`, `uvx`, or an absolute path). |
+| `args` | `string[]` | local | Arguments passed to `command`. |
+| `env` | `object` | local | Extra environment variables merged into the spawned process's env. |
+| `url` | `string` | remote | HTTP(S) endpoint for a remote MCP server. |
+| `headers` | `object` | remote | Extra HTTP headers (e.g. `Authorization`) sent with every request. |
+
+Local stdio servers use `command`, `args`, and optional `env` fields:
+
+```json
+{
+  "id": "github-local",
+  "name": "GitHub",
+  "command": "npx",
+  "args": ["-y", "@modelcontextprotocol/server-github"],
+  "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "..." },
+  "enabled": true
+}
+```
+
+Remote MCP servers use an HTTP(S) `url` and may provide request headers for
+authentication. Iris connects using the MCP Streamable HTTP transport (the
+legacy SSE transport is not supported; the remote server must implement
+Streamable HTTP):
+
+```json
+{
+  "id": "remote-tools",
+  "name": "Remote tools",
+  "url": "https://example.com/mcp",
+  "headers": { "Authorization": "Bearer ..." },
+  "enabled": true
+}
+```
+
+Only use remote URLs and credentials from trusted configuration. Remote MCP
+servers can execute actions and return untrusted content on the agent's behalf.
+Prefer the `headers` field for auth tokens over embedding them in the URL's
+query string or userinfo — Iris redacts query strings, userinfo, and
+fragments from URLs shown in model-facing tool descriptions, generated docs,
+warning logs, and the `/mcp/inspect` response; the raw `url` (including any
+embedded credentials) is only ever used for the actual transport connection.
+
+#### Discovering tools: `POST /api/agent/mcp/inspect`
+
+Connects to a single server, lists its tools, and closes the connection.
+Useful for validating a server config before enabling it for chat.
+
+Request body:
+
+```json
+{ "server": { "id": "remote-tools", "name": "Remote tools", "url": "https://example.com/mcp", "headers": {}, "enabled": true } }
+```
+
+Response body:
+
+```json
+{
+  "success": true,
+  "server": { "id": "remote-tools", "name": "Remote tools", "command": "", "url": "https://example.com/mcp" },
+  "tools": [{ "name": "search", "description": "Search the knowledge base" }],
+  "toolCount": 1
+}
+```
+
+`server.url` in the response is redacted (userinfo, query string, and
+fragment stripped) even though the real, unredacted `url` was used to
+connect - the same redaction applied everywhere else a remote URL is
+surfaced (see above).
+
+On failure (e.g. connection or auth error), the response is
+`{ "success": false, "error": "..." }` with a `500` status.
+
+#### Invoking a tool: `POST /api/agent/mcp/call`
+
+Request body:
+
+```json
+{
+  "toolName": "mcp_Remote_tools_search",
+  "args": { "query": "..." },
+  "workspaceRoot": "/path/to/workspace",
+  "mcpServers": [{ "id": "remote-tools", "name": "Remote tools", "url": "https://example.com/mcp", "headers": {}, "enabled": true }]
+}
+```
+
+`toolName` must match the `mcp_<server name>_<tool name>` format and the
+server that owns the tool must be present in `mcpServers`. The response
+mirrors the MCP SDK's `callTool` result (`success`, `server`, `tool`,
+`isError`, `content`, `structuredContent`, and `error` when applicable).
+
 Commands that require approval pause until the client submits
 `POST /api/agent/command-confirmation` with a `confirmationId` and boolean
 `approved` value.

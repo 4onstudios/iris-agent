@@ -8,13 +8,18 @@ const MAX_ARGS = 40;
 const MAX_ENV_VARS = 60;
 const MAX_ENV_KEY_LENGTH = 120;
 const MAX_ENV_VALUE_LENGTH = 2000;
+const MAX_URL_LENGTH = 2000;
+const MAX_HEADERS = 60;
+const MAX_HEADER_LENGTH = 2000;
 
 export type McpServerConfig = {
   id: string;
   name: string;
-  command: string;
+  command?: string;
   args: string[];
   env: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
   enabled: boolean;
 };
 
@@ -70,6 +75,76 @@ const sanitizeEnv = (env: unknown): Record<string, string> => {
   return Object.fromEntries(entries);
 };
 
+const sanitizeHeaders = (headers: unknown): Record<string, string> => {
+  if (!headers || typeof headers !== "object" || Array.isArray(headers)) return {};
+
+  return Object.fromEntries(
+    Object.entries(headers)
+      .map(([key, value]) => [
+        safeString(key, MAX_HEADER_LENGTH),
+        safeString(value, MAX_HEADER_LENGTH),
+      ] as const)
+      .filter(([key, value]) => key.length > 0 && value.length > 0)
+      .slice(0, MAX_HEADERS),
+  );
+};
+
+const sanitizeUrl = (value: unknown): string | undefined => {
+  const url = safeString(value, MAX_URL_LENGTH);
+  if (!url) return undefined;
+
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return undefined;
+    return parsed.toString();
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * Produces a credential-safe version of a remote MCP server URL for use in
+ * model-facing tool descriptions, generated docs, and logs. Strips any
+ * userinfo (`user:pass@`) and query string/fragment, since those commonly
+ * carry API keys or tokens (e.g. `?api_key=...`, `?access_token=...`). The
+ * raw `server.url` (with headers/query intact) must still be used for the
+ * actual transport connection - only use this for anything surfaced outside
+ * the server-side process.
+ */
+export const redactMcpUrlForDisplay = (url: string): string => {
+  try {
+    const parsed = new URL(url);
+    const hadSensitiveParts =
+      parsed.username.length > 0 ||
+      parsed.password.length > 0 ||
+      parsed.search.length > 0 ||
+      parsed.hash.length > 0;
+    parsed.username = "";
+    parsed.password = "";
+    parsed.search = "";
+    parsed.hash = "";
+    const base = parsed.toString();
+    return hadSensitiveParts ? `${base} (redacted)` : base;
+  } catch {
+    return url;
+  }
+};
+
+/**
+ * Derives a credential-free default display name for a remote server from
+ * its URL - just the hostname, e.g. "example.com". Used only when the user
+ * hasn't supplied a `name`; falling back to the full URL here would persist
+ * (and later surface in model-facing tool identifiers/descriptions) any
+ * credentials embedded in the URL's userinfo or query string.
+ */
+const hostnameFromUrl = (url: string): string => {
+  try {
+    return new URL(url).hostname || "MCP Server";
+  } catch {
+    return "MCP Server";
+  }
+};
+
 const getDefaultId = (index: number): string => `mcp-${Date.now()}-${index}`;
 
 const normalizeMcpServerDraft = (
@@ -80,8 +155,20 @@ const normalizeMcpServerDraft = (
 
   const raw = input as Record<string, unknown>;
   const id = safeString(raw.id, 120) || getDefaultId(index);
-  const command = safeString(raw.command, MAX_COMMAND_LENGTH);
-  const name = safeString(raw.name, MAX_NAME_LENGTH) || command || "New MCP Server";
+  const hasUrlInput = typeof raw.url === "string" && raw.url.trim().length > 0;
+  const url = sanitizeUrl(raw.url);
+  // A non-empty url that fails sanitization is a malformed/unsupported
+  // remote endpoint, not "no url" - reject the whole draft rather than
+  // silently falling back to a stale `command` and switching transport
+  // modes underneath the user (a saved remote config could otherwise turn
+  // into a local process launch).
+  if (hasUrlInput && !url) return null;
+  // A server config connects via exactly one transport. When both a command
+  // and a URL are supplied, `connectClient` silently prefers the URL, so
+  // drop the stale/ambiguous `command` here rather than keep it around
+  // unused and unvalidated.
+  const command = url ? "" : safeString(raw.command, MAX_COMMAND_LENGTH);
+  const name = safeString(raw.name, MAX_NAME_LENGTH) || command || (url ? hostnameFromUrl(url) : "") || "New MCP Server";
 
   return {
     id,
@@ -89,6 +176,10 @@ const normalizeMcpServerDraft = (
     command,
     args: sanitizeArgs(raw.args),
     env: sanitizeEnv(raw.env),
+    ...(url ? { url } : {}),
+    ...(Object.keys(sanitizeHeaders(raw.headers)).length > 0
+      ? { headers: sanitizeHeaders(raw.headers) }
+      : {}),
     enabled: raw.enabled !== false,
   };
 };
@@ -109,11 +200,19 @@ export const sanitizeMcpServer = (input: unknown, index = 0): McpServerConfig | 
   if (!input || typeof input !== "object" || Array.isArray(input)) return null;
 
   const raw = input as Record<string, unknown>;
-  const command = safeString(raw.command, MAX_COMMAND_LENGTH);
-  if (!command) return null;
+  const hasUrlInput = typeof raw.url === "string" && raw.url.trim().length > 0;
+  const url = sanitizeUrl(raw.url);
+  // A non-empty url that fails sanitization is malformed/unsupported, not
+  // "no url" - reject rather than silently falling back to a stale
+  // `command` and switching transport modes underneath the user.
+  if (hasUrlInput && !url) return null;
+  // See normalizeMcpServerDraft: exactly one transport is allowed, so a
+  // supplied URL always wins over a stale/ambiguous command.
+  const command = url ? "" : safeString(raw.command, MAX_COMMAND_LENGTH);
+  if (!command && !url) return null;
 
   const id = safeString(raw.id, 120) || getDefaultId(index);
-  const name = safeString(raw.name, MAX_NAME_LENGTH) || command;
+  const name = safeString(raw.name, MAX_NAME_LENGTH) || command || (url ? hostnameFromUrl(url) : "") || "MCP Server";
 
   return {
     id,
@@ -121,6 +220,10 @@ export const sanitizeMcpServer = (input: unknown, index = 0): McpServerConfig | 
     command,
     args: sanitizeArgs(raw.args),
     env: sanitizeEnv(raw.env),
+    ...(url ? { url } : {}),
+    ...(Object.keys(sanitizeHeaders(raw.headers)).length > 0
+      ? { headers: sanitizeHeaders(raw.headers) }
+      : {}),
     enabled: raw.enabled !== false,
   };
 };
@@ -145,6 +248,10 @@ export const toStableMcpFingerprint = (servers: McpServerConfig[]): string => {
       command: server.command,
       args: [...server.args],
       env: Object.fromEntries(Object.entries(server.env).sort(([a], [b]) => a.localeCompare(b))),
+      url: server.url,
+      headers: Object.fromEntries(
+        Object.entries(server.headers || {}).sort(([a], [b]) => a.localeCompare(b)),
+      ),
       enabled: server.enabled,
     }))
     .sort((a, b) => a.id.localeCompare(b.id));

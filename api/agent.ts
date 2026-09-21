@@ -13,6 +13,7 @@ import {
 import {
   sanitizeMcpServers,
   toStableMcpFingerprint,
+  redactMcpUrlForDisplay,
   type McpServerConfig,
 } from "./core/library/mcpSettings";
 import {
@@ -696,7 +697,8 @@ type GitSafetyMetadata = {
 
 type McpDiscoverySummary = {
   name: string;
-  command: string;
+  command?: string;
+  url?: string;
   toolNames: string[];
   error?: string;
 };
@@ -1405,6 +1407,7 @@ const inspectMcpServersForChat = async (
       summaries.push({
         name: server.name,
         command: server.command,
+        url: server.url,
         toolNames: tools.map((tool) => tool.name),
       });
     } catch (error) {
@@ -1412,6 +1415,7 @@ const inspectMcpServersForChat = async (
       summaries.push({
         name: server.name,
         command: server.command,
+        url: server.url,
         toolNames: [],
         error: err.message || "Failed to inspect MCP server",
       });
@@ -1427,22 +1431,24 @@ const formatMcpContext = (summaries: McpDiscoverySummary[]): string => {
   const lines = ["", "**MCP SERVER STATUS:**"];
 
   for (const summary of summaries) {
+    const target = summary.command || (summary.url ? redactMcpUrlForDisplay(summary.url) : "unknown");
+
     if (summary.error) {
       lines.push(
-        `- **${summary.name}** (${summary.command}): unavailable - ${summary.error}`,
+        `- **${summary.name}** (${target}): unavailable - ${summary.error}`,
       );
       continue;
     }
 
     if (summary.toolNames.length === 0) {
       lines.push(
-        `- **${summary.name}** (${summary.command}): connected but exposed no tools`,
+        `- **${summary.name}** (${target}): connected but exposed no tools`,
       );
       continue;
     }
 
     lines.push(
-      `- **${summary.name}** (${summary.command}): ${summary.toolNames.length} tool(s) available - ${summary.toolNames.join(", ")}`,
+      `- **${summary.name}** (${target}): ${summary.toolNames.length} tool(s) available - ${summary.toolNames.join(", ")}`,
     );
   }
 
@@ -5937,6 +5943,10 @@ router.post(
           id: server.id,
           name: server.name,
           command: server.command,
+          // Redact userinfo/query/fragment before returning to the caller -
+          // this response can be logged, and the raw url may embed
+          // credentials (e.g. `?api_key=...`).
+          url: server.url ? redactMcpUrlForDisplay(server.url) : server.url,
         },
         tools: tools.map((tool) => ({
           name: tool.name,
