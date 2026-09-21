@@ -17,6 +17,7 @@ import {
   isCliSpinnerEnabled,
   startCliSpinner,
 } from "./api/core/library/cliSpinner.js";
+import { renderCliMarkdown } from "./api/core/library/cliMarkdown.js";
 
 const defaultModelId =
   process.env.MODEL_ID ||
@@ -318,17 +319,18 @@ async function startChatMode(agent: any, workspaceRoot?: string, modelId?: strin
           const pendingToolCallIds = new Map<string, number>();
           let anonymousToolCalls = 0;
           let hasOutput = false;
+          let markdownOutput = "";
 
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
 
-            if (value?.type === "text-delta" || value?.type === "reasoning-delta") {
+            if (value?.type === "text-delta") {
               const text = String(value.payload?.text || "");
               if (text) {
                 stopSpinner();
                 stopSpinner = () => {};
-                process.stdout.write(text);
+                markdownOutput += text;
                 hasOutput = true;
               }
             } else if (value?.type === "tool-call") {
@@ -403,10 +405,12 @@ async function startChatMode(agent: any, workspaceRoot?: string, modelId?: strin
           }
 
           stopSpinner();
-          if (!hasOutput && streamResult.text) {
+          if (hasOutput) {
+            process.stdout.write(renderCliMarkdown(markdownOutput));
+          } else if (streamResult.text) {
             const final = await streamResult.text;
             if (final) {
-              console.log(final);
+              process.stdout.write(renderCliMarkdown(final));
             }
           }
           console.log();
@@ -417,7 +421,8 @@ async function startChatMode(agent: any, workspaceRoot?: string, modelId?: strin
             typeof result === "string"
               ? result
               : result?.text || JSON.stringify(result, null, 2);
-          console.log("\n✅ Agent Response:\n" + text);
+          console.log("\n✅ Agent Response:");
+          process.stdout.write(renderCliMarkdown(text));
         } else {
           throw new Error("Agent does not support streaming or text generation");
         }
