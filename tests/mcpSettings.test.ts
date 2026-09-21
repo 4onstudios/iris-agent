@@ -32,6 +32,28 @@ describe("MCP server settings", () => {
     expect(sanitizeMcpServer({ url: "not-a-url" })).toBeNull();
   });
 
+  it("rejects the whole config when a malformed URL is paired with a stale command, instead of falling back to local mode", () => {
+    // A config that was previously remote but now has a broken/unsupported
+    // url must not silently resurrect the leftover `command` and launch a
+    // local process - that would run untrusted/stale commands and switch
+    // transport modes without the user's knowledge.
+    expect(
+      sanitizeMcpServer({
+        id: "remote",
+        command: "node server.js",
+        url: "not-a-url",
+      }),
+    ).toBeNull();
+
+    expect(
+      sanitizeMcpServer({
+        id: "remote",
+        command: "node server.js",
+        url: "file:///tmp/server",
+      }),
+    ).toBeNull();
+  });
+
   it("includes remote connection details in the agent cache fingerprint", () => {
     const server = sanitizeMcpServer({
       id: "remote",

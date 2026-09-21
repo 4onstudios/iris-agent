@@ -337,7 +337,10 @@ generated as `mcp_<server name>_<tool name>` and must start with `mcp_`.
 Each server config has an `id`, `name`, `enabled` flag, and either a local
 `command` or a remote `url` (exactly one connection mode is required). If
 both are supplied, `url` takes precedence and `command` is dropped during
-sanitization to avoid an ambiguous configuration.
+sanitization to avoid an ambiguous configuration. If `url` is present but
+malformed or unsupported (not `http`/`https`), the whole config is rejected
+rather than silently falling back to `command` - a saved remote server must
+never be resurrected as a local process launch.
 
 | Field | Type | Applies to | Description |
 | --- | --- | --- | --- |

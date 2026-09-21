@@ -155,7 +155,14 @@ const normalizeMcpServerDraft = (
 
   const raw = input as Record<string, unknown>;
   const id = safeString(raw.id, 120) || getDefaultId(index);
+  const hasUrlInput = typeof raw.url === "string" && raw.url.trim().length > 0;
   const url = sanitizeUrl(raw.url);
+  // A non-empty url that fails sanitization is a malformed/unsupported
+  // remote endpoint, not "no url" - reject the whole draft rather than
+  // silently falling back to a stale `command` and switching transport
+  // modes underneath the user (a saved remote config could otherwise turn
+  // into a local process launch).
+  if (hasUrlInput && !url) return null;
   // A server config connects via exactly one transport. When both a command
   // and a URL are supplied, `connectClient` silently prefers the URL, so
   // drop the stale/ambiguous `command` here rather than keep it around
@@ -193,7 +200,12 @@ export const sanitizeMcpServer = (input: unknown, index = 0): McpServerConfig | 
   if (!input || typeof input !== "object" || Array.isArray(input)) return null;
 
   const raw = input as Record<string, unknown>;
+  const hasUrlInput = typeof raw.url === "string" && raw.url.trim().length > 0;
   const url = sanitizeUrl(raw.url);
+  // A non-empty url that fails sanitization is malformed/unsupported, not
+  // "no url" - reject rather than silently falling back to a stale
+  // `command` and switching transport modes underneath the user.
+  if (hasUrlInput && !url) return null;
   // See normalizeMcpServerDraft: exactly one transport is allowed, so a
   // supplied URL always wins over a stale/ambiguous command.
   const command = url ? "" : safeString(raw.command, MAX_COMMAND_LENGTH);
