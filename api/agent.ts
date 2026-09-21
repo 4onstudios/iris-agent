@@ -696,7 +696,8 @@ type GitSafetyMetadata = {
 
 type McpDiscoverySummary = {
   name: string;
-  command: string;
+  command?: string;
+  url?: string;
   toolNames: string[];
   error?: string;
 };
@@ -1405,6 +1406,7 @@ const inspectMcpServersForChat = async (
       summaries.push({
         name: server.name,
         command: server.command,
+        url: server.url,
         toolNames: tools.map((tool) => tool.name),
       });
     } catch (error) {
@@ -1412,6 +1414,7 @@ const inspectMcpServersForChat = async (
       summaries.push({
         name: server.name,
         command: server.command,
+        url: server.url,
         toolNames: [],
         error: err.message || "Failed to inspect MCP server",
       });
@@ -5937,6 +5940,7 @@ router.post(
           id: server.id,
           name: server.name,
           command: server.command,
+          url: server.url,
         },
         tools: tools.map((tool) => ({
           name: tool.name,

@@ -8,13 +8,18 @@ const MAX_ARGS = 40;
 const MAX_ENV_VARS = 60;
 const MAX_ENV_KEY_LENGTH = 120;
 const MAX_ENV_VALUE_LENGTH = 2000;
+const MAX_URL_LENGTH = 2000;
+const MAX_HEADERS = 60;
+const MAX_HEADER_LENGTH = 2000;
 
 export type McpServerConfig = {
   id: string;
   name: string;
-  command: string;
+  command?: string;
   args: string[];
   env: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
   enabled: boolean;
 };
 
@@ -70,6 +75,33 @@ const sanitizeEnv = (env: unknown): Record<string, string> => {
   return Object.fromEntries(entries);
 };
 
+const sanitizeHeaders = (headers: unknown): Record<string, string> => {
+  if (!headers || typeof headers !== "object" || Array.isArray(headers)) return {};
+
+  return Object.fromEntries(
+    Object.entries(headers)
+      .map(([key, value]) => [
+        safeString(key, MAX_HEADER_LENGTH),
+        safeString(value, MAX_HEADER_LENGTH),
+      ] as const)
+      .filter(([key, value]) => key.length > 0 && value.length > 0)
+      .slice(0, MAX_HEADERS),
+  );
+};
+
+const sanitizeUrl = (value: unknown): string | undefined => {
+  const url = safeString(value, MAX_URL_LENGTH);
+  if (!url) return undefined;
+
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return undefined;
+    return parsed.toString();
+  } catch {
+    return undefined;
+  }
+};
+
 const getDefaultId = (index: number): string => `mcp-${Date.now()}-${index}`;
 
 const normalizeMcpServerDraft = (
@@ -81,7 +113,8 @@ const normalizeMcpServerDraft = (
   const raw = input as Record<string, unknown>;
   const id = safeString(raw.id, 120) || getDefaultId(index);
   const command = safeString(raw.command, MAX_COMMAND_LENGTH);
-  const name = safeString(raw.name, MAX_NAME_LENGTH) || command || "New MCP Server";
+  const url = sanitizeUrl(raw.url);
+  const name = safeString(raw.name, MAX_NAME_LENGTH) || command || url || "New MCP Server";
 
   return {
     id,
@@ -89,6 +122,10 @@ const normalizeMcpServerDraft = (
     command,
     args: sanitizeArgs(raw.args),
     env: sanitizeEnv(raw.env),
+    ...(url ? { url } : {}),
+    ...(Object.keys(sanitizeHeaders(raw.headers)).length > 0
+      ? { headers: sanitizeHeaders(raw.headers) }
+      : {}),
     enabled: raw.enabled !== false,
   };
 };
@@ -110,10 +147,11 @@ export const sanitizeMcpServer = (input: unknown, index = 0): McpServerConfig | 
 
   const raw = input as Record<string, unknown>;
   const command = safeString(raw.command, MAX_COMMAND_LENGTH);
-  if (!command) return null;
+  const url = sanitizeUrl(raw.url);
+  if (!command && !url) return null;
 
   const id = safeString(raw.id, 120) || getDefaultId(index);
-  const name = safeString(raw.name, MAX_NAME_LENGTH) || command;
+  const name = safeString(raw.name, MAX_NAME_LENGTH) || command || url || "MCP Server";
 
   return {
     id,
@@ -121,6 +159,10 @@ export const sanitizeMcpServer = (input: unknown, index = 0): McpServerConfig | 
     command,
     args: sanitizeArgs(raw.args),
     env: sanitizeEnv(raw.env),
+    ...(url ? { url } : {}),
+    ...(Object.keys(sanitizeHeaders(raw.headers)).length > 0
+      ? { headers: sanitizeHeaders(raw.headers) }
+      : {}),
     enabled: raw.enabled !== false,
   };
 };
@@ -145,6 +187,10 @@ export const toStableMcpFingerprint = (servers: McpServerConfig[]): string => {
       command: server.command,
       args: [...server.args],
       env: Object.fromEntries(Object.entries(server.env).sort(([a], [b]) => a.localeCompare(b))),
+      url: server.url,
+      headers: Object.fromEntries(
+        Object.entries(server.headers || {}).sort(([a], [b]) => a.localeCompare(b)),
+      ),
       enabled: server.enabled,
     }))
     .sort((a, b) => a.id.localeCompare(b.id));

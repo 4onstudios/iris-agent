@@ -329,6 +329,36 @@ managed through the desktop synchronization routes.
 MCP servers are supplied in chat requests or MCP route payloads. Use
 `POST /api/agent/mcp/inspect` to discover tools before calling
 `POST /api/agent/mcp/call`. MCP tool names must start with `mcp_`.
+
+Local stdio servers use `command`, `args`, and optional `env` fields:
+
+```json
+{
+  "id": "github-local",
+  "name": "GitHub",
+  "command": "npx",
+  "args": ["-y", "@modelcontextprotocol/server-github"],
+  "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "..." },
+  "enabled": true
+}
+```
+
+Remote MCP servers use an HTTP(S) `url` and may provide request headers for
+authentication. Iris uses the MCP Streamable HTTP transport:
+
+```json
+{
+  "id": "remote-tools",
+  "name": "Remote tools",
+  "url": "https://example.com/mcp",
+  "headers": { "Authorization": "Bearer ..." },
+  "enabled": true
+}
+```
+
+Only use remote URLs and credentials from trusted configuration. Remote MCP
+servers can execute actions and return untrusted content on the agent's behalf.
+
 Commands that require approval pause until the client submits
 `POST /api/agent/command-confirmation` with a `confirmationId` and boolean
 `approved` value.
