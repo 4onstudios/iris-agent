@@ -45,6 +45,7 @@ import renameFileTool from "./tools/renameFile";
 import getWorkspaceInfoTool from "./tools/getWorkspaceInfo";
 import getSymbolsTool from "./tools/getSymbols";
 import applyDiffTool from "./tools/applyDiff";
+import readPdfTool from "./tools/readPdf";
 import findFileContentTool from "./tools/fileContent";
 import queryKnowledgeGraphTool from "./tools/queryKnowledgeGraph";
 // LSP-based tools for code intelligence
@@ -1102,6 +1103,13 @@ export const createCodingAgent = async (
       workspaceRoot: p.workspaceRoot || workspacePath || process.cwd(),
     }),
   );
+  const wrappedReadPdf = wrapTool(readPdfTool, async (p: Parameters<typeof readPdfTool.execute>[0]) =>
+    readPdfTool.execute({
+      ...p,
+      filePath: p.filePath ? resolvePath(p.filePath) : p.filePath,
+      cwd: p.cwd || workspacePath || process.cwd(),
+    }),
+  );
   const wrappedWriteFile = wrapTool(writeFileTool, async (p: Parameters<typeof writeFileTool.execute>[0]) =>
     {
       const filePath = resolvePath(p.filePath);
@@ -1326,6 +1334,7 @@ export const createCodingAgent = async (
         createDirectory: wrappedCreateDirectory,
       }),
     searchFiles: wrappedSearchFiles,
+    readPdf: wrappedReadPdf,
     renameFile: wrappedRenameFile,
     getWorkspaceInfo: wrappedGetWorkspaceInfo,
     findFileContent: wrappedFindFileContent,
