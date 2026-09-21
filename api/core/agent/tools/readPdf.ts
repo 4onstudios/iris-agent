@@ -12,6 +12,7 @@ import type {
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
 const PARSE_TIMEOUT_MS = 30_000;
 const PASSWORD_CONTINUATION_TTL_MS = 10 * 60_000;
+const MAX_PASSWORD_CONTINUATIONS = 100;
 const PDFJS_MODULE = "pdfjs-dist/legacy/build/pdf.mjs";
 const passwordContinuations = new Map<string, { password: string; expiresAt: number }>();
 
@@ -101,15 +102,25 @@ class PdfToolError extends Error {
   }
 }
 
-function getContinuationPassword(token: string | undefined): string | undefined {
-  const now = Date.now();
+function prunePasswordContinuations(now = Date.now()): void {
   for (const [key, continuation] of passwordContinuations) {
     if (continuation.expiresAt <= now) passwordContinuations.delete(key);
   }
+  while (passwordContinuations.size >= MAX_PASSWORD_CONTINUATIONS) {
+    const oldestToken = passwordContinuations.keys().next().value;
+    if (!oldestToken) break;
+    passwordContinuations.delete(oldestToken);
+  }
+}
+
+function getContinuationPassword(token: string | undefined): string | undefined {
+  const now = Date.now();
+  prunePasswordContinuations(now);
   return token ? passwordContinuations.get(token)?.password : undefined;
 }
 
 function createPasswordContinuation(password: string): string {
+  prunePasswordContinuations();
   const token = randomUUID();
   passwordContinuations.set(token, {
     password,
@@ -297,10 +308,11 @@ export async function readPdf(params: ReadPdfParams, context: ReadPdfContext = {
     const pagesWithoutText: number[] = [];
     let remaining = input.maxChars;
     let nextRequest: PdfContinuation | null = null;
-    const continuationToken = input.password
-      ? createPasswordContinuation(input.password)
-      : input.continuationToken;
+    let continuationToken = input.continuationToken;
     const continuation = (startPage: number, startOffset = 0): PdfContinuation => ({
+      ...(password && !continuationToken
+        ? { continuationToken: continuationToken = createPasswordContinuation(password) }
+        : {}),
       filePath: absolutePath, action: input.action, startPage, endPage, startOffset,
       maxPages: input.maxPages, maxChars: input.maxChars, expectedSha256: sha256,
       ...(continuationToken ? { continuationToken } : {}),
@@ -366,6 +378,9 @@ export async function readPdf(params: ReadPdfParams, context: ReadPdfContext = {
     const progress: PdfProgress = { requestedRange: { startPage: input.startPage, endPage },
       pagesExamined, pagesWithoutText, returnedCharacters: input.maxChars - remaining,
       hasMore: nextRequest !== null, nextRequest };
+    if (!nextRequest && input.continuationToken) {
+      passwordContinuations.delete(input.continuationToken);
+    }
     return input.action === "search"
       ? { ...base, ...progress, action: "search", query: searchQuery, matches }
       : { ...base, ...progress, action: "read", pages };

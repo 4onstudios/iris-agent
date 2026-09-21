@@ -223,9 +223,21 @@ test("supports agent cancellation and preserves passwords through opaque continu
   if (result.action !== "read") assert.fail("expected read");
   assert.ok(result.nextRequest);
   assert.ok(result.nextRequest.continuationToken);
-  const resumed = await readPdf(result.nextRequest);
-  success(resumed);
-  assert.equal(JSON.stringify(resumed).includes("private-secret"), false);
+  const continuationToken = result.nextRequest.continuationToken;
+  let request: ReadPdfParams | null = result.nextRequest;
+  while (request) {
+    const resumed = await readPdf(request);
+    success(resumed);
+    assert.equal(JSON.stringify(resumed).includes("private-secret"), false);
+    if (resumed.action !== "read") assert.fail("expected read");
+    request = resumed.nextRequest;
+  }
+  const expired = await readPdf({
+    filePath,
+    continuationToken,
+    maxChars: 100,
+  });
+  assert.equal(expired.success, true);
 });
 
 test("encrypted PDFs require the right password and recover after failed attempts", async () => {
