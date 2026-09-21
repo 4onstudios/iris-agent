@@ -44,6 +44,7 @@
     "api/core/agent/tools/mcpTools.ts",
     "api/core/agent/tools/queryKnowledgeGraph.ts",
     "api/core/agent/tools/readFile.ts",
+    "api/core/agent/tools/readPdf.ts",
     "api/core/agent/tools/renameFile.ts",
     "api/core/agent/tools/renameSymbol.ts",
     "api/core/agent/tools/runTerminalCommand.ts",

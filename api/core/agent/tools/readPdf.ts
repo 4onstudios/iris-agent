@@ -14,7 +14,14 @@ const PARSE_TIMEOUT_MS = 30_000;
 const PASSWORD_CONTINUATION_TTL_MS = 10 * 60_000;
 const MAX_PASSWORD_CONTINUATIONS = 100;
 const PDFJS_MODULE = "pdfjs-dist/legacy/build/pdf.mjs";
-const passwordContinuations = new Map<string, { password: string; expiresAt: number }>();
+type PasswordContinuation = {
+  password: string;
+  filePath: string;
+  sha256: string;
+  expiresAt: number;
+};
+
+const passwordContinuations = new Map<string, PasswordContinuation>();
 
 // Babel-Jest rewrites import() to require(), but PDF.js only publishes this ESM entrypoint.
 const loadPdfJs = () =>
@@ -113,17 +120,38 @@ function prunePasswordContinuations(now = Date.now()): void {
   }
 }
 
-function getContinuationPassword(token: string | undefined): string | undefined {
+function getContinuationPassword(
+  token: string | undefined,
+  filePath: string,
+  sha256: string,
+): string | undefined {
   const now = Date.now();
   prunePasswordContinuations(now);
-  return token ? passwordContinuations.get(token)?.password : undefined;
+  if (!token) return undefined;
+
+  const continuation = passwordContinuations.get(token);
+  if (!continuation) return undefined;
+  if (continuation.filePath !== filePath || continuation.sha256 !== sha256) {
+    passwordContinuations.delete(token);
+    throw new PdfToolError(
+      "INVALID_INPUT",
+      "continuationToken does not match the requested PDF. Restart reading with a password.",
+    );
+  }
+  return continuation.password;
 }
 
-function createPasswordContinuation(password: string): string {
+function createPasswordContinuation(
+  password: string,
+  filePath: string,
+  sha256: string,
+): string {
   prunePasswordContinuations();
   const token = randomUUID();
   passwordContinuations.set(token, {
     password,
+    filePath,
+    sha256,
     expiresAt: Date.now() + PASSWORD_CONTINUATION_TTL_MS,
   });
   return token;
@@ -262,8 +290,6 @@ export async function readPdf(params: ReadPdfParams, context: ReadPdfContext = {
     if (!parsed.success) throw new PdfToolError("INVALID_INPUT", parsed.error.issues
       .map(issue => `${issue.path.join(".") || "input"}: ${issue.message}`).join("; "));
     const input = parsed.data;
-    const password = input.password ?? getContinuationPassword(input.continuationToken);
-    passwordProvided = password !== undefined;
     const searchQuery = input.action === "search" ? requireSearchQuery(input.query) : "";
     if (/^(?:https?|file|data):/i.test(input.filePath)) throw new PdfToolError("INVALID_INPUT", "filePath must be a local filesystem path, not a URL.");
     if (input.action !== "search" && input.query !== undefined) throw new PdfToolError("INVALID_INPUT", "Set action to search when providing query.");
@@ -281,6 +307,9 @@ export async function readPdf(params: ReadPdfParams, context: ReadPdfContext = {
     if (!data.subarray(0, 1024).includes(Buffer.from("%PDF-"))) throw new PdfToolError("INVALID_PDF", "File does not contain a PDF header.");
     const sha256 = createHash("sha256").update(data).digest("hex");
     if (input.expectedSha256 && input.expectedSha256 !== sha256) throw new PdfToolError("DOCUMENT_CHANGED", "PDF changed since the previous call. Restart reading without the old continuation.");
+    const password = input.password
+      ?? getContinuationPassword(input.continuationToken, absolutePath, sha256);
+    passwordProvided = password !== undefined;
 
     const pdfjs = await loadPdfJs();
     signal.throwIfAborted();
@@ -311,7 +340,7 @@ export async function readPdf(params: ReadPdfParams, context: ReadPdfContext = {
     let continuationToken = input.continuationToken;
     const continuation = (startPage: number, startOffset = 0): PdfContinuation => ({
       ...(password && !continuationToken
-        ? { continuationToken: continuationToken = createPasswordContinuation(password) }
+        ? { continuationToken: continuationToken = createPasswordContinuation(password, absolutePath, sha256) }
         : {}),
       filePath: absolutePath, action: input.action, startPage, endPage, startOffset,
       maxPages: input.maxPages, maxChars: input.maxChars, expectedSha256: sha256,

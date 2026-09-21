@@ -224,6 +224,15 @@ test("supports agent cancellation and preserves passwords through opaque continu
   assert.ok(result.nextRequest);
   assert.ok(result.nextRequest.continuationToken);
   const continuationToken = result.nextRequest.continuationToken;
+  const encrypted = path.join(process.cwd(), "tests", "fixtures", "encrypted.pdf");
+  const replayed = await readPdf({
+    ...result.nextRequest,
+    filePath: encrypted,
+    expectedSha256: undefined,
+  });
+  assert.equal(replayed.success, false);
+  if (replayed.success) assert.fail("expected error");
+  assert.equal(replayed.code, "INVALID_INPUT");
   let request: ReadPdfParams | null = result.nextRequest;
   while (request) {
     const resumed = await readPdf(request);
