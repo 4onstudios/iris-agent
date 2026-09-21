@@ -130,6 +130,21 @@ export const redactMcpUrlForDisplay = (url: string): string => {
   }
 };
 
+/**
+ * Derives a credential-free default display name for a remote server from
+ * its URL - just the hostname, e.g. "example.com". Used only when the user
+ * hasn't supplied a `name`; falling back to the full URL here would persist
+ * (and later surface in model-facing tool identifiers/descriptions) any
+ * credentials embedded in the URL's userinfo or query string.
+ */
+const hostnameFromUrl = (url: string): string => {
+  try {
+    return new URL(url).hostname || "MCP Server";
+  } catch {
+    return "MCP Server";
+  }
+};
+
 const getDefaultId = (index: number): string => `mcp-${Date.now()}-${index}`;
 
 const normalizeMcpServerDraft = (
@@ -146,7 +161,7 @@ const normalizeMcpServerDraft = (
   // drop the stale/ambiguous `command` here rather than keep it around
   // unused and unvalidated.
   const command = url ? "" : safeString(raw.command, MAX_COMMAND_LENGTH);
-  const name = safeString(raw.name, MAX_NAME_LENGTH) || command || url || "New MCP Server";
+  const name = safeString(raw.name, MAX_NAME_LENGTH) || command || (url ? hostnameFromUrl(url) : "") || "New MCP Server";
 
   return {
     id,
@@ -185,7 +200,7 @@ export const sanitizeMcpServer = (input: unknown, index = 0): McpServerConfig | 
   if (!command && !url) return null;
 
   const id = safeString(raw.id, 120) || getDefaultId(index);
-  const name = safeString(raw.name, MAX_NAME_LENGTH) || command || url || "MCP Server";
+  const name = safeString(raw.name, MAX_NAME_LENGTH) || command || (url ? hostnameFromUrl(url) : "") || "MCP Server";
 
   return {
     id,

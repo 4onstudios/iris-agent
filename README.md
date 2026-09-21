@@ -342,7 +342,7 @@ sanitization to avoid an ambiguous configuration.
 | Field | Type | Applies to | Description |
 | --- | --- | --- | --- |
 | `id` | `string` | both | Stable identifier for the server (auto-generated if omitted). |
-| `name` | `string` | both | Display name; also used to build tool keys (`mcp_<name>_<tool>`). |
+| `name` | `string` | both | Display name; also used to build tool keys (`mcp_<name>_<tool>`). If omitted for a remote server, defaults to the URL's hostname (not the full URL) to avoid leaking embedded credentials. |
 | `enabled` | `boolean` | both | Servers with `enabled: false` are skipped. |
 | `command` | `string` | local | Executable to spawn (e.g. `npx`, `uvx`, or an absolute path). |
 | `args` | `string[]` | local | Arguments passed to `command`. |

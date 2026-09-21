@@ -67,4 +67,18 @@ describe("MCP server settings", () => {
       "https://example.com/mcp",
     );
   });
+
+  it("defaults an unnamed remote server's name to a credential-free hostname, not the full URL", () => {
+    const withApiKey = sanitizeMcpServer({
+      id: "remote",
+      url: "https://example.com/mcp?api_key=super-secret",
+    });
+    expect(withApiKey?.name).toBe("example.com");
+
+    const withUserinfo = sanitizeMcpServer({
+      id: "remote",
+      url: "https://token:super-secret@example.com/mcp",
+    });
+    expect(withUserinfo?.name).toBe("example.com");
+  });
 });
