@@ -1105,11 +1105,16 @@ export const createCodingAgent = async (
   );
   const wrappedReadPdf = {
     ...readPdfTool,
-    execute: async (p: Parameters<typeof readPdfTool.execute>[0]) =>
+    execute: async (
+      p: Parameters<typeof readPdfTool.execute>[0],
+      context?: { abortSignal?: AbortSignal },
+    ) =>
       readPdfTool.execute({
-      ...p,
-      filePath: p.filePath ? resolvePath(p.filePath) : p.filePath,
-      cwd: p.cwd || workspacePath || process.cwd(),
+        ...p,
+        filePath: p.filePath ? resolvePath(p.filePath) : p.filePath,
+        cwd: p.cwd || workspacePath || process.cwd(),
+      }, {
+        abortSignal: context?.abortSignal,
       }),
   };
   const wrappedWriteFile = wrapTool(writeFileTool, async (p: Parameters<typeof writeFileTool.execute>[0]) =>
@@ -1323,6 +1328,7 @@ export const createCodingAgent = async (
     // established Iris names. Virtual workspaces retain the client-aware tools.
     ...(workspace
       ? {
+        readPdf: wrappedReadPdf,
         writeFile: wrappedWriteFile,
         editFile: wrappedEditFile,
       }
@@ -1335,9 +1341,8 @@ export const createCodingAgent = async (
         deleteFile: wrappedDeleteFile,
         createDirectory: wrappedCreateDirectory,
       }),
-    searchFiles: wrappedSearchFiles,
-    readPdf: wrappedReadPdf,
-    renameFile: wrappedRenameFile,
+      searchFiles: wrappedSearchFiles,
+      renameFile: wrappedRenameFile,
     getWorkspaceInfo: wrappedGetWorkspaceInfo,
     findFileContent: wrappedFindFileContent,
     getSymbols: wrappedGetSymbols,
