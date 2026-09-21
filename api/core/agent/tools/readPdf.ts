@@ -118,6 +118,13 @@ function createPasswordContinuation(password: string): string {
   return token;
 }
 
+function requireSearchQuery(query: string | undefined): string {
+  if (!query) {
+    throw new PdfToolError("INVALID_INPUT", "query is required for search.");
+  }
+  return query;
+}
+
 /** Preserve PDF.js content order and line endings, with conservative gap spacing. */
 function extractText(content: TextContent): string {
   const parts: string[] = [];
@@ -246,11 +253,11 @@ export async function readPdf(params: ReadPdfParams, context: ReadPdfContext = {
     const input = parsed.data;
     const password = input.password ?? getContinuationPassword(input.continuationToken);
     passwordProvided = password !== undefined;
+    const searchQuery = input.action === "search" ? requireSearchQuery(input.query) : "";
     if (/^(?:https?|file|data):/i.test(input.filePath)) throw new PdfToolError("INVALID_INPUT", "filePath must be a local filesystem path, not a URL.");
-    if (input.action === "search" && !input.query) throw new PdfToolError("INVALID_INPUT", "query is required for search.");
     if (input.action !== "search" && input.query !== undefined) throw new PdfToolError("INVALID_INPUT", "Set action to search when providing query.");
     if (input.endPage !== undefined && input.endPage < input.startPage) throw new PdfToolError("INVALID_INPUT", "endPage must be greater than or equal to startPage.");
-    if (input.action === "search" && input.query.length > input.maxChars) {
+    if (searchQuery.length > input.maxChars) {
       throw new PdfToolError("INVALID_INPUT", "maxChars must be at least the search query length.");
     }
 
@@ -297,11 +304,11 @@ export async function readPdf(params: ReadPdfParams, context: ReadPdfContext = {
       filePath: absolutePath, action: input.action, startPage, endPage, startOffset,
       maxPages: input.maxPages, maxChars: input.maxChars, expectedSha256: sha256,
       ...(continuationToken ? { continuationToken } : {}),
-      ...(input.action === "search" ? { query: input.query, caseSensitive: input.caseSensitive, maxMatches: input.maxMatches } : {}),
+      ...(input.action === "search" ? { query: searchQuery, caseSensitive: input.caseSensitive, maxMatches: input.maxMatches } : {}),
     });
     // Escaping makes query a literal phrase; it cannot inject a costly regular expression.
     const search = input.action === "search"
-      ? new RegExp(input.query!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), input.caseSensitive ? "gu" : "giu") : null;
+      ? new RegExp(searchQuery.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), input.caseSensitive ? "gu" : "giu") : null;
 
     for (let pageNumber = input.startPage; pageNumber <= batchEnd; pageNumber++) {
       signal.throwIfAborted();
@@ -360,7 +367,7 @@ export async function readPdf(params: ReadPdfParams, context: ReadPdfContext = {
       pagesExamined, pagesWithoutText, returnedCharacters: input.maxChars - remaining,
       hasMore: nextRequest !== null, nextRequest };
     return input.action === "search"
-      ? { ...base, ...progress, action: "search", query: input.query!, matches }
+      ? { ...base, ...progress, action: "search", query: searchQuery, matches }
       : { ...base, ...progress, action: "read", pages };
   } catch (error) {
     if (signal.aborted) return { success: false, code: timeout.aborted ? "TIMEOUT" : "ABORTED",
