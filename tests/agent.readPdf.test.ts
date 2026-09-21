@@ -56,6 +56,10 @@ afterAll(async () => { await fs.rm(directory, { recursive: true, force: true });
 test("matches the provided tool interface and reads real PDF page text", async () => {
   assert.equal(readPdfTool.execute, readPdf);
   assert.equal(readPdfTool.parameters.parse({ filePath }).action, "read");
+  assert.equal("password" in readPdfTool.parameters.parse({
+    filePath,
+    password: "not-model-visible",
+  }), false);
   const result = await readPdfTool.execute({ filePath });
   success(result);
   assert.equal(result.action, "read");

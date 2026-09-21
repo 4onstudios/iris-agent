@@ -155,6 +155,7 @@ type AgentRequestContextValues = {
     isImage?: boolean;
   }>;
   multimodalImageCount?: number;
+  readPdfPassword?: string;
   onPreToolUse?: (input: {
     toolName: string;
     toolCallId?: string;
@@ -200,13 +201,16 @@ const withRuntimePreToolHook = (tools: Record<string, unknown>): Record<string, 
           const onPreToolUse = requestContext?.get?.("onPreToolUse") as
             | AgentRequestContextValues["onPreToolUse"]
             | undefined;
+          const toolArgs = input && typeof input === "object"
+            ? Object.fromEntries(
+              Object.entries(input as Record<string, unknown>)
+                .filter(([key]) => key !== "password"),
+            )
+            : undefined;
           await onPreToolUse?.({
             toolName,
             toolCallId: (context as { toolCallId?: string } | undefined)?.toolCallId,
-            toolArgs:
-              input && typeof input === "object"
-                ? input as Record<string, unknown>
-                : undefined,
+            toolArgs,
           });
           return originalExecute(input, context);
         },
@@ -1107,15 +1111,21 @@ export const createCodingAgent = async (
     ...readPdfTool,
     execute: async (
       p: Parameters<typeof readPdfTool.execute>[0],
-      context?: { abortSignal?: AbortSignal },
-    ) =>
-      readPdfTool.execute({
+      context?: {
+        abortSignal?: AbortSignal;
+        requestContext?: { get?: (key: string) => unknown };
+      },
+    ) => {
+      const password = context?.requestContext?.get?.("readPdfPassword");
+      return readPdfTool.execute({
         ...p,
+        password: typeof password === "string" ? password : undefined,
         filePath: p.filePath ? resolvePath(p.filePath) : p.filePath,
         cwd: p.cwd || workspacePath || process.cwd(),
       }, {
         abortSignal: context?.abortSignal,
-      }),
+      });
+    },
   };
   const wrappedWriteFile = wrapTool(writeFileTool, async (p: Parameters<typeof writeFileTool.execute>[0]) =>
     {
@@ -1326,9 +1336,11 @@ export const createCodingAgent = async (
   const runtimeTools = withRuntimePreToolHook({
     // Local workspaces provide these through Mastra Workspace under the
     // established Iris names. Virtual workspaces retain the client-aware tools.
+    ...(!isVirtualPath
+      ? { readPdf: wrappedReadPdf }
+      : {}),
     ...(workspace
       ? {
-        readPdf: wrappedReadPdf,
         writeFile: wrappedWriteFile,
         editFile: wrappedEditFile,
       }
