@@ -339,7 +339,7 @@ export async function readPdf(params: ReadPdfParams, context: ReadPdfContext = {
     let nextRequest: PdfContinuation | null = null;
     let continuationToken = input.continuationToken;
     const continuation = (startPage: number, startOffset = 0): PdfContinuation => ({
-      ...(password && !continuationToken
+      ...(password !== undefined && !continuationToken
         ? { continuationToken: continuationToken = createPasswordContinuation(password, absolutePath, sha256) }
         : {}),
       filePath: absolutePath, action: input.action, startPage, endPage, startOffset,

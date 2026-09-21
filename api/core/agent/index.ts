@@ -1103,13 +1103,15 @@ export const createCodingAgent = async (
       workspaceRoot: p.workspaceRoot || workspacePath || process.cwd(),
     }),
   );
-  const wrappedReadPdf = wrapTool(readPdfTool, async (p: Parameters<typeof readPdfTool.execute>[0]) =>
-    readPdfTool.execute({
+  const wrappedReadPdf = {
+    ...readPdfTool,
+    execute: async (p: Parameters<typeof readPdfTool.execute>[0]) =>
+      readPdfTool.execute({
       ...p,
       filePath: p.filePath ? resolvePath(p.filePath) : p.filePath,
       cwd: p.cwd || workspacePath || process.cwd(),
-    }),
-  );
+      }),
+  };
   const wrappedWriteFile = wrapTool(writeFileTool, async (p: Parameters<typeof writeFileTool.execute>[0]) =>
     {
       const filePath = resolvePath(p.filePath);
