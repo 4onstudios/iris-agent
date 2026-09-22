@@ -118,6 +118,43 @@ describe("budgetConversationHistoryByTokens tool_results compaction", () => {
     expect(totalTokens).toBeLessThanOrEqual(maxTotalTokens + 30);
   });
 
+  it("allocates the remaining budget to the newest tool_results message first, not the oldest", async () => {
+    const maxTotalTokens = 100;
+    const maxTokensPerMessage = 1000;
+    // Three large tool_results messages, all within keepRecentToolResults=3
+    // so clearToolResults leaves them untouched. If the remaining budget
+    // were spent oldest-first, the first message would consume the whole
+    // budget and the last (newest, most relevant) message would be
+    // truncated to ~0 tokens. Budget must instead be allocated newest-first.
+    const largeToolOutput = "w".repeat(600);
+    const history: ConversationMessageLike[] = [
+      { role: "user", content: largeToolOutput, continuationType: "tool_results" },
+      { role: "user", content: largeToolOutput, continuationType: "tool_results" },
+      { role: "user", content: largeToolOutput, continuationType: "tool_results" },
+    ];
+
+    const budgeted = await budgetConversationHistoryByTokens(
+      history,
+      history.length,
+      maxTokensPerMessage,
+      maxTotalTokens,
+    );
+
+    expect(budgeted).toHaveLength(3);
+    const oldestMessageTokens = estimateTokensFromChars(budgeted[0].content || "");
+    const newestMessageTokens = estimateTokensFromChars(
+      budgeted[budgeted.length - 1].content || "",
+    );
+
+    // With budget allocated newest-first, the newest message should
+    // receive the bulk of the 100-token budget while the oldest gets
+    // only truncation-marker leftovers. If budget were spent oldest-first
+    // instead, this relationship would be reversed (oldest message would
+    // consume ~100 tokens, leaving the newest with only marker leftovers).
+    expect(newestMessageTokens).toBeGreaterThan(oldestMessageTokens);
+    expect(newestMessageTokens).toBeGreaterThanOrEqual(50);
+  });
+
   it("caps an ordinary (non-tool_results) message at the total token budget, not the per-message limit", async () => {
     const maxTotalTokens = 10;
     const maxTokensPerMessage = 250;

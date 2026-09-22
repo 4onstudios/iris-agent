@@ -147,17 +147,26 @@ export const budgetConversationHistoryByTokens = async <T extends ConversationMe
 
   const truncatedMessages = compacted.slice(-safeMaxMessages);
 
-  // Every message is capped by how much of the total budget remains as
-  // messages are processed in order, so the aggregate can never exceed
-  // `safeMaxTotalTokens` regardless of how many messages there are.
-  // Tool-results messages are additionally allowed extra room up to that
-  // remaining budget (rather than the fixed per-message limit) since
-  // clearToolResults already trimmed/stubbed older ones and the remaining
-  // ones may legitimately be large; ordinary messages are still capped at
-  // the smaller of the per-message limit and what's left of the total.
+  // Every message is capped by how much of the total budget remains, so
+  // the aggregate can never exceed `safeMaxTotalTokens` regardless of how
+  // many messages there are. Tool-results messages are additionally
+  // allowed extra room up to that remaining budget (rather than the fixed
+  // per-message limit) since clearToolResults already trimmed/stubbed
+  // older ones and the remaining ones may legitimately be large; ordinary
+  // messages are still capped at the smaller of the per-message limit and
+  // what's left of the total.
+  //
+  // Budget is allocated newest-first (iterating from the end of
+  // `truncatedMessages` backwards) so the most recent, most relevant
+  // messages get first claim on the remaining budget. If we allocated
+  // oldest-first instead, an early message could consume the entire
+  // budget and leave nothing for the newest messages — the ones most
+  // likely to matter for the current turn.
   let remainingTotalTokens = safeMaxTotalTokens;
+  const result: T[] = new Array(truncatedMessages.length);
 
-  return truncatedMessages.map((message) => {
+  for (let i = truncatedMessages.length - 1; i >= 0; i -= 1) {
+    const message = truncatedMessages[i];
     const original = message as unknown as T;
     const content = typeof message.content === "string" ? message.content : "";
     const isToolResultsContinuation =
@@ -173,11 +182,13 @@ export const budgetConversationHistoryByTokens = async <T extends ConversationMe
       remainingTotalTokens - estimateTokensFromChars(truncatedContent),
     );
 
-    return {
+    result[i] = {
       ...original,
       content: truncatedContent,
     };
-  });
+  }
+
+  return result;
 };
 
 const formatRoleLabel = (role?: string): string => {
