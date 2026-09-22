@@ -71,6 +71,7 @@ const NEVER_AUTO_APPROVE_COMMANDS = new Set([
   "invoke-webrequest",
   "irm",
   "iwr",
+  "sleep"
 ]);
 
 const SAFE_REDIRECT_TARGETS = new Set([
