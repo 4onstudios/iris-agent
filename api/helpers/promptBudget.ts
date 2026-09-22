@@ -145,23 +145,39 @@ export const budgetConversationHistoryByTokens = async <T extends ConversationMe
     })) as T[] | null | undefined) ?? taggedWindowed,
   );
 
-  return compacted
-    .slice(-safeMaxMessages)
-    .map((message) => {
-      const original = message as unknown as T;
-      const content = typeof message.content === "string" ? message.content : "";
-      const isToolResultsContinuation =
-        (original as ConversationMessageLike).continuationType ===
-        TOOL_RESULTS_CONTINUATION_TYPE;
-      const perMessageBudget = isToolResultsContinuation
-        ? Math.max(safeMaxTokensPerMessage, safeMaxTotalTokens)
-        : safeMaxTokensPerMessage;
+  const truncatedMessages = compacted.slice(-safeMaxMessages);
 
-      return {
-        ...original,
-        content: truncateTextByTokens(content, perMessageBudget),
-      };
-    });
+  // Tool-results messages are allowed extra room (up to the total budget)
+  // since clearToolResults already trimmed/stubbed older ones and the
+  // remaining ones may legitimately be large. However, allowing each one
+  // up to the *full* total budget independently can let a single message
+  // (or several) exceed `safeMaxTotalTokens` altogether. Track how much of
+  // the total budget remains as messages are processed so each
+  // tool-results message is capped by what's actually left, not the full
+  // budget every time.
+  let remainingTotalTokens = safeMaxTotalTokens;
+
+  return truncatedMessages.map((message) => {
+    const original = message as unknown as T;
+    const content = typeof message.content === "string" ? message.content : "";
+    const isToolResultsContinuation =
+      (original as ConversationMessageLike).continuationType ===
+      TOOL_RESULTS_CONTINUATION_TYPE;
+    const perMessageBudget = isToolResultsContinuation
+      ? Math.max(0, remainingTotalTokens)
+      : safeMaxTokensPerMessage;
+
+    const truncatedContent = truncateTextByTokens(content, perMessageBudget);
+    remainingTotalTokens = Math.max(
+      0,
+      remainingTotalTokens - estimateTokensFromChars(truncatedContent),
+    );
+
+    return {
+      ...original,
+      content: truncatedContent,
+    };
+  });
 };
 
 const formatRoleLabel = (role?: string): string => {
