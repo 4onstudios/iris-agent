@@ -35,10 +35,36 @@ type PromptBudgetBuildResult<T extends ConversationMessageLike> = {
 
 const TOKEN_TO_CHAR_RATIO = 4;
 const MIN_SECTION_TOKENS = 64;
+const TOOL_RESULTS_CONTINUATION_TYPE = "tool_results";
 const compactConversationHistory = composeStrategies(
   clearToolResults({ keepRecentToolResults: 3 }),
   evictOldest(),
 );
+
+// This agent never emits `role: "tool"` messages: tool results are
+// serialized into `role: "user"` strings carrying
+// `continuationType: "tool_results"` (see `api/agent.ts`). TanStack's
+// `clearToolResults`/`evictOldest` strategies key off `role === "tool"` to
+// find/preserve tool output, so without this mapping they treat these
+// messages as ordinary user turns. Tag them as `role: "tool"` for the
+// duration of compaction, then restore the original role afterward.
+const tagToolResultsAsToolRole = <T extends ConversationMessageLike>(
+  history: T[],
+): T[] =>
+  history.map((message) =>
+    message.continuationType === TOOL_RESULTS_CONTINUATION_TYPE
+      ? ({ ...message, role: "tool" } as T)
+      : message,
+  );
+
+const restoreToolResultsRole = <T extends ConversationMessageLike>(
+  history: T[],
+): T[] =>
+  history.map((message) =>
+    message.continuationType === TOOL_RESULTS_CONTINUATION_TYPE
+      ? ({ ...message, role: "user" } as T)
+      : message,
+  );
 
 export const truncateText = (value: string, maxChars: number): string => {
   if (value.length <= maxChars) return value;
@@ -111,11 +137,13 @@ export const budgetConversationHistoryByTokens = async <T extends ConversationMe
   const safeMaxTokensPerMessage = Math.max(0, maxTokensPerMessage);
   const safeMaxTotalTokens = Math.max(0, maxTotalTokens);
   const windowed = history.slice(-safeMaxMessages);
-  const compacted =
-    (await compactConversationHistory(windowed as never, {
+  const taggedWindowed = tagToolResultsAsToolRole(windowed);
+  const compacted = restoreToolResultsRole(
+    ((await compactConversationHistory(taggedWindowed as never, {
       maxTokens: safeMaxTotalTokens,
       estimate: (message) => estimateMessageTokens(message as never),
-    })) ?? windowed;
+    })) as T[] | null | undefined) ?? taggedWindowed,
+  );
 
   return compacted
     .slice(-safeMaxMessages)
@@ -123,7 +151,8 @@ export const budgetConversationHistoryByTokens = async <T extends ConversationMe
       const original = message as unknown as T;
       const content = typeof message.content === "string" ? message.content : "";
       const isToolResultsContinuation =
-        (original as ConversationMessageLike).continuationType === "tool_results";
+        (original as ConversationMessageLike).continuationType ===
+        TOOL_RESULTS_CONTINUATION_TYPE;
       const perMessageBudget = isToolResultsContinuation
         ? Math.max(safeMaxTokensPerMessage, safeMaxTotalTokens)
         : safeMaxTokensPerMessage;
@@ -220,7 +249,7 @@ export const buildPromptWithinTokenBudget = async <T extends ConversationMessage
   const promptEstimatedTokens = estimateTokensFromChars(prompt);
   if (promptEstimatedTokens > safeMaxPromptTokens) {
     const hardLimitedPrompt = budgetedConversationHistory.some(
-      (message) => message.continuationType === "tool_results",
+      (message) => message.continuationType === TOOL_RESULTS_CONTINUATION_TYPE,
     )
       ? truncateHeadByTokens(prompt, safeMaxPromptTokens)
       : truncateMiddleByTokens(prompt, safeMaxPromptTokens);
