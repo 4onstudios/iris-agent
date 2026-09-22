@@ -1,3 +1,10 @@
+import {
+  clearToolResults,
+  composeStrategies,
+  estimateMessageTokens,
+  evictOldest,
+} from "@tanstack/ai-compaction";
+
 export type ConversationMessageLike = {
   content?: string;
   role?: string;
@@ -28,9 +35,10 @@ type PromptBudgetBuildResult<T extends ConversationMessageLike> = {
 
 const TOKEN_TO_CHAR_RATIO = 4;
 const MIN_SECTION_TOKENS = 64;
-const MESSAGE_OVERHEAD_TOKENS = 10;
-const SUMMARY_MESSAGE_LIMIT = 8;
-const SUMMARY_MESSAGE_CHAR_LIMIT = 220;
+const compactConversationHistory = composeStrategies(
+  clearToolResults({ keepRecentToolResults: 3 }),
+  evictOldest(),
+);
 
 export const truncateText = (value: string, maxChars: number): string => {
   if (value.length <= maxChars) return value;
@@ -91,117 +99,40 @@ export const budgetConversationHistory = <T extends ConversationMessageLike>(
     }));
 };
 
-export const budgetConversationHistoryByTokens = <T extends ConversationMessageLike>(
+export const budgetConversationHistoryByTokens = async <T extends ConversationMessageLike>(
   history: T[] | undefined,
   maxMessages: number,
   maxTokensPerMessage: number,
   maxTotalTokens: number,
-): T[] => {
+): Promise<T[]> => {
   if (!history || history.length === 0) return [];
 
   const safeMaxMessages = Math.max(1, maxMessages);
   const safeMaxTokensPerMessage = Math.max(0, maxTokensPerMessage);
   const safeMaxTotalTokens = Math.max(0, maxTotalTokens);
   const windowed = history.slice(-safeMaxMessages);
-  const droppedByWindow = history.slice(0, Math.max(0, history.length - windowed.length));
-  const selected: T[] = [];
-  let remainingTokens = safeMaxTotalTokens;
-  let selectedStartIndex = windowed.length;
+  const compacted =
+    (await compactConversationHistory(windowed as never, {
+      maxTokens: safeMaxTotalTokens,
+      estimate: (message) => estimateMessageTokens(message as never),
+    })) ?? windowed;
 
-  for (let i = windowed.length - 1; i >= 0; i -= 1) {
-    if (remainingTokens <= MESSAGE_OVERHEAD_TOKENS) break;
-
-    const message = windowed[i];
-    const content = typeof message.content === "string" ? message.content : "";
-    if (!content) continue;
-
-    const isToolResultsContinuation = message.continuationType === "tool_results";
-
-    const perMessageBudget = Math.min(
-      isToolResultsContinuation
+  return compacted
+    .slice(-safeMaxMessages)
+    .map((message) => {
+      const original = message as unknown as T;
+      const content = typeof message.content === "string" ? message.content : "";
+      const isToolResultsContinuation =
+        (original as ConversationMessageLike).continuationType === "tool_results";
+      const perMessageBudget = isToolResultsContinuation
         ? Math.max(safeMaxTokensPerMessage, safeMaxTotalTokens)
-        : safeMaxTokensPerMessage,
-      remainingTokens - MESSAGE_OVERHEAD_TOKENS,
-    );
-    if (perMessageBudget <= 0) break;
+        : safeMaxTokensPerMessage;
 
-    const truncatedContent = truncateTextByTokens(content, perMessageBudget);
-    const estimatedTokens =
-      estimateTokensFromChars(truncatedContent) + MESSAGE_OVERHEAD_TOKENS;
-    if (estimatedTokens > remainingTokens) break;
-
-    selected.unshift({
-      ...message,
-      content: truncatedContent,
+      return {
+        ...original,
+        content: truncateTextByTokens(content, perMessageBudget),
+      };
     });
-    selectedStartIndex = i;
-
-    remainingTokens -= estimatedTokens;
-  }
-
-  const omittedMessages = [...droppedByWindow, ...windowed.slice(0, selectedStartIndex)];
-  if (omittedMessages.length === 0) {
-    if (selected.length > 0) {
-      return selected;
-    }
-
-    const fallbackMessage = windowed[windowed.length - 1];
-    const fallbackBudget = Math.min(
-      safeMaxTokensPerMessage,
-      safeMaxTotalTokens - MESSAGE_OVERHEAD_TOKENS,
-    );
-    if (fallbackBudget <= 0) {
-      return [];
-    }
-
-    return [
-      {
-        ...fallbackMessage,
-        content: truncateTextByTokens(fallbackMessage.content || "", fallbackBudget),
-      },
-    ];
-  }
-
-  const summaryBudget = Math.min(
-    Math.max(1, Math.floor(safeMaxTotalTokens * 0.25)),
-    Math.max(0, safeMaxTotalTokens - MESSAGE_OVERHEAD_TOKENS),
-  );
-  if (summaryBudget <= 0) {
-    return selected;
-  }
-
-  const summaryText = truncateTextByTokens(
-    buildConversationSummary(omittedMessages),
-    summaryBudget,
-  );
-  const summaryTokenUsage = estimateTokensFromChars(summaryText) + MESSAGE_OVERHEAD_TOKENS;
-
-  const selectedWithTokens = selected.map((message) => ({
-    message,
-    tokenUsage:
-      estimateTokensFromChars(typeof message.content === "string" ? message.content : "") +
-      MESSAGE_OVERHEAD_TOKENS,
-  }));
-
-  let selectedTokenUsage = selectedWithTokens.reduce((total, entry) => total + entry.tokenUsage, 0);
-  while (selectedTokenUsage + summaryTokenUsage > safeMaxTotalTokens && selectedWithTokens.length > 0) {
-    const removed = selectedWithTokens.shift();
-    if (!removed) break;
-    selectedTokenUsage -= removed.tokenUsage;
-  }
-
-  const summarizedConversation = {
-    role: "system",
-    content: summaryText,
-  } as T;
-
-  if (selectedWithTokens.length > 0) {
-    return [summarizedConversation, ...selectedWithTokens.map((entry) => entry.message)];
-  }
-
-  return [
-    summarizedConversation,
-  ];
 };
 
 const formatRoleLabel = (role?: string): string => {
@@ -212,23 +143,6 @@ const formatRoleLabel = (role?: string): string => {
   return "Assistant";
 };
 
-const buildConversationSummary = <T extends ConversationMessageLike>(history: T[]): string => {
-  if (history.length === 0) return "";
-
-  const recentEntries = history.slice(-SUMMARY_MESSAGE_LIMIT);
-  const parts = recentEntries.map((message) => {
-    const role = formatRoleLabel(message.role);
-    const content = truncateText(
-      (message.content || "").replace(/\s+/g, " ").trim(),
-      SUMMARY_MESSAGE_CHAR_LIMIT,
-    ).trim();
-
-    return content ? `${role}: ${content}` : role;
-  });
-
-  return `Conversation state: ${parts.join("; ")}`;
-};
-
 const formatConversationTranscript = <T extends ConversationMessageLike>(
   history: T[],
 ): string =>
@@ -236,9 +150,9 @@ const formatConversationTranscript = <T extends ConversationMessageLike>(
     .map((message) => `**${formatRoleLabel(message.role)}:** ${message.content || ""}`)
     .join("\n\n");
 
-export const buildPromptWithinTokenBudget = <T extends ConversationMessageLike>(
+export const buildPromptWithinTokenBudget = async <T extends ConversationMessageLike>(
   options: PromptBudgetBuildOptions<T>,
-): PromptBudgetBuildResult<T> => {
+): Promise<PromptBudgetBuildResult<T>> => {
   const {
     effectiveMessage,
     conversationHistory,
@@ -269,7 +183,7 @@ export const buildPromptWithinTokenBudget = <T extends ConversationMessageLike>(
     : Math.max(MIN_SECTION_TOKENS, Math.floor(baseBudget * 0.7));
 
   const budgetedConversationHistory = hasHistory
-    ? budgetConversationHistoryByTokens(
+    ? await budgetConversationHistoryByTokens(
       conversationHistory,
       maxConversationMessages,
       maxConversationMessageTokens,

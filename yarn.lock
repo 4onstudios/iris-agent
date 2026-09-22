@@ -17,6 +17,11 @@
     jose "^6.2.3"
     uuid "^11.1.0"
 
+"@ag-ui/core@0.1.1-canary.beta.0":
+  version "0.1.1-canary.beta.0"
+  resolved "https://registry.npmjs.org/@ag-ui/core/-/core-0.1.1-canary.beta.0.tgz"
+  integrity sha512-zcP3RH5p3HJTZ0kyQxNOL1blnVFTDpaShitR7UMS/thwFdl48V6CAG+WQBcYEu/dfa8mKonRez88N0Ok+nEI+w==
+
 "@agentclientprotocol/sdk@^1.4.0":
   version "1.4.0"
   resolved "https://registry.npmjs.org/@agentclientprotocol/sdk/-/sdk-1.4.0.tgz"
@@ -1795,6 +1800,39 @@
   version "1.1.0"
   resolved "https://registry.npmjs.org/@standard-schema/spec/-/spec-1.1.0.tgz"
   integrity sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==
+
+"@tanstack/ai-compaction@^0.1.6":
+  version "0.1.6"
+  resolved "https://registry.npmjs.org/@tanstack/ai-compaction/-/ai-compaction-0.1.6.tgz"
+  integrity sha512-gyPZcpPvbBJkm5dThTnHGuwqvBo2ArQux1K0lPMMkiS3orxpFLMzXPryFxc/ZHzzR0KtPdkTFYgTHrtlIEdzDQ==
+
+"@tanstack/ai-event-client@^0.12.1":
+  version "0.12.1"
+  resolved "https://registry.npmjs.org/@tanstack/ai-event-client/-/ai-event-client-0.12.1.tgz"
+  integrity sha512-rQZ94m4FDyGPJA868/Z7ipZGQ9QA4taxYnC7jwIbRm9eRYf5ig+cmwirBmd/adPSsvL8Qr6hgEX8SULrpJpIyA==
+  dependencies:
+    "@tanstack/devtools-event-client" "^0.4.1"
+
+"@tanstack/ai-utils@^0.4.1":
+  version "0.4.1"
+  resolved "https://registry.npmjs.org/@tanstack/ai-utils/-/ai-utils-0.4.1.tgz"
+  integrity sha512-B3PGn2WYiRtivZCt7MUN2iXeoK9fwZhgdbrPIz5hPqVR8r8sNDZMmMqtiOkp7sxzPvVlCBItFVHw7QpZ9g6e9w==
+
+"@tanstack/ai@^0.58.0":
+  version "0.58.0"
+  resolved "https://registry.npmjs.org/@tanstack/ai/-/ai-0.58.0.tgz"
+  integrity sha512-8+JjYQdpU/RCrN8VguyMbkZaNODgYXxKiI2ZVuXfpMq6UL/Dp5pHk3MJH/eaiYOyij/ZALbQHmXr81pStv14Yw==
+  dependencies:
+    "@ag-ui/core" "0.1.1-canary.beta.0"
+    "@standard-schema/spec" "^1.1.0"
+    "@tanstack/ai-event-client" "^0.12.1"
+    "@tanstack/ai-utils" "^0.4.1"
+    partial-json "^0.1.7"
+
+"@tanstack/devtools-event-client@^0.4.1":
+  version "0.4.1"
+  resolved "https://registry.npmjs.org/@tanstack/devtools-event-client/-/devtools-event-client-0.4.1.tgz"
+  integrity sha512-GRxmPw4OHZ2oZeIEUkEwt/NDvuEqzEYRAjzUVMs+I0pd4C7k1ySOiuJK2CqF+K/yEAR3YZNkW3ExrpDarh9Vwg==
 
 "@types/babel__core@^7.20.5":
   version "7.20.5"
@@ -4860,6 +4898,11 @@ parseurl@^1.3.3:
   version "1.3.3"
   resolved "https://registry.npmjs.org/parseurl/-/parseurl-1.3.3.tgz"
   integrity sha512-CiyeOxFT/JZyN5m0z9PfXw4SCBJ6Sygz1Dpl0wqjlhDEGGBP1GnsUVEL0p63hoG1fcj3fHynXi9NYO4nWOL+qQ==
+
+partial-json@^0.1.7:
+  version "0.1.7"
+  resolved "https://registry.npmjs.org/partial-json/-/partial-json-0.1.7.tgz"
+  integrity sha512-Njv/59hHaokb/hRUjce3Hdv12wd60MtM9Z5Olmn+nehe0QDAsRtRbJPvJ0Z91TusF0SuZRIvnM+S4l6EIP8leA==
 
 path-exists@^4.0.0:
   version "4.0.0"

@@ -2927,7 +2927,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
         useMastraObservationalMemory,
       );
 
-      const promptBuild = buildPromptWithinTokenBudget({
+      const promptBuild = await buildPromptWithinTokenBudget({
         effectiveMessage: truncateText(
           typeof messages[messages.length - 1]?.content === "string"
             ? messages[messages.length - 1].content
