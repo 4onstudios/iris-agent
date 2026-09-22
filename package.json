@@ -63,9 +63,9 @@
   "homepage": "https://github.com/4onstudios/iris-agent#readme",
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.4.0",
-    "@ai-sdk/anthropic": "^2.0.53",
+    "@ai-sdk/anthropic": "^4.0.25",
     "@ai-sdk/google": "^4.0.58",
-    "@ai-sdk/openai": "^2.0.72",
+    "@ai-sdk/openai": "^4.0.25",
     "@mastra/core": "^1.59.0",
     "@mastra/libsql": "^1.22.2",
     "@mastra/memory": "^1.28.1",
