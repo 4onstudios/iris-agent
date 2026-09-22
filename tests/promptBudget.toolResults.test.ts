@@ -117,4 +117,32 @@ describe("budgetConversationHistoryByTokens tool_results compaction", () => {
     // have summed to ~600 tokens).
     expect(totalTokens).toBeLessThanOrEqual(maxTotalTokens + 30);
   });
+
+  it("caps an ordinary (non-tool_results) message at the total token budget, not the per-message limit", async () => {
+    const maxTotalTokens = 10;
+    const maxTokensPerMessage = 250;
+    // An ordinary user message with no continuationType at all — only the
+    // fixed per-message limit applied to it previously, so a message far
+    // smaller than maxTokensPerMessage but larger than maxTotalTokens
+    // would be returned untouched at up to maxTokensPerMessage tokens.
+    const largeMessage = "a".repeat(1000);
+    const history: ConversationMessageLike[] = [
+      { role: "user", content: largeMessage },
+    ];
+
+    const budgeted = await budgetConversationHistoryByTokens(
+      history,
+      history.length,
+      maxTokensPerMessage,
+      maxTotalTokens,
+    );
+
+    expect(budgeted).toHaveLength(1);
+    // Small allowance for truncateText's marker overhead (see above); the
+    // key assertion is that the result stays near maxTotalTokens (10)
+    // rather than reaching maxTokensPerMessage (250).
+    expect(estimateTokensFromChars(budgeted[0].content || "")).toBeLessThanOrEqual(
+      maxTotalTokens + 10,
+    );
+  });
 });

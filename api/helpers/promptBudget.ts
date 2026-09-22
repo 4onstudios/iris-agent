@@ -147,14 +147,14 @@ export const budgetConversationHistoryByTokens = async <T extends ConversationMe
 
   const truncatedMessages = compacted.slice(-safeMaxMessages);
 
-  // Tool-results messages are allowed extra room (up to the total budget)
-  // since clearToolResults already trimmed/stubbed older ones and the
-  // remaining ones may legitimately be large. However, allowing each one
-  // up to the *full* total budget independently can let a single message
-  // (or several) exceed `safeMaxTotalTokens` altogether. Track how much of
-  // the total budget remains as messages are processed so each
-  // tool-results message is capped by what's actually left, not the full
-  // budget every time.
+  // Every message is capped by how much of the total budget remains as
+  // messages are processed in order, so the aggregate can never exceed
+  // `safeMaxTotalTokens` regardless of how many messages there are.
+  // Tool-results messages are additionally allowed extra room up to that
+  // remaining budget (rather than the fixed per-message limit) since
+  // clearToolResults already trimmed/stubbed older ones and the remaining
+  // ones may legitimately be large; ordinary messages are still capped at
+  // the smaller of the per-message limit and what's left of the total.
   let remainingTotalTokens = safeMaxTotalTokens;
 
   return truncatedMessages.map((message) => {
@@ -165,7 +165,7 @@ export const budgetConversationHistoryByTokens = async <T extends ConversationMe
       TOOL_RESULTS_CONTINUATION_TYPE;
     const perMessageBudget = isToolResultsContinuation
       ? Math.max(0, remainingTotalTokens)
-      : safeMaxTokensPerMessage;
+      : Math.min(safeMaxTokensPerMessage, Math.max(0, remainingTotalTokens));
 
     const truncatedContent = truncateTextByTokens(content, perMessageBudget);
     remainingTotalTokens = Math.max(
