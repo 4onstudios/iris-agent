@@ -265,8 +265,8 @@ function classifyError(error: unknown, passwordProvided: boolean): ReadPdfResult
     ENOTDIR: ["FILE_NOT_FOUND", "A parent path is not a directory."],
     EACCES: ["PERMISSION_DENIED", "The PDF file is not readable."],
     EPERM: ["PERMISSION_DENIED", "The PDF file is not readable."],
-    ERR_MODULE_NOT_FOUND: ["DEPENDENCY_MISSING", "Install pdfjs-dist@5.6.205 and keep its worker and asset directories available."],
-    MODULE_NOT_FOUND: ["DEPENDENCY_MISSING", "Install pdfjs-dist@5.6.205 and keep its worker and asset directories available."],
+    ERR_MODULE_NOT_FOUND: ["DEPENDENCY_MISSING", "Install pdfjs-dist@6.3.289 and keep its worker and asset directories available."],
+    MODULE_NOT_FOUND: ["DEPENDENCY_MISSING", "Install pdfjs-dist@6.3.289 and keep its worker and asset directories available."],
   };
   const mapped = typeof err?.code === "string" ? filesystemErrors[err.code] : undefined;
   if (mapped) return { success: false, code: mapped[0], error: mapped[1] };
@@ -317,7 +317,6 @@ export async function readPdf(params: ReadPdfParams, context: ReadPdfContext = {
     loadingTask = pdfjs.getDocument({
       data: new Uint8Array(data),
       password,
-      isEvalSupported: false,
       disableFontFace: true,
       useWorkerFetch: false,
       stopAtErrors: true,
