@@ -18,6 +18,49 @@ const readToolCallId = (update: acp.SessionUpdate): string | undefined =>
     "toolCallId" in update ? update.toolCallId : undefined;
 
 describe("ACP server", () => {
+    it("passes compacted prior turns to the runtime on subsequent prompts", async () => {
+        const stream = jest.fn(async () => ({
+            fullStream: createChunkStream([
+                { type: "text-delta", payload: { text: "Done" } },
+            ]),
+            text: Promise.resolve("Done"),
+        }));
+        const runtime: AcpRuntimeAgent = { stream };
+
+        await acp
+            .client({ name: "iris-agent-test-client" })
+            .connectWith(createAcpAgentApp(runtime), async (ctx) => {
+                await ctx.request(acp.methods.agent.initialize, {
+                    protocolVersion: acp.PROTOCOL_VERSION,
+                    clientCapabilities: {},
+                });
+                const session = await ctx.request(acp.methods.agent.session.new, {
+                    cwd: "/workspace",
+                    mcpServers: [],
+                });
+
+                await ctx.request(acp.methods.agent.session.prompt, {
+                    sessionId: session.sessionId,
+                    prompt: [{ type: "text", text: "First request" }],
+                });
+                await ctx.request(acp.methods.agent.session.prompt, {
+                    sessionId: session.sessionId,
+                    prompt: [{ type: "text", text: "Second request" }],
+                });
+
+                expect(stream).toHaveBeenNthCalledWith(
+                    2,
+                    "**User:** First request\n\n**Assistant:** Done\n\n**User:** Second request",
+                    expect.objectContaining({
+                        conversationHistory: [
+                            { role: "user", content: "First request" },
+                            { role: "assistant", content: "Done" },
+                        ],
+                    }),
+                );
+            });
+    });
+
     it("supports the standard initialize, session, prompt, update, and close flow", async () => {
         const runtime: AcpRuntimeAgent = {
             stream: jest.fn(async () => ({

@@ -19,8 +19,16 @@ import {
   mergeTokenUsage,
   type TokenUsageSummary,
 } from "../helpers/tokenUsage";
+import {
+  budgetConversationHistoryByTokens,
+  resolveModelInputTokenLimit,
+  type ConversationMessageLike,
+} from "../helpers/promptBudget";
 
 const DEFAULT_MAX_STEPS = 50;
+const ACP_MAX_CONVERSATION_MESSAGES = 20;
+const ACP_MAX_CONVERSATION_MESSAGE_TOKENS = 4_000;
+const ACP_PROMPT_TOKEN_BUDGET_RATIO = 0.2;
 const MAX_CONCURRENT_SESSION_LOADS = 16;
 
 const CHAT_SESSIONS_DIR = path.join(os.homedir(), ".iris", "chat-sessions");
@@ -29,6 +37,21 @@ type PersistedChatMessage = {
   role: "user" | "assistant";
   content: string;
 };
+
+type RuntimeConversationMessage = ConversationMessageLike & {
+  role: "user" | "assistant";
+  content: string;
+};
+
+const formatConversationHistory = (
+  history: RuntimeConversationMessage[],
+): string =>
+  history
+    .map((message) => {
+      const role = message.role === "user" ? "User" : "Assistant";
+      return `**${role}:** ${message.content}`;
+    })
+    .join("\n\n");
 
 type PersistedChatSession = {
   id: string;
@@ -227,7 +250,7 @@ export type AcpRuntimeAgent = {
     options?: Record<string, unknown>,
   ) => Promise<{ text?: string }>;
   chat?: (request: {
-    messages: Array<{ role: "user"; content: string }>;
+    messages: Array<{ role: "user" | "assistant"; content: string }>;
     signal?: AbortSignal;
     abortSignal?: AbortSignal;
   }) => Promise<unknown>;
@@ -586,6 +609,32 @@ export const createAcpAgentApp = (
       if (promptText) {
         session.history.push({ role: "user", content: promptText });
       }
+      const conversationHistory = promptText
+        ? session.history.slice(0, -1)
+        : session.history.slice();
+      const compactedConversationHistory =
+        conversationHistory.length > 0
+          ? await budgetConversationHistoryByTokens(
+              conversationHistory satisfies RuntimeConversationMessage[],
+              ACP_MAX_CONVERSATION_MESSAGES,
+              ACP_MAX_CONVERSATION_MESSAGE_TOKENS,
+              Math.max(
+                512,
+                Math.floor(
+                  resolveModelInputTokenLimit(turnModelId ?? "") *
+                    ACP_PROMPT_TOKEN_BUDGET_RATIO,
+                ),
+              ),
+            )
+          : [];
+      const runtimeHistoryOptions =
+        compactedConversationHistory.length > 0
+          ? { conversationHistory: compactedConversationHistory }
+          : {};
+      const runtimePrompt =
+        compactedConversationHistory.length > 0
+          ? `${formatConversationHistory(compactedConversationHistory)}\n\n**User:** ${promptText}`
+          : promptText;
       const persistTurn = async (assistantText: string): Promise<void> => {
         if (promptText && !session.title) {
           session.title = promptText.replace(/\s+/g, " ").slice(0, 120);
@@ -642,12 +691,13 @@ export const createAcpAgentApp = (
           const streamResult = await raceWithAbort(
             async () =>
               (runtimeAgent.stream as NonNullable<AcpRuntimeAgent["stream"]>)(
-                promptText,
+                runtimePrompt,
                 {
                   workspaceRoot: session.cwd,
                   abortSignal: turnSignal,
                   maxSteps: effectiveMaxSteps,
                   modelId: turnModelId,
+                  ...runtimeHistoryOptions,
                 },
               ) as Promise<AgentStreamResult>,
           );
@@ -1185,15 +1235,22 @@ export const createAcpAgentApp = (
 
         const generated = await raceWithAbort(async () =>
           runtimeAgent.generate
-            ? runtimeAgent.generate(promptText, {
+            ? runtimeAgent.generate(runtimePrompt, {
               workspaceRoot: session.cwd,
               abortSignal: turnSignal,
               maxSteps: effectiveMaxSteps,
               modelId: turnModelId,
+              ...runtimeHistoryOptions,
             })
             : runtimeAgent.chat
               ? runtimeAgent.chat({
-                messages: [{ role: "user", content: promptText }],
+                messages: [
+                  ...compactedConversationHistory.map((message) => ({
+                    role: message.role,
+                    content: message.content,
+                  })),
+                  { role: "user" as const, content: promptText },
+                ],
                 signal: turnSignal,
                 abortSignal: turnSignal,
               })
