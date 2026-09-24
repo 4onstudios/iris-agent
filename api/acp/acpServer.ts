@@ -595,6 +595,12 @@ export const createAcpAgentApp = (
       const previousTurn = session.activeTurn;
       session.activeTurn = activeTurn;
       await cancelActiveTurn(previousTurn);
+      if (
+        sessions.get(sessionId) !== session ||
+        activeTurn.abortController.signal.aborted
+      ) {
+        return { stopReason: "cancelled" as const };
+      }
       const promptText = toPromptText(ctx.params.prompt);
       const irisMeta = readIrisMeta(ctx.params._meta);
       const effectiveMaxSteps = irisMeta.maxSteps ?? DEFAULT_MAX_STEPS;
@@ -655,6 +661,10 @@ export const createAcpAgentApp = (
       };
       const turnSignal = activeTurn.abortController.signal;
       if (sessions.get(sessionId) !== session || turnSignal.aborted) {
+        if (pendingUserMessage) {
+          const pendingIndex = session.history.indexOf(pendingUserMessage);
+          if (pendingIndex >= 0) session.history.splice(pendingIndex, 1);
+        }
         return { stopReason: "cancelled" as const };
       }
       const abortedMarker = Symbol("aborted");
