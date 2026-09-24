@@ -101,12 +101,18 @@ describe("ACP server", () => {
                     mcpServers: [],
                 });
 
+                // The ACP SDK wraps thrown errors into a generic JSON-RPC
+                // "Internal error" response; the original message survives only
+                // in the error's `data.details` field, not `.message`.
                 await expect(
                     ctx.request(acp.methods.agent.session.prompt, {
                         sessionId: session.sessionId,
                         prompt: [{ type: "text", text: "Failed request" }],
                     }),
-                ).rejects.toThrow("turn failed");
+                ).rejects.toMatchObject({
+                    message: expect.stringContaining("Internal error"),
+                    data: expect.objectContaining({ details: "turn failed" }),
+                });
                 await ctx.request(acp.methods.agent.session.prompt, {
                     sessionId: session.sessionId,
                     prompt: [{ type: "text", text: "Recovered request" }],
