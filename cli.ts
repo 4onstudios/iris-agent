@@ -88,6 +88,7 @@ async function main() {
           targetWorkspace || workspaceRoot,
         ),
       workspaceRoot,
+      modelId,
     );
   } else if (argv.chat) {
     // Interactive chat mode

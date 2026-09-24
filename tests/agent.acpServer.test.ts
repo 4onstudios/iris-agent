@@ -18,6 +18,115 @@ const readToolCallId = (update: acp.SessionUpdate): string | undefined =>
     "toolCallId" in update ? update.toolCallId : undefined;
 
 describe("ACP server", () => {
+    it("passes bounded prior turns to the runtime on subsequent prompts", async () => {
+        const runtime: AcpRuntimeAgent = {
+            stream: jest.fn(async () => ({
+                fullStream: createChunkStream([
+                    { type: "text-delta", payload: { text: "Done" } },
+                ]),
+                text: Promise.resolve("Done"),
+            })),
+        };
+        const stream = runtime.stream as jest.MockedFunction<
+            NonNullable<AcpRuntimeAgent["stream"]>
+        >;
+
+        await acp
+            .client({ name: "iris-agent-test-client" })
+            .connectWith(createAcpAgentApp(runtime), async (ctx) => {
+                await ctx.request(acp.methods.agent.initialize, {
+                    protocolVersion: acp.PROTOCOL_VERSION,
+                    clientCapabilities: {},
+                });
+                const session = await ctx.request(acp.methods.agent.session.new, {
+                    cwd: "/workspace",
+                    mcpServers: [],
+                });
+
+                for (let index = 0; index < 12; index += 1) {
+                    await ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId: session.sessionId,
+                        prompt: [
+                            {
+                                type: "text",
+                                text: `Request ${index} ${"x".repeat(5000)}`,
+                            },
+                        ],
+                    });
+                }
+                await ctx.request(acp.methods.agent.session.prompt, {
+                    sessionId: session.sessionId,
+                    prompt: [{ type: "text", text: "Final request" }],
+                });
+
+                const finalCall = stream.mock.calls[stream.mock.calls.length - 1];
+                const finalPrompt = finalCall?.[0] || "";
+                const finalOptions = finalCall?.[1] || {};
+                expect(finalPrompt).toContain("Request 11");
+                expect(finalPrompt).toContain("Final request");
+                expect(
+                    (finalOptions.conversationHistory as Array<unknown>).length,
+                ).toBeLessThanOrEqual(20);
+                expect(
+                    (finalOptions.conversationHistory as Array<{ content: string }>)[
+                        0
+                    ]?.content,
+                ).toContain("Request 2");
+            });
+    });
+
+    it("does not replay a failed turn in the next prompt", async () => {
+        const runtime: AcpRuntimeAgent = {
+            stream: jest.fn(async () => ({
+                fullStream: createChunkStream([
+                    { type: "text-delta", payload: { text: "Recovered" } },
+                ]),
+                text: Promise.resolve("Recovered"),
+            })),
+        };
+        const stream = runtime.stream as jest.MockedFunction<
+            NonNullable<AcpRuntimeAgent["stream"]>
+        >;
+        stream.mockRejectedValueOnce(new Error("turn failed"));
+
+        await acp
+            .client({ name: "iris-agent-test-client" })
+            .connectWith(createAcpAgentApp(runtime), async (ctx) => {
+                await ctx.request(acp.methods.agent.initialize, {
+                    protocolVersion: acp.PROTOCOL_VERSION,
+                    clientCapabilities: {},
+                });
+                const session = await ctx.request(acp.methods.agent.session.new, {
+                    cwd: "/workspace",
+                    mcpServers: [],
+                });
+
+                // The ACP SDK wraps thrown errors into a generic JSON-RPC
+                // "Internal error" response; the original message survives only
+                // in the error's `data.details` field, not `.message`.
+                await expect(
+                    ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId: session.sessionId,
+                        prompt: [{ type: "text", text: "Failed request" }],
+                    }),
+                ).rejects.toMatchObject({
+                    message: expect.stringContaining("Internal error"),
+                    data: expect.objectContaining({ details: "turn failed" }),
+                });
+                await ctx.request(acp.methods.agent.session.prompt, {
+                    sessionId: session.sessionId,
+                    prompt: [{ type: "text", text: "Recovered request" }],
+                });
+
+                expect(stream).toHaveBeenNthCalledWith(2, "Recovered request", {
+                    workspaceRoot: "/workspace",
+                    abortSignal: expect.any(AbortSignal),
+                    maxSteps: 50,
+                    modelId: undefined,
+                });
+            });
+    });
+
     it("supports the standard initialize, session, prompt, update, and close flow", async () => {
         const runtime: AcpRuntimeAgent = {
             stream: jest.fn(async () => ({

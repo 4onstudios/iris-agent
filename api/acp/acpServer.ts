@@ -19,8 +19,18 @@ import {
   mergeTokenUsage,
   type TokenUsageSummary,
 } from "../helpers/tokenUsage";
+import {
+  budgetConversationHistoryByTokens,
+  estimateTokensFromChars,
+  resolveModelInputTokenLimit,
+  truncateHeadByTokens,
+  type ConversationMessageLike,
+} from "../helpers/promptBudget";
 
 const DEFAULT_MAX_STEPS = 50;
+const ACP_MAX_CONVERSATION_MESSAGES = 20;
+const ACP_MAX_CONVERSATION_MESSAGE_TOKENS = 4_000;
+const ACP_PROMPT_TOKEN_BUDGET_RATIO = 0.2;
 const MAX_CONCURRENT_SESSION_LOADS = 16;
 
 const CHAT_SESSIONS_DIR = path.join(os.homedir(), ".iris", "chat-sessions");
@@ -29,6 +39,21 @@ type PersistedChatMessage = {
   role: "user" | "assistant";
   content: string;
 };
+
+type RuntimeConversationMessage = ConversationMessageLike & {
+  role: "user" | "assistant";
+  content: string;
+};
+
+const formatConversationHistory = (
+  history: RuntimeConversationMessage[],
+): string =>
+  history
+    .map((message) => {
+      const role = message.role === "user" ? "User" : "Assistant";
+      return `**${role}:** ${message.content}`;
+    })
+    .join("\n\n");
 
 type PersistedChatSession = {
   id: string;
@@ -227,7 +252,7 @@ export type AcpRuntimeAgent = {
     options?: Record<string, unknown>,
   ) => Promise<{ text?: string }>;
   chat?: (request: {
-    messages: Array<{ role: "user"; content: string }>;
+    messages: Array<{ role: "user" | "assistant"; content: string }>;
     signal?: AbortSignal;
     abortSignal?: AbortSignal;
   }) => Promise<unknown>;
@@ -337,6 +362,7 @@ const extractText = (value: unknown): string => {
 export const createAcpAgentApp = (
   agentProvider: AcpAgentProvider,
   workspaceRoot?: string,
+  defaultModelId?: string,
 ): acp.AgentApp => {
   const boundWorkspaceRoot = workspaceRoot
     ? path.resolve(workspaceRoot)
@@ -571,6 +597,12 @@ export const createAcpAgentApp = (
       const previousTurn = session.activeTurn;
       session.activeTurn = activeTurn;
       await cancelActiveTurn(previousTurn);
+      if (
+        sessions.get(sessionId) !== session ||
+        activeTurn.abortController.signal.aborted
+      ) {
+        return { stopReason: "cancelled" as const };
+      }
       const promptText = toPromptText(ctx.params.prompt);
       const irisMeta = readIrisMeta(ctx.params._meta);
       const effectiveMaxSteps = irisMeta.maxSteps ?? DEFAULT_MAX_STEPS;
@@ -583,12 +615,72 @@ export const createAcpAgentApp = (
       const runtimeAgent = await resolveAgent(turnModelId, session.cwd);
       let stepsUsed = 0;
       let usage: TokenUsageSummary | undefined;
-      if (promptText) {
-        session.history.push({ role: "user", content: promptText });
-      }
-      const persistTurn = async (assistantText: string): Promise<void> => {
+      // Read committed history only; the current prompt is never written to
+      // session.history until the turn actually commits (see persistTurn).
+      // This avoids exposing an in-flight, possibly-cancelled turn to any
+      // other request that reads session.history concurrently.
+      const conversationHistory = session.history.slice();
+      const maxPromptTokens = Math.max(
+        512,
+        Math.floor(
+          resolveModelInputTokenLimit(turnModelId ?? defaultModelId ?? "") *
+            ACP_PROMPT_TOKEN_BUDGET_RATIO,
+        ),
+      );
+      const compactedConversationHistory =
+        conversationHistory.length > 0
+          ? await budgetConversationHistoryByTokens(
+              conversationHistory satisfies RuntimeConversationMessage[],
+              ACP_MAX_CONVERSATION_MESSAGES,
+              ACP_MAX_CONVERSATION_MESSAGE_TOKENS,
+              maxPromptTokens,
+            )
+          : [];
+      const runtimeHistoryOptions =
+        compactedConversationHistory.length > 0
+          ? { conversationHistory: compactedConversationHistory }
+          : {};
+      // The history budget above only covers prior turns. The current
+      // prompt itself is unbounded input from the client and must also be
+      // allocated from (and truncated to fit) the remaining token budget --
+      // otherwise a single oversized prompt can still exceed the model's
+      // context window even with a fully compacted history.
+      const formattedHistory =
+        compactedConversationHistory.length > 0
+          ? formatConversationHistory(compactedConversationHistory)
+          : "";
+      const historyTokens = formattedHistory
+        ? estimateTokensFromChars(formattedHistory)
+        : 0;
+      const remainingPromptTokens = Math.max(
+        256,
+        maxPromptTokens - historyTokens,
+      );
+      const boundedPromptText = truncateHeadByTokens(
+        promptText,
+        remainingPromptTokens,
+      );
+      const runtimePrompt = formattedHistory
+        ? `${formattedHistory}\n\n**User:** ${boundedPromptText}`
+        : boundedPromptText;
+      const persistTurn = async (assistantText: string): Promise<boolean> => {
+        // Guard the commit itself: even though nothing is written until now,
+        // the turn may have been cancelled (or superseded by a new prompt)
+        // while we were awaiting the final notification/generation above.
+        // Re-check immediately before mutating session.history so a
+        // cancelled turn can never sneak its messages in at the last moment.
+        if (sessions.get(sessionId) !== session || turnSignal.aborted) {
+          return false;
+        }
         if (promptText && !session.title) {
           session.title = promptText.replace(/\s+/g, " ").slice(0, 120);
+        }
+        // Commit the user and assistant messages together, atomically, only
+        // once the turn has actually succeeded. Nothing is added to
+        // session.history before this point, so a cancelled/failed turn
+        // never leaks a partial entry for a concurrent turn to observe.
+        if (promptText) {
+          session.history.push({ role: "user", content: promptText });
         }
         if (assistantText) {
           session.history.push({ role: "assistant", content: assistantText });
@@ -599,6 +691,7 @@ export const createAcpAgentApp = (
           session,
           await loadPersistedChatSession(sessionId),
         );
+        return true;
       };
       const turnSignal = activeTurn.abortController.signal;
       if (sessions.get(sessionId) !== session || turnSignal.aborted) {
@@ -642,12 +735,13 @@ export const createAcpAgentApp = (
           const streamResult = await raceWithAbort(
             async () =>
               (runtimeAgent.stream as NonNullable<AcpRuntimeAgent["stream"]>)(
-                promptText,
+                runtimePrompt,
                 {
                   workspaceRoot: session.cwd,
                   abortSignal: turnSignal,
                   maxSteps: effectiveMaxSteps,
                   modelId: turnModelId,
+                  ...runtimeHistoryOptions,
                 },
               ) as Promise<AgentStreamResult>,
           );
@@ -1158,7 +1252,10 @@ export const createAcpAgentApp = (
           if (activeTurn.abortController.signal.aborted) {
             return { stopReason: "cancelled" as const };
           }
-          await persistTurn(finalText || "");
+          const committed = await persistTurn(finalText || "");
+          if (!committed) {
+            return { stopReason: "cancelled" as const };
+          }
           const resolvedUsage =
             usage &&
             typeof usage.totalTokens === "number" &&
@@ -1185,15 +1282,22 @@ export const createAcpAgentApp = (
 
         const generated = await raceWithAbort(async () =>
           runtimeAgent.generate
-            ? runtimeAgent.generate(promptText, {
+            ? runtimeAgent.generate(runtimePrompt, {
               workspaceRoot: session.cwd,
               abortSignal: turnSignal,
               maxSteps: effectiveMaxSteps,
               modelId: turnModelId,
+              ...runtimeHistoryOptions,
             })
             : runtimeAgent.chat
               ? runtimeAgent.chat({
-                messages: [{ role: "user", content: promptText }],
+                messages: [
+                  ...compactedConversationHistory.map((message) => ({
+                    role: message.role,
+                    content: message.content,
+                  })),
+                  { role: "user" as const, content: boundedPromptText },
+                ],
                 signal: turnSignal,
                 abortSignal: turnSignal,
               })
@@ -1215,8 +1319,8 @@ export const createAcpAgentApp = (
             },
           });
         }
-        await persistTurn(responseText || "");
-        return { stopReason: "end_turn" as const };
+        const committed = await persistTurn(responseText || "");
+        return { stopReason: committed ? ("end_turn" as const) : ("cancelled" as const) };
       } catch (error) {
         if (activeTurn.abortController.signal.aborted) {
           return { stopReason: "cancelled" as const };
@@ -1241,12 +1345,14 @@ export const createAcpAgentApp = (
 export async function startAcpServer(
   runtimeAgentOrFactory: AcpAgentProvider,
   workspaceRoot?: string,
+  defaultModelId?: string,
 ): Promise<void> {
   const output = Writable.toWeb(process.stdout) as WritableStream<Uint8Array>;
   const input = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
   const connection = createAcpAgentApp(
     runtimeAgentOrFactory,
     workspaceRoot,
+    defaultModelId,
   ).connect(acp.ndJsonStream(output, input));
 
   console.error("ACP agent ready: iris-agent (stdio)");
