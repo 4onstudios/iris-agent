@@ -19,15 +19,17 @@ const readToolCallId = (update: acp.SessionUpdate): string | undefined =>
 
 describe("ACP server", () => {
     it("passes bounded prior turns to the runtime on subsequent prompts", async () => {
-        const stream = jest.fn<NonNullable<AcpRuntimeAgent["stream"]>>(
-            async () => ({
-            fullStream: createChunkStream([
-                { type: "text-delta", payload: { text: "Done" } },
-            ]),
-            text: Promise.resolve("Done"),
-            }),
-        );
-        const runtime: AcpRuntimeAgent = { stream };
+        const runtime: AcpRuntimeAgent = {
+            stream: jest.fn(async () => ({
+                fullStream: createChunkStream([
+                    { type: "text-delta", payload: { text: "Done" } },
+                ]),
+                text: Promise.resolve("Done"),
+            })),
+        };
+        const stream = runtime.stream as jest.MockedFunction<
+            NonNullable<AcpRuntimeAgent["stream"]>
+        >;
 
         await acp
             .client({ name: "iris-agent-test-client" })
@@ -74,16 +76,18 @@ describe("ACP server", () => {
     });
 
     it("does not replay a failed turn in the next prompt", async () => {
-        const stream = jest
-            .fn()
-            .mockRejectedValueOnce(new Error("turn failed"))
-            .mockImplementation(async () => ({
+        const runtime: AcpRuntimeAgent = {
+            stream: jest.fn(async () => ({
                 fullStream: createChunkStream([
                     { type: "text-delta", payload: { text: "Recovered" } },
                 ]),
                 text: Promise.resolve("Recovered"),
-            }));
-        const runtime: AcpRuntimeAgent = { stream };
+            })),
+        };
+        const stream = runtime.stream as jest.MockedFunction<
+            NonNullable<AcpRuntimeAgent["stream"]>
+        >;
+        stream.mockRejectedValueOnce(new Error("turn failed"));
 
         await acp
             .client({ name: "iris-agent-test-client" })
