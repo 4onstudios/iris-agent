@@ -19,12 +19,14 @@ const readToolCallId = (update: acp.SessionUpdate): string | undefined =>
 
 describe("ACP server", () => {
     it("passes bounded prior turns to the runtime on subsequent prompts", async () => {
-        const stream = jest.fn(async () => ({
+        const stream = jest.fn<NonNullable<AcpRuntimeAgent["stream"]>>(
+            async () => ({
             fullStream: createChunkStream([
                 { type: "text-delta", payload: { text: "Done" } },
             ]),
             text: Promise.resolve("Done"),
-        }));
+            }),
+        );
         const runtime: AcpRuntimeAgent = { stream };
 
         await acp
@@ -55,9 +57,9 @@ describe("ACP server", () => {
                     prompt: [{ type: "text", text: "Final request" }],
                 });
 
-                const [finalPrompt, finalOptions] = stream.mock.calls[
-                    stream.mock.calls.length - 1
-                ] as [string, Record<string, unknown>];
+                const finalCall = stream.mock.calls[stream.mock.calls.length - 1];
+                const finalPrompt = finalCall?.[0] || "";
+                const finalOptions = finalCall?.[1] || {};
                 expect(finalPrompt).toContain("Request 11");
                 expect(finalPrompt).toContain("Final request");
                 expect(
