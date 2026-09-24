@@ -360,6 +360,7 @@ const extractText = (value: unknown): string => {
 export const createAcpAgentApp = (
   agentProvider: AcpAgentProvider,
   workspaceRoot?: string,
+  defaultModelId?: string,
 ): acp.AgentApp => {
   const boundWorkspaceRoot = workspaceRoot
     ? path.resolve(workspaceRoot)
@@ -606,9 +607,10 @@ export const createAcpAgentApp = (
       const runtimeAgent = await resolveAgent(turnModelId, session.cwd);
       let stepsUsed = 0;
       let usage: TokenUsageSummary | undefined;
-      if (promptText) {
-        session.history.push({ role: "user", content: promptText });
-      }
+      const pendingUserMessage = promptText
+        ? { role: "user" as const, content: promptText }
+        : undefined;
+      if (pendingUserMessage) session.history.push(pendingUserMessage);
       const conversationHistory = promptText
         ? session.history.slice(0, -1)
         : session.history.slice();
@@ -621,7 +623,7 @@ export const createAcpAgentApp = (
               Math.max(
                 512,
                 Math.floor(
-                  resolveModelInputTokenLimit(turnModelId ?? "") *
+                  resolveModelInputTokenLimit(turnModelId ?? defaultModelId ?? "") *
                     ACP_PROMPT_TOKEN_BUDGET_RATIO,
                 ),
               ),
@@ -635,6 +637,7 @@ export const createAcpAgentApp = (
         compactedConversationHistory.length > 0
           ? `${formatConversationHistory(compactedConversationHistory)}\n\n**User:** ${promptText}`
           : promptText;
+      let turnCommitted = false;
       const persistTurn = async (assistantText: string): Promise<void> => {
         if (promptText && !session.title) {
           session.title = promptText.replace(/\s+/g, " ").slice(0, 120);
@@ -648,6 +651,7 @@ export const createAcpAgentApp = (
           session,
           await loadPersistedChatSession(sessionId),
         );
+        turnCommitted = true;
       };
       const turnSignal = activeTurn.abortController.signal;
       if (sessions.get(sessionId) !== session || turnSignal.aborted) {
@@ -1280,6 +1284,10 @@ export const createAcpAgentApp = (
         }
         throw error;
       } finally {
+        if (!turnCommitted && pendingUserMessage) {
+          const pendingIndex = session.history.indexOf(pendingUserMessage);
+          if (pendingIndex >= 0) session.history.splice(pendingIndex, 1);
+        }
         if (session.activeTurn === activeTurn) {
           session.activeTurn = undefined;
         }
@@ -1298,12 +1306,14 @@ export const createAcpAgentApp = (
 export async function startAcpServer(
   runtimeAgentOrFactory: AcpAgentProvider,
   workspaceRoot?: string,
+  defaultModelId?: string,
 ): Promise<void> {
   const output = Writable.toWeb(process.stdout) as WritableStream<Uint8Array>;
   const input = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
   const connection = createAcpAgentApp(
     runtimeAgentOrFactory,
     workspaceRoot,
+    defaultModelId,
   ).connect(acp.ndJsonStream(output, input));
 
   console.error("ACP agent ready: iris-agent (stdio)");

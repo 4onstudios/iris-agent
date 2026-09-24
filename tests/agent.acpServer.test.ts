@@ -18,7 +18,7 @@ const readToolCallId = (update: acp.SessionUpdate): string | undefined =>
     "toolCallId" in update ? update.toolCallId : undefined;
 
 describe("ACP server", () => {
-    it("passes compacted prior turns to the runtime on subsequent prompts", async () => {
+    it("passes bounded prior turns to the runtime on subsequent prompts", async () => {
         const stream = jest.fn(async () => ({
             fullStream: createChunkStream([
                 { type: "text-delta", payload: { text: "Done" } },
@@ -39,25 +39,79 @@ describe("ACP server", () => {
                     mcpServers: [],
                 });
 
+                for (let index = 0; index < 12; index += 1) {
+                    await ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId: session.sessionId,
+                        prompt: [
+                            {
+                                type: "text",
+                                text: `Request ${index} ${"x".repeat(5000)}`,
+                            },
+                        ],
+                    });
+                }
                 await ctx.request(acp.methods.agent.session.prompt, {
                     sessionId: session.sessionId,
-                    prompt: [{ type: "text", text: "First request" }],
-                });
-                await ctx.request(acp.methods.agent.session.prompt, {
-                    sessionId: session.sessionId,
-                    prompt: [{ type: "text", text: "Second request" }],
+                    prompt: [{ type: "text", text: "Final request" }],
                 });
 
-                expect(stream).toHaveBeenNthCalledWith(
-                    2,
-                    "**User:** First request\n\n**Assistant:** Done\n\n**User:** Second request",
-                    expect.objectContaining({
-                        conversationHistory: [
-                            { role: "user", content: "First request" },
-                            { role: "assistant", content: "Done" },
-                        ],
+                const [finalPrompt, finalOptions] = stream.mock.calls[
+                    stream.mock.calls.length - 1
+                ] as [string, Record<string, unknown>];
+                expect(finalPrompt).toContain("Request 11");
+                expect(finalPrompt).toContain("Final request");
+                expect(
+                    (finalOptions.conversationHistory as Array<unknown>).length,
+                ).toBeLessThanOrEqual(20);
+                expect(
+                    (finalOptions.conversationHistory as Array<{ content: string }>)[
+                        0
+                    ]?.content,
+                ).toContain("Request 2");
+            });
+    });
+
+    it("does not replay a failed turn in the next prompt", async () => {
+        const stream = jest
+            .fn()
+            .mockRejectedValueOnce(new Error("turn failed"))
+            .mockImplementation(async () => ({
+                fullStream: createChunkStream([
+                    { type: "text-delta", payload: { text: "Recovered" } },
+                ]),
+                text: Promise.resolve("Recovered"),
+            }));
+        const runtime: AcpRuntimeAgent = { stream };
+
+        await acp
+            .client({ name: "iris-agent-test-client" })
+            .connectWith(createAcpAgentApp(runtime), async (ctx) => {
+                await ctx.request(acp.methods.agent.initialize, {
+                    protocolVersion: acp.PROTOCOL_VERSION,
+                    clientCapabilities: {},
+                });
+                const session = await ctx.request(acp.methods.agent.session.new, {
+                    cwd: "/workspace",
+                    mcpServers: [],
+                });
+
+                await expect(
+                    ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId: session.sessionId,
+                        prompt: [{ type: "text", text: "Failed request" }],
                     }),
-                );
+                ).rejects.toThrow("turn failed");
+                await ctx.request(acp.methods.agent.session.prompt, {
+                    sessionId: session.sessionId,
+                    prompt: [{ type: "text", text: "Recovered request" }],
+                });
+
+                expect(stream).toHaveBeenNthCalledWith(2, "Recovered request", {
+                    workspaceRoot: "/workspace",
+                    abortSignal: expect.any(AbortSignal),
+                    maxSteps: 50,
+                    modelId: undefined,
+                });
             });
     });
 
