@@ -613,13 +613,11 @@ export const createAcpAgentApp = (
       const runtimeAgent = await resolveAgent(turnModelId, session.cwd);
       let stepsUsed = 0;
       let usage: TokenUsageSummary | undefined;
-      const pendingUserMessage = promptText
-        ? { role: "user" as const, content: promptText }
-        : undefined;
-      if (pendingUserMessage) session.history.push(pendingUserMessage);
-      const conversationHistory = promptText
-        ? session.history.slice(0, -1)
-        : session.history.slice();
+      // Read committed history only; the current prompt is never written to
+      // session.history until the turn actually commits (see persistTurn).
+      // This avoids exposing an in-flight, possibly-cancelled turn to any
+      // other request that reads session.history concurrently.
+      const conversationHistory = session.history.slice();
       const compactedConversationHistory =
         conversationHistory.length > 0
           ? await budgetConversationHistoryByTokens(
@@ -643,10 +641,16 @@ export const createAcpAgentApp = (
         compactedConversationHistory.length > 0
           ? `${formatConversationHistory(compactedConversationHistory)}\n\n**User:** ${promptText}`
           : promptText;
-      let turnCommitted = false;
       const persistTurn = async (assistantText: string): Promise<void> => {
         if (promptText && !session.title) {
           session.title = promptText.replace(/\s+/g, " ").slice(0, 120);
+        }
+        // Commit the user and assistant messages together, atomically, only
+        // once the turn has actually succeeded. Nothing is added to
+        // session.history before this point, so a cancelled/failed turn
+        // never leaks a partial entry for a concurrent turn to observe.
+        if (promptText) {
+          session.history.push({ role: "user", content: promptText });
         }
         if (assistantText) {
           session.history.push({ role: "assistant", content: assistantText });
@@ -657,14 +661,9 @@ export const createAcpAgentApp = (
           session,
           await loadPersistedChatSession(sessionId),
         );
-        turnCommitted = true;
       };
       const turnSignal = activeTurn.abortController.signal;
       if (sessions.get(sessionId) !== session || turnSignal.aborted) {
-        if (pendingUserMessage) {
-          const pendingIndex = session.history.indexOf(pendingUserMessage);
-          if (pendingIndex >= 0) session.history.splice(pendingIndex, 1);
-        }
         return { stopReason: "cancelled" as const };
       }
       const abortedMarker = Symbol("aborted");
@@ -1294,10 +1293,6 @@ export const createAcpAgentApp = (
         }
         throw error;
       } finally {
-        if (!turnCommitted && pendingUserMessage) {
-          const pendingIndex = session.history.indexOf(pendingUserMessage);
-          if (pendingIndex >= 0) session.history.splice(pendingIndex, 1);
-        }
         if (session.activeTurn === activeTurn) {
           session.activeTurn = undefined;
         }
