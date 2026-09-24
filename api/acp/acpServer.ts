@@ -21,7 +21,9 @@ import {
 } from "../helpers/tokenUsage";
 import {
   budgetConversationHistoryByTokens,
+  estimateTokensFromChars,
   resolveModelInputTokenLimit,
+  truncateHeadByTokens,
   type ConversationMessageLike,
 } from "../helpers/promptBudget";
 
@@ -618,30 +620,58 @@ export const createAcpAgentApp = (
       // This avoids exposing an in-flight, possibly-cancelled turn to any
       // other request that reads session.history concurrently.
       const conversationHistory = session.history.slice();
+      const maxPromptTokens = Math.max(
+        512,
+        Math.floor(
+          resolveModelInputTokenLimit(turnModelId ?? defaultModelId ?? "") *
+            ACP_PROMPT_TOKEN_BUDGET_RATIO,
+        ),
+      );
       const compactedConversationHistory =
         conversationHistory.length > 0
           ? await budgetConversationHistoryByTokens(
               conversationHistory satisfies RuntimeConversationMessage[],
               ACP_MAX_CONVERSATION_MESSAGES,
               ACP_MAX_CONVERSATION_MESSAGE_TOKENS,
-              Math.max(
-                512,
-                Math.floor(
-                  resolveModelInputTokenLimit(turnModelId ?? defaultModelId ?? "") *
-                    ACP_PROMPT_TOKEN_BUDGET_RATIO,
-                ),
-              ),
+              maxPromptTokens,
             )
           : [];
       const runtimeHistoryOptions =
         compactedConversationHistory.length > 0
           ? { conversationHistory: compactedConversationHistory }
           : {};
-      const runtimePrompt =
+      // The history budget above only covers prior turns. The current
+      // prompt itself is unbounded input from the client and must also be
+      // allocated from (and truncated to fit) the remaining token budget --
+      // otherwise a single oversized prompt can still exceed the model's
+      // context window even with a fully compacted history.
+      const formattedHistory =
         compactedConversationHistory.length > 0
-          ? `${formatConversationHistory(compactedConversationHistory)}\n\n**User:** ${promptText}`
-          : promptText;
-      const persistTurn = async (assistantText: string): Promise<void> => {
+          ? formatConversationHistory(compactedConversationHistory)
+          : "";
+      const historyTokens = formattedHistory
+        ? estimateTokensFromChars(formattedHistory)
+        : 0;
+      const remainingPromptTokens = Math.max(
+        256,
+        maxPromptTokens - historyTokens,
+      );
+      const boundedPromptText = truncateHeadByTokens(
+        promptText,
+        remainingPromptTokens,
+      );
+      const runtimePrompt = formattedHistory
+        ? `${formattedHistory}\n\n**User:** ${boundedPromptText}`
+        : boundedPromptText;
+      const persistTurn = async (assistantText: string): Promise<boolean> => {
+        // Guard the commit itself: even though nothing is written until now,
+        // the turn may have been cancelled (or superseded by a new prompt)
+        // while we were awaiting the final notification/generation above.
+        // Re-check immediately before mutating session.history so a
+        // cancelled turn can never sneak its messages in at the last moment.
+        if (sessions.get(sessionId) !== session || turnSignal.aborted) {
+          return false;
+        }
         if (promptText && !session.title) {
           session.title = promptText.replace(/\s+/g, " ").slice(0, 120);
         }
@@ -661,6 +691,7 @@ export const createAcpAgentApp = (
           session,
           await loadPersistedChatSession(sessionId),
         );
+        return true;
       };
       const turnSignal = activeTurn.abortController.signal;
       if (sessions.get(sessionId) !== session || turnSignal.aborted) {
@@ -1221,7 +1252,10 @@ export const createAcpAgentApp = (
           if (activeTurn.abortController.signal.aborted) {
             return { stopReason: "cancelled" as const };
           }
-          await persistTurn(finalText || "");
+          const committed = await persistTurn(finalText || "");
+          if (!committed) {
+            return { stopReason: "cancelled" as const };
+          }
           const resolvedUsage =
             usage &&
             typeof usage.totalTokens === "number" &&
@@ -1262,7 +1296,7 @@ export const createAcpAgentApp = (
                     role: message.role,
                     content: message.content,
                   })),
-                  { role: "user" as const, content: promptText },
+                  { role: "user" as const, content: boundedPromptText },
                 ],
                 signal: turnSignal,
                 abortSignal: turnSignal,
@@ -1285,8 +1319,8 @@ export const createAcpAgentApp = (
             },
           });
         }
-        await persistTurn(responseText || "");
-        return { stopReason: "end_turn" as const };
+        const committed = await persistTurn(responseText || "");
+        return { stopReason: committed ? ("end_turn" as const) : ("cancelled" as const) };
       } catch (error) {
         if (activeTurn.abortController.signal.aborted) {
           return { stopReason: "cancelled" as const };
