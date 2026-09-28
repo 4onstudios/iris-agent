@@ -272,7 +272,7 @@ Provider-specific configuration:
 | --- | --- |
 | `OLLAMA_BASE_URL` | Ollama-compatible server URL. |
 | `OPENROUTER_BASE_URL` | OpenRouter-compatible API URL. |
-| `OPENROUTER_SITE_URL` / `OPENROUTER_SITE_NAME` | Optional OpenRouter request metadata. |
+| `OPENROUTER_SITE_URL` / `OPENROUTER_SITE_NAME` | Override Iris Agent's OpenRouter attribution URL and display name. Defaults to the Iris Agent GitHub repository and `Iris Agent`. Requests include `HTTP-Referer`, `X-OpenRouter-Title`, and the `cli-agent,ide-extension` categories. |
 | `ANTHROPIC_BETA` / `ANTHROPIC_BETAS` | Optional Anthropic beta headers. |
 | `HF_TOKEN` | Hugging Face authentication where required by a configured provider. |
 

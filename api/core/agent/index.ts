@@ -70,6 +70,7 @@ import {
   StreamErrorRetryProcessor,
 } from "@mastra/core/processors";
 import { MultimodalTokenLimiterProcessor } from "./utils/multimodalTokenLimiter";
+import { resolveOpenRouterAttributionHeaders } from "./utils/openRouterAttribution";
 import { coreLsp } from "../library/lsp/coreLsp";
 import { executeToolWithRecovery } from "./utils/errorRecovery";
 import {
@@ -554,11 +555,7 @@ const getModel = (modelId: string) => {
     const openrouter = createOpenRouter({
       baseURL: process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1",
       apiKey: openrouterApiKey,
-      // Optional attribution headers surface the app on OpenRouter leaderboards.
-      headers: {
-        "HTTP-Referer": process.env.OPENROUTER_SITE_URL || "https://github.com/4onstudios/iris-agent/",
-        "X-Title": process.env.OPENROUTER_SITE_NAME || "Iris",
-      },
+      headers: resolveOpenRouterAttributionHeaders(),
       ...(isOpenRouterDebugEnabled
         ? {
           fetch: async (input, init) => {
