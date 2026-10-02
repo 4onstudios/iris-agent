@@ -224,6 +224,66 @@ describe("agent chat streaming", () => {
     });
   });
 
+  it.each([false, true])(
+    "includes the current request exactly once when history already includes it: %s",
+    async (historyIncludesCurrentRequest) => {
+      const { server, baseUrl } = await startServer();
+      const currentRequest = "new request marker";
+      const history = [
+        { role: "user", content: "previous question marker" },
+        { role: "assistant", content: "previous answer marker" },
+        ...(historyIncludesCurrentRequest
+          ? [{ role: "user", content: currentRequest }]
+          : []),
+      ];
+
+      try {
+        const response = await postStreaming(baseUrl, "/api/agent/chat", {
+          message: currentRequest,
+          conversationHistory: history,
+          modelId: "gpt-4o-mini",
+          workspaceRoot: `/tmp/stream-history-normalization-${historyIncludesCurrentRequest}`,
+          stream: true,
+        });
+
+        expect(response.status).toBe(200);
+        const prompt = mockAgentStream.mock.calls[0][0];
+        expect(typeof prompt).toBe("string");
+        expect(prompt).toContain("previous answer marker");
+        expect(prompt.split(currentRequest)).toHaveLength(2);
+      } finally {
+        await stopServer(server);
+      }
+    },
+  );
+
+  it("keeps structured tool results as the current synthesis turn after normalizing history", async () => {
+    const { server, baseUrl } = await startServer();
+    try {
+      const response = await postStreaming(baseUrl, "/api/agent/chat", {
+        message: "new request marker",
+        conversationHistory: [
+          { role: "user", content: "previous question marker" },
+          { role: "assistant", content: "previous answer marker" },
+        ],
+        toolResults: [
+          { name: "read_file", result: { output: "latest evidence marker" } },
+        ],
+        modelId: "gpt-4o-mini",
+        workspaceRoot: "/tmp/stream-history-tool-continuation",
+        stream: true,
+      });
+
+      expect(response.status).toBe(200);
+      const [prompt, options] = mockAgentStream.mock.calls[0];
+      expect(prompt).toContain("latest evidence marker");
+      expect(prompt.split("new request marker")).toHaveLength(2);
+      expect(options).toMatchObject({ maxSteps: 1, toolChoice: "none" });
+    } finally {
+      await stopServer(server);
+    }
+  });
+
   it("scopes writable Mastra task memory to the chat thread", async () => {
     const { server, baseUrl } = await startServer();
 

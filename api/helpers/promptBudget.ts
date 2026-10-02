@@ -115,7 +115,10 @@ export const buildConversationTurn = async <T extends ConversationMessageLike>(
     const historyTokens = estimateTokensFromChars(
       formatConversationTranscript(budgetedConversationHistory),
     );
-    currentMessage = truncateTextByTokens(
+    const truncateCurrentMessage = instruction
+      ? truncateHeadByTokens
+      : truncateTextByTokens;
+    currentMessage = truncateCurrentMessage(
       options.currentMessage,
       Math.max(1, available - historyTokens),
     );
@@ -195,13 +198,13 @@ export const truncateTextByTokens = (value: string, maxTokens: number): string =
 
 export const truncateHeadByTokens = (value: string, maxTokens: number): string => {
   const safeMaxTokens = Math.max(0, maxTokens);
-  const maxChars = safeMaxTokens * TOKEN_TO_CHAR_RATIO;
+  const maxChars = Math.floor(safeMaxTokens * TOKEN_TO_CHAR_RATIO);
   if (value.length <= maxChars) return value;
 
-  const keepChars = Math.max(0, maxChars - 31);
-  return `\n\n[truncated: prompt budget exceeded]\n${value.slice(
-    Math.max(0, value.length - keepChars),
-  )}`;
+  const marker = "\n\n[truncated: prompt budget exceeded]\n";
+  if (maxChars <= marker.length * 2) return value.slice(value.length - maxChars);
+  const keepChars = maxChars - marker.length;
+  return `${marker}${value.slice(value.length - keepChars)}`;
 };
 
 export const truncateMiddleByTokens = (value: string, maxTokens: number): string => {

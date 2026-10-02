@@ -2466,9 +2466,12 @@ router.post(
         : [];
 
       if (
-        messages.length === 0 &&
         typeof message === "string" &&
-        message.length > 0
+        message.length > 0 &&
+        !(
+          messages[messages.length - 1]?.role === "user" &&
+          messages[messages.length - 1]?.content === message
+        )
       ) {
         messages.push({ role: "user", content: message });
       }

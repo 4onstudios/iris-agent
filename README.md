@@ -305,6 +305,8 @@ Provider-specific configuration:
 
 OpenRouter model context and output limits are looked up by model ID and cached for one hour. When metadata cannot be fetched, the agent logs a warning and uses a conservative 16,000-token input allowance; other unknown models use the same fallback. Small-context models retain fewer previous ACP turns. These budgets are estimates rather than a guarantee that a request will fit: provider tokenization, tool schemas, images, and provider-specific routing can change the actual request size.
 
+HTTP chat history may contain only prior turns or already include the current user message; the current message is included once before budgeting. Oversized ordinary requests retain their beginning, while final-answer synthesis continuations retain their tail to preserve the newest tool evidence.
+
 Browser-backed web search uses `puppeteer`, which downloads a compatible
 Chrome for local and packaged installations. Set `BROWSER_NO_SANDBOX=true`
 only when browser automation must run without a sandbox.
