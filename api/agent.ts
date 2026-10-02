@@ -754,7 +754,6 @@ const envSnapshotCache = new Map<
 const AGENT_CACHE_MAX_SIZE = 50;
 const MAX_INLINE_FILE_CONTENT_CHARS = 6000;
 const MAX_CONVERSATION_MESSAGES = 12;
-const MAX_CONVERSATION_MESSAGE_CHARS = 4000;
 const MAX_CONVERSATION_MESSAGE_TOKENS = 1200;
 const MAX_CONTEXT_FILES = 8;
 const DEFAULT_PROMPT_TOKEN_BUDGET_RATIO = 0.55;
@@ -2928,12 +2927,10 @@ _You have discovered the following in earlier interactions. Use this to avoid re
       );
 
       const promptBuild = await buildPromptWithinTokenBudget({
-        effectiveMessage: truncateText(
+        effectiveMessage:
           typeof messages[messages.length - 1]?.content === "string"
             ? messages[messages.length - 1].content
             : effectiveMessage,
-          MAX_CONVERSATION_MESSAGE_CHARS,
-        ),
         priorConversationHistory: mastraManagedContextMode
           ? undefined
           : messages.slice(0, -1),

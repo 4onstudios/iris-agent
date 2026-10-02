@@ -427,6 +427,7 @@ export const executeMcpToolByKey = async (
     inputKeys: Object.keys(input),
     serversCount: servers.length,
   });
+  let reconnectRequiredServer: string | undefined;
 
   for (const server of servers) {
     if (!server.enabled) {
@@ -445,12 +446,7 @@ export const executeMcpToolByKey = async (
     } catch (error) {
       console.error(`❌ Failed to list tools from ${server.name}:`, (error as Error).message);
       if (error instanceof McpOAuthReconnectRequiredError) {
-        return {
-          success: false,
-          server: server.name,
-          isError: true,
-          error: error.message,
-        };
+        reconnectRequiredServer ??= server.name;
       }
       continue;
     }
@@ -487,6 +483,15 @@ export const executeMcpToolByKey = async (
       });
       return result;
     }
+  }
+
+  if (reconnectRequiredServer) {
+    return {
+      success: false,
+      server: reconnectRequiredServer,
+      isError: true,
+      error: `MCP authorization for "${reconnectRequiredServer}" must be reconnected after restart. Reconnect the server in Settings.`,
+    };
   }
 
   console.warn("⚠️ Tool key not found on any server:", toolKey);

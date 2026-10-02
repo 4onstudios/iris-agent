@@ -39,4 +39,20 @@ describe("prompt budgeting", () => {
     expect(result.promptEstimatedTokens).toBeLessThanOrEqual(1_000);
     expect(result.prompt).toMatch(/\*\*User:\*\* Opening instruction: x{1000}/);
   });
+
+  it("does not drop a fitting continuation tail before applying the token budget", async () => {
+    const continuation = `${"tool result ".repeat(450)}[last tool result]`;
+    const result = await buildPromptWithinTokenBudget({
+      effectiveMessage: continuation,
+      priorConversationHistory: [],
+      contextInfo: "",
+      maxPromptTokens: 2_000,
+      maxConversationMessages: 12,
+      maxConversationMessageTokens: 1_200,
+    });
+
+    expect(result.prompt).toContain("[last tool result]");
+    expect(result.prompt).toContain("tool result");
+    expect(result.promptEstimatedTokens).toBeLessThanOrEqual(2_000);
+  });
 });
