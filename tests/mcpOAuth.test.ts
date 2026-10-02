@@ -20,6 +20,7 @@ jest.mock("@modelcontextprotocol/sdk/client/streamableHttp.js", () => ({
 }));
 
 import { auth } from "@modelcontextprotocol/sdk/client/auth.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -69,14 +70,21 @@ describe("remote MCP OAuth", () => {
     await fs.rm(testHome, { recursive: true, force: true });
   });
 
-  it("completes authorization, discovers tools, and resolves credentials inside iris-agent", async () => {
+  it("completes OAuth without forwarding configured authorization headers", async () => {
+    const configuredHeaders = {
+      "X-Workspace": "team-1",
+      authorization: "old-value",
+      Authorization: "old-value",
+      AUTHORIZATION: "old-value",
+      aUtHoRiZaTiOn: "old-value",
+    };
     const server = sanitizeMcpServer({
       id: "miro",
       name: "Miro",
       url: "https://mcp.miro.com/",
-      headers: { "X-Workspace": "team-1", authorization: "old-value" },
+      headers: configuredHeaders,
     });
-    if (!server) throw new Error("Expected Miro config to be valid");
+    if (!server?.url) throw new Error("Expected Miro config to be valid");
 
     const flow = await startMcpOAuth(
       server,
@@ -91,6 +99,14 @@ describe("remote MCP OAuth", () => {
 
     await completeMcpOAuth({ state, code: "authorization-code" });
 
+    expect(StreamableHTTPClientTransport).toHaveBeenCalledWith(
+      new URL(server.url),
+      {
+        authProvider: provider,
+        requestInit: { headers: { "X-Workspace": "team-1" } },
+      },
+    );
+    expect(server.headers).toEqual(configuredHeaders);
     expect(getMcpOAuthFlow(flow.flowId)).toEqual({
       status: "connected",
       tools: [{ name: "search_boards", description: "Search Miro boards" }],
@@ -100,7 +116,11 @@ describe("remote MCP OAuth", () => {
       "X-Workspace": "team-1",
       Authorization: expect.stringMatching(/^Bearer /),
     });
-    expect(authenticatedServer.headers).not.toHaveProperty("authorization");
+    expect(
+      Object.keys(authenticatedServer.headers || {}).filter(
+        (key) => key.toLowerCase() === "authorization",
+      ),
+    ).toEqual(["Authorization"]);
     expect(mockListTools).toHaveBeenCalledTimes(1);
     expect(mockClientClose).toHaveBeenCalledTimes(1);
   });

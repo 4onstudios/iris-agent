@@ -207,6 +207,15 @@ export const startMcpOAuth = async (
   return { flowId, authorizationUrl: authorizationUrl.toString() };
 };
 
+const withoutAuthorizationHeaders = (
+  headers: McpServerConfig["headers"],
+): Record<string, string> =>
+  Object.fromEntries(
+    Object.entries(headers || {}).filter(
+      ([key]) => key.toLowerCase() !== "authorization",
+    ),
+  );
+
 export const completeMcpOAuth = async ({
   state,
   code,
@@ -236,7 +245,7 @@ export const completeMcpOAuth = async ({
     const client = new Client({ name: "iris-agent", version: "1.0.0" });
     const transport = new StreamableHTTPClientTransport(new URL(flow.server.url), {
       authProvider: flow.provider,
-      requestInit: { headers: flow.server.headers || {} },
+      requestInit: { headers: withoutAuthorizationHeaders(flow.server.headers) },
     });
     try {
       await client.connect(transport);
@@ -294,10 +303,7 @@ export const resolveMcpOAuthServer = async (
     );
   }
 
-  const headers = { ...(server.headers || {}) };
-  for (const key of Object.keys(headers)) {
-    if (key.toLowerCase() === "authorization") delete headers[key];
-  }
+  const headers = withoutAuthorizationHeaders(server.headers);
   headers.Authorization = `Bearer ${tokens.access_token}`;
   return { ...server, headers };
 };
