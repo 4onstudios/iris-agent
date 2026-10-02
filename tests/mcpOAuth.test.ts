@@ -156,6 +156,31 @@ describe("remote MCP OAuth", () => {
     await expect(restartedOAuth.resolveMcpOAuthServer(server)).rejects.toThrow(
       /must be reconnected after restart/,
     );
+
+    const authenticatedServer = await resolveMcpOAuthServer(server);
+    const authorization = authenticatedServer.headers?.Authorization;
+    if (!authorization) throw new Error("Expected resolved OAuth authorization header");
+    await expect(
+      restartedOAuth.resolveMcpOAuthServer(authenticatedServer),
+    ).resolves.toEqual(authenticatedServer);
+
+    for (const name of ["authorization", "AUTHORIZATION", "aUtHoRiZaTiOn"]) {
+      const forwardedServer = {
+        ...server,
+        headers: {
+          [name]: authorization,
+          "X-Workspace": "team-1",
+        },
+      };
+      await expect(
+        restartedOAuth.resolveMcpOAuthServer(forwardedServer),
+      ).resolves.toEqual(forwardedServer);
+    }
+    await expect(
+      restartedOAuth.resolveMcpOAuthServer({
+        ...server, headers: { Authorization: "   " },
+      }),
+    ).rejects.toThrow(/must be reconnected after restart/);
   });
 
   it("rejects a callback after the authorization flow expires", async () => {

@@ -30,6 +30,15 @@ The SDK and ACP server require Node.js `>=22.13.0`. `IrisClient` is a
 Node.js API for IDE desktop or backend processes; it is not intended to run in
 a browser renderer.
 
+### MCP OAuth across processes
+
+Browser OAuth sessions are held in the HTTP service's memory. Before starting
+an ACP subprocess, the host resolves the server credentials and forwards the
+authorization header with the MCP configuration. A subprocess accepts that
+explicit header even if a reconnect marker exists; without credentials, the
+marker still requires signing in again after the HTTP service restarts.
+OAuth tokens are not persisted by the service.
+
 ## Quick Start
 
 This project can be installed and run with either npm or Yarn. Configure your provider API key (such as `OPENROUTER_API_KEY` or `OPENAI_API_KEY`). By default, Iris Agent routes through OpenRouter (`openrouter/openai/gpt-5.3-codex`) when `OPENROUTER_API_KEY` is provided or configured.

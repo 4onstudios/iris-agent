@@ -284,6 +284,11 @@ export const resolveMcpOAuthServer = async (
   if (!server.url) return server;
   const provider = providersByServer.get(getServerKey(server));
   if (!provider) {
+    const hasAuthorization = Object.entries(server.headers || {}).some(
+      ([name, value]) =>
+        name.toLowerCase() === "authorization" && value.trim().length > 0,
+    );
+    if (hasAuthorization) return server;
     if (await requiresReconnect(server)) {
       throw new McpOAuthReconnectRequiredError(server.name);
     }
