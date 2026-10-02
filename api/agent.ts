@@ -2934,7 +2934,9 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             : effectiveMessage,
           MAX_CONVERSATION_MESSAGE_CHARS,
         ),
-        conversationHistory: mastraManagedContextMode ? undefined : messages,
+        priorConversationHistory: mastraManagedContextMode
+          ? undefined
+          : messages.slice(0, -1),
         contextInfo,
         maxPromptTokens: promptTokenBudget,
         maxConversationMessages: MAX_CONVERSATION_MESSAGES,

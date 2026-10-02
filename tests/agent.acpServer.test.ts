@@ -3,6 +3,7 @@ import {
     createAcpAgentApp,
     type AcpRuntimeAgent,
 } from "../api/acp/acpServer";
+import { resolvePromptTokenBudget } from "../api/helpers/promptBudget";
 
 const createChunkStream = (
     chunks: Array<{ type: string; payload?: Record<string, unknown> }>,
@@ -66,7 +67,9 @@ describe("ACP server", () => {
             const lastCall = stream.mock.calls[4];
             expect(lastCall?.[0]).toContain("Turn 3:");
             expect(lastCall?.[0]).toContain("Next task");
-            expect((lastCall?.[0] ?? "").length).toBeLessThanOrEqual(656 * 4);
+            expect((lastCall?.[0] ?? "").length).toBeLessThanOrEqual(
+                resolvePromptTokenBudget(3_277) * 4,
+            );
             expect(metadata).toHaveBeenCalledTimes(1);
         } finally {
             metadata.mockRestore();
@@ -119,14 +122,8 @@ describe("ACP server", () => {
                 const finalOptions = finalCall?.[1] || {};
                 expect(finalPrompt).toContain("Request 11");
                 expect(finalPrompt).toContain("Final request");
-                expect(
-                    (finalOptions.conversationHistory as Array<unknown>).length,
-                ).toBeLessThanOrEqual(20);
-                expect(
-                    (finalOptions.conversationHistory as Array<{ content: string }>).some(
-                        (message) => message.content.includes("Request 11"),
-                    ),
-                ).toBe(true);
+                expect(finalPrompt.match(/\*\*User:\*\*/g)?.length ?? 0).toBeLessThanOrEqual(7);
+                expect(finalOptions).not.toHaveProperty("conversationHistory");
             });
     });
 

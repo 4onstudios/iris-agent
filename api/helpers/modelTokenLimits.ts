@@ -84,18 +84,46 @@ const openRouterSlug = (modelId: string, env: NodeJS.ProcessEnv): string | undef
   if (normalized.startsWith("openrouter/")) {
     return normalized.slice("openrouter/".length);
   }
-  if (normalized.startsWith("ollama/") || normalized.startsWith("local/") ||
-      normalized.startsWith("huggingface/")) return undefined;
-  if (normalized.startsWith("anthropic/") || normalized.startsWith("openai/") ||
-      normalized.startsWith("google/")) return undefined;
-  if (normalized.includes("/")) return normalized;
-  if (!env.OPENROUTER_API_KEY) return undefined;
-  if (normalized.startsWith("claude") && !env.ANTHROPIC_API_KEY) return `anthropic/${normalized}`;
-  if (normalized.startsWith("gemini") && !env.GEMINI_API_KEY && !env.GOOGLE_GENERATIVE_AI_API_KEY) return `google/${normalized}`;
-  if (!env.OPENAI_API_KEY) return normalized.startsWith("gpt") || /^o[13]/.test(normalized)
-    ? `openai/${normalized}`
-    : normalized;
-  return undefined;
+  if (
+    normalized.startsWith("ollama/") ||
+    normalized.startsWith("local/") ||
+    normalized.startsWith("huggingface/") ||
+    normalized.startsWith("anthropic/") ||
+    normalized.startsWith("openai/")
+  ) return undefined;
+  if (normalized.startsWith("google/")) {
+    return !env.GOOGLE_GENERATIVE_AI_API_KEY &&
+      !env.GEMINI_API_KEY &&
+      env.OPENROUTER_API_KEY
+      ? normalized
+      : undefined;
+  }
+  if (normalized.includes("/")) {
+    return env.OPENROUTER_API_KEY ? normalized : undefined;
+  }
+  if (normalized.startsWith("claude")) {
+    return !env.ANTHROPIC_API_KEY && env.OPENROUTER_API_KEY
+      ? `anthropic/${normalized}`
+      : undefined;
+  }
+  if (normalized.startsWith("gemini")) {
+    return !env.GOOGLE_GENERATIVE_AI_API_KEY &&
+      !env.GEMINI_API_KEY &&
+      env.OPENROUTER_API_KEY
+      ? `google/${normalized}`
+      : undefined;
+  }
+  if (
+    normalized.startsWith("gpt") ||
+    /^o[13]/.test(normalized)
+  ) {
+    return !env.OPENAI_API_KEY && env.OPENROUTER_API_KEY
+      ? `openai/${normalized}`
+      : undefined;
+  }
+  return !env.OPENAI_API_KEY && env.OPENROUTER_API_KEY
+    ? normalized
+    : undefined;
 };
 
 const fetchOpenRouterInputLimit = async (

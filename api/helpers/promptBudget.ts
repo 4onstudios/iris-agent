@@ -20,7 +20,8 @@ export {
 
 type PromptBudgetBuildOptions<T extends ConversationMessageLike> = {
   effectiveMessage: string;
-  conversationHistory?: T[];
+  /** Messages before effectiveMessage; the current message is never included. */
+  priorConversationHistory?: T[];
   contextInfo: string;
   maxPromptTokens: number;
   maxConversationMessages: number;
@@ -74,34 +75,51 @@ export const buildConversationTurn = async <T extends ConversationMessageLike>(
   if (available < 1) {
     throw new Error("Prompt budget cannot fit context and continuation instructions");
   }
-  const currentBudget = Math.max(1, Math.floor(available * (
-    options.history?.length ? 0.4 : 1
-  )));
-  const currentMessage = truncateHeadByTokens(options.currentMessage, currentBudget);
-  const historyBudget = Math.max(
-    0,
-    available - estimateTokensFromChars(currentMessage),
-  );
   const windowed = options.history?.slice(-options.maxConversationMessages) || [];
-  // Keep the immediately preceding exchange intact before compacting older turns.
-  const recent = windowed.slice(-2);
-  const older = windowed.slice(0, -2);
-  const recentHistory = await budgetConversationHistoryByTokens(
-    recent,
-    2,
-    options.maxConversationMessageTokens,
-    historyBudget,
-  );
-  const recentTokens = estimateTokensFromChars(formatConversationTranscript(recentHistory));
-  const olderHistory = older.length && historyBudget > recentTokens
-    ? await budgetConversationHistoryByTokens(
-      older,
-      options.maxConversationMessages,
+  const budgetHistory = async (historyBudget: number): Promise<T[]> => {
+    // Keep the immediately preceding exchange intact before compacting older turns.
+    const recent = windowed.slice(-2);
+    const older = windowed.slice(0, -2);
+    const recentHistory = await budgetConversationHistoryByTokens(
+      recent,
+      2,
       options.maxConversationMessageTokens,
-      historyBudget - recentTokens,
-    )
-    : [];
-  const budgetedConversationHistory = [...olderHistory, ...recentHistory];
+      historyBudget,
+    );
+    const recentTokens = estimateTokensFromChars(
+      formatConversationTranscript(recentHistory),
+    );
+    const olderHistory = older.length && historyBudget > recentTokens
+      ? await budgetConversationHistoryByTokens(
+        older,
+        options.maxConversationMessages,
+        options.maxConversationMessageTokens,
+        historyBudget - recentTokens,
+      )
+      : [];
+    return [...olderHistory, ...recentHistory];
+  };
+  const fullCurrentMessageTokens = estimateTokensFromChars(options.currentMessage);
+  let currentMessage: string;
+  let budgetedConversationHistory: T[];
+  if (fullCurrentMessageTokens <= available) {
+    currentMessage = options.currentMessage;
+    budgetedConversationHistory = await budgetHistory(
+      available - fullCurrentMessageTokens,
+    );
+  } else {
+    const historyAllocation = windowed.length
+      ? Math.floor(available * 0.2)
+      : 0;
+    budgetedConversationHistory = await budgetHistory(historyAllocation);
+    const historyTokens = estimateTokensFromChars(
+      formatConversationTranscript(budgetedConversationHistory),
+    );
+    currentMessage = truncateTextByTokens(
+      options.currentMessage,
+      Math.max(1, available - historyTokens),
+    );
+  }
   const historyText = formatConversationTranscript(budgetedConversationHistory);
   const prompt = `${historyText ? `${historyText}\n\n**User:** ` : ""}${currentMessage}${contextSuffix}${instructionSuffix}`;
   const boundedPrompt = estimateTokensFromChars(prompt) > maxTokens
@@ -293,7 +311,7 @@ export const buildPromptWithinTokenBudget = async <T extends ConversationMessage
 ): Promise<PromptBudgetBuildResult<T>> => {
   const {
     effectiveMessage,
-    conversationHistory,
+    priorConversationHistory,
     contextInfo,
     maxPromptTokens,
     maxConversationMessages,
@@ -301,15 +319,9 @@ export const buildPromptWithinTokenBudget = async <T extends ConversationMessage
     continuationInstruction,
   } = options;
 
-  const history = conversationHistory?.slice() || [];
-  // HTTP callers include the current turn in conversationHistory; do not
-  // compact it as prior history or replay it twice.
-  if (history.length && history[history.length - 1]?.content === effectiveMessage) {
-    history.pop();
-  }
   return buildConversationTurn({
     currentMessage: effectiveMessage,
-    history,
+    history: priorConversationHistory,
     contextInfo,
     maxPromptTokens,
     maxConversationMessages,

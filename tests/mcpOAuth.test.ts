@@ -20,6 +20,9 @@ jest.mock("@modelcontextprotocol/sdk/client/streamableHttp.js", () => ({
 }));
 
 import { auth } from "@modelcontextprotocol/sdk/client/auth.js";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import {
   completeMcpOAuth,
   getMcpOAuthFlow,
@@ -29,7 +32,13 @@ import {
 import { sanitizeMcpServer } from "../api/core/library/mcpSettings";
 
 describe("remote MCP OAuth", () => {
-  beforeEach(() => {
+  let originalHome: string | undefined;
+  let testHome: string;
+
+  beforeEach(async () => {
+    originalHome = process.env.HOME;
+    testHome = await fs.mkdtemp(path.join(os.tmpdir(), "iris-mcp-oauth-"));
+    process.env.HOME = testHome;
     jest.clearAllMocks();
     jest.mocked(auth).mockImplementation(async (provider, options) => {
       if (options.authorizationCode) {
@@ -51,6 +60,13 @@ describe("remote MCP OAuth", () => {
 
       return "AUTHORIZED";
     });
+  });
+
+  afterEach(async () => {
+    jest.restoreAllMocks();
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    await fs.rm(testHome, { recursive: true, force: true });
   });
 
   it("completes authorization, discovers tools, and resolves credentials inside iris-agent", async () => {
@@ -87,5 +103,61 @@ describe("remote MCP OAuth", () => {
     expect(authenticatedServer.headers).not.toHaveProperty("authorization");
     expect(mockListTools).toHaveBeenCalledTimes(1);
     expect(mockClientClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("requires reconnect after restart without persisting OAuth credentials", async () => {
+    const server = sanitizeMcpServer({
+      id: "restart-test",
+      name: "Restart test",
+      url: "https://mcp.example.com/",
+    });
+    if (!server) throw new Error("Expected MCP config to be valid");
+
+    const flow = await startMcpOAuth(
+      server,
+      "http://127.0.0.1:1234/api/agent/mcp/oauth/callback",
+    );
+    const provider = jest.mocked(auth).mock.calls[0][0];
+    const state = await provider.state?.();
+    if (!state) throw new Error("Expected OAuth state to be available");
+    await completeMcpOAuth({ state, code: "authorization-code" });
+
+    expect(getMcpOAuthFlow(flow.flowId)).toMatchObject({ status: "connected" });
+    const persistedState = await fs.readFile(
+      path.join(testHome, ".iris", "mcp-oauth", "reconnect-required.json"),
+      "utf8",
+    );
+    expect(persistedState).not.toContain("miro-access-token");
+    expect(persistedState).not.toContain("miro-refresh-token");
+    expect(flow.flowId).toBeTruthy();
+
+    jest.resetModules();
+    const restartedOAuth = await import("../api/core/agent/tools/mcpOAuth");
+    await expect(restartedOAuth.resolveMcpOAuthServer(server)).rejects.toThrow(
+      /must be reconnected after restart/,
+    );
+  });
+
+  it("rejects a callback after the authorization flow expires", async () => {
+    const server = sanitizeMcpServer({
+      id: "expired-flow",
+      name: "Expired flow",
+      url: "https://mcp.example.com/",
+    });
+    if (!server) throw new Error("Expected MCP config to be valid");
+    const flow = await startMcpOAuth(
+      server,
+      "http://127.0.0.1:1234/api/agent/mcp/oauth/callback",
+    );
+    const provider = jest.mocked(auth).mock.calls[0][0];
+    const state = await provider.state?.();
+    if (!state) throw new Error("Expected OAuth state to be available");
+
+    const now = Date.now();
+    jest.spyOn(Date, "now").mockReturnValue(now + 10 * 60 * 1000 + 1);
+    await expect(
+      completeMcpOAuth({ state, code: "authorization-code" }),
+    ).rejects.toThrow("OAuth state is invalid or has expired.");
+    expect(getMcpOAuthFlow(flow.flowId)).toBeUndefined();
   });
 });

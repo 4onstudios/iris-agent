@@ -10,7 +10,10 @@ import {
 } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { redactMcpUrlForDisplay, type McpServerConfig } from "../../library/mcpSettings";
-import { resolveMcpOAuthServer } from "./mcpOAuth";
+import {
+  McpOAuthReconnectRequiredError,
+  resolveMcpOAuthServer,
+} from "./mcpOAuth";
 
 const MCP_TIMEOUT_MS = 20000;
 
@@ -441,6 +444,14 @@ export const executeMcpToolByKey = async (
       console.log(`✅ ${server.name} reports ${tools.length} tools available`);
     } catch (error) {
       console.error(`❌ Failed to list tools from ${server.name}:`, (error as Error).message);
+      if (error instanceof McpOAuthReconnectRequiredError) {
+        return {
+          success: false,
+          server: server.name,
+          isError: true,
+          error: error.message,
+        };
+      }
       continue;
     }
 

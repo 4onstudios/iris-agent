@@ -1,4 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import os from "node:os";
+import path from "node:path";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
   auth,
@@ -18,6 +21,15 @@ export type McpOAuthTool = {
   description?: string;
 };
 
+export class McpOAuthReconnectRequiredError extends Error {
+  constructor(serverName: string) {
+    super(
+      `MCP authorization for "${serverName}" must be reconnected after restart. Reconnect the server in Settings.`,
+    );
+    this.name = "McpOAuthReconnectRequiredError";
+  }
+}
+
 type McpOAuthFlow = {
   id: string;
   state: string;
@@ -33,9 +45,78 @@ const flowsById = new Map<string, McpOAuthFlow>();
 const flowsByState = new Map<string, McpOAuthFlow>();
 const providersByServer = new Map<string, OAuthClientProvider>();
 const FLOW_TTL_MS = 10 * 60 * 1000;
+const getOAuthStatePath = (): string =>
+  path.join(
+    process.env.HOME || process.env.USERPROFILE || os.homedir(),
+    ".iris",
+    "mcp-oauth",
+    "reconnect-required.json",
+  );
+type ReconnectRequiredState = { version: 1; serverKeys: string[] };
+let persistenceQueue: Promise<void> = Promise.resolve();
 
 const getServerKey = (server: Pick<McpServerConfig, "id" | "url">): string =>
   `${server.id}\n${server.url || ""}`;
+
+const getPersistedServerKey = (server: Pick<McpServerConfig, "id" | "url">): string =>
+  createHash("sha256").update(getServerKey(server)).digest("hex");
+
+const readReconnectRequiredState = async (): Promise<ReconnectRequiredState> => {
+  try {
+    const content = await readFile(getOAuthStatePath(), "utf8");
+    const parsed: unknown = JSON.parse(content);
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      !("version" in parsed) ||
+      parsed.version !== 1 ||
+      !("serverKeys" in parsed) ||
+      !Array.isArray(parsed.serverKeys) ||
+      parsed.serverKeys.some((key) => typeof key !== "string")
+    ) {
+      throw new Error("MCP OAuth reconnect state has an invalid format.");
+    }
+    return parsed as ReconnectRequiredState;
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return { version: 1, serverKeys: [] };
+    }
+    throw error;
+  }
+};
+
+const persistReconnectRequiredState = async (
+  server: Pick<McpServerConfig, "id" | "url">,
+): Promise<void> => {
+  const operation = persistenceQueue.then(async () => {
+    const existing = await readReconnectRequiredState();
+    const serverKeys = new Set(existing.serverKeys);
+    serverKeys.add(getPersistedServerKey(server));
+    const statePath = getOAuthStatePath();
+    const directory = path.dirname(statePath);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const temporaryPath = `${statePath}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(
+        temporaryPath,
+        JSON.stringify({ version: 1, serverKeys: [...serverKeys] }),
+        { encoding: "utf8", mode: 0o600, flag: "wx" },
+      );
+      await rename(temporaryPath, statePath);
+    } finally {
+      await rm(temporaryPath, { force: true });
+    }
+  });
+  persistenceQueue = operation.then(() => undefined, () => undefined);
+  await operation;
+};
+
+const requiresReconnect = async (
+  server: Pick<McpServerConfig, "id" | "url">,
+): Promise<boolean> => {
+  const state = await readReconnectRequiredState();
+  return state.serverKeys.includes(getPersistedServerKey(server));
+};
 
 const pruneExpiredFlows = (): void => {
   const expiredBefore = Date.now() - FLOW_TTL_MS;
@@ -135,6 +216,7 @@ export const completeMcpOAuth = async ({
   code?: string;
   error?: string;
 }): Promise<void> => {
+  pruneExpiredFlows();
   const flow = flowsByState.get(state);
   if (!flow) throw new Error("OAuth state is invalid or has expired.");
   if (flow.status !== "waiting") throw new Error("This OAuth flow has already been used.");
@@ -169,6 +251,7 @@ export const completeMcpOAuth = async ({
 
     const tokens = await flow.provider.tokens();
     if (!tokens?.access_token) throw new Error("OAuth completed without an access token.");
+    await persistReconnectRequiredState(flow.server);
     flow.status = "connected";
     providersByServer.set(getServerKey(flow.server), flow.provider);
   } catch (caught) {
@@ -191,7 +274,12 @@ export const resolveMcpOAuthServer = async (
 ): Promise<McpServerConfig> => {
   if (!server.url) return server;
   const provider = providersByServer.get(getServerKey(server));
-  if (!provider) return server;
+  if (!provider) {
+    if (await requiresReconnect(server)) {
+      throw new McpOAuthReconnectRequiredError(server.name);
+    }
+    return server;
+  }
 
   const result = await auth(provider, { serverUrl: server.url });
   if (result !== "AUTHORIZED") {

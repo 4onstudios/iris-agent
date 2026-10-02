@@ -6,6 +6,7 @@
 import { EventEmitter } from "events";
 import type { McpServerConfig } from "./mcpSettings";
 import { listMcpServerTools, executeMcpToolByKey, type McpToolSummary } from "../agent/tools/mcpTools";
+import { McpOAuthReconnectRequiredError } from "../agent/tools/mcpOAuth";
 
 /**
  * Represents a tool that can be invoked by a language model
@@ -222,6 +223,9 @@ export class LanguageModelToolsManager extends EventEmitter {
         }
       } catch (error) {
         console.error(`Failed to list tools from ${server.name}:`, error);
+        if (error instanceof McpOAuthReconnectRequiredError) {
+          throw error;
+        }
       }
     }
 

@@ -67,6 +67,41 @@ describe("model input limits", () => {
     )).toEqual({ inputTokens: 224_000, maxOutputTokens: 32_000 });
   });
 
+  it("discovers Google models through OpenRouter when only its key is configured", async () => {
+    const fetchModel = jest.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: {
+          context_length: 128_000,
+          top_provider: { context_length: 128_000, max_completion_tokens: 16_000 },
+        },
+      }),
+    } as Response);
+
+    await resolveModelInputTokenLimitAsync("google/gemini-example", {
+      OPENROUTER_API_KEY: "test-key",
+    });
+
+    expect(fetchModel).toHaveBeenCalledTimes(1);
+    expect(fetchModel.mock.calls[0]?.[0].toString()).toBe(
+      "https://openrouter.ai/api/v1/model/google/gemini-example",
+    );
+  });
+
+  it("uses direct-provider model limits instead of querying OpenRouter", async () => {
+    const fetchModel = jest.spyOn(globalThis, "fetch");
+
+    expect(await resolveModelInputTokenLimitAsync("claude-haiku-4-5", {
+      OPENROUTER_API_KEY: "test-key",
+      ANTHROPIC_API_KEY: "anthropic-key",
+    })).toBe(resolveModelInputTokenLimit("claude-haiku-4-5"));
+    expect(await resolveModelInputTokenLimitAsync("gemini-2.5-pro", {
+      OPENROUTER_API_KEY: "test-key",
+      GEMINI_API_KEY: "google-key",
+    })).toBe(resolveModelInputTokenLimit("gemini-2.5-pro"));
+    expect(fetchModel).not.toHaveBeenCalled();
+  });
+
   it("does not guess a context window from an unfamiliar model name", async () => {
     expect(resolveModelInputTokenLimit("custom/claude-1m-preview")).toBe(16_000);
     expect(await resolveModelInputTokenLimitAsync(
