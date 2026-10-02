@@ -18,6 +18,11 @@ import {
   startCliSpinner,
 } from "./api/core/library/cliSpinner.js";
 import { renderCliMarkdown } from "./api/core/library/cliMarkdown.js";
+import {
+  buildConversationTurn,
+  resolveModelInputTokenLimitAsync,
+  resolvePromptTokenBudget,
+} from "./api/helpers/promptBudget.js";
 
 const defaultModelId =
   process.env.MODEL_ID ||
@@ -303,6 +308,14 @@ async function startChatMode(agent: any, workspaceRoot?: string, modelId?: strin
 
       let stopSpinner = (): void => {};
       try {
+        const turn = await buildConversationTurn({
+          currentMessage: trimmedInput,
+          maxPromptTokens: resolvePromptTokenBudget(
+            await resolveModelInputTokenLimitAsync(modelId || defaultModelId),
+          ),
+          maxConversationMessages: 12,
+          maxConversationMessageTokens: 1_200,
+        });
         const options: Record<string, unknown> = {
           // Use the preferred nested `memory` scope (flat threadId/resourceId
           // is deprecated) so conversation history is reliably threaded
@@ -315,7 +328,7 @@ async function startChatMode(agent: any, workspaceRoot?: string, modelId?: strin
         stopSpinner = startCliSpinner("Thinking...");
 
         if (typeof agent.stream === "function") {
-          const streamResult = await agent.stream(trimmedInput, options);
+          const streamResult = await agent.stream(turn.prompt, options);
           const reader = streamResult.fullStream.getReader();
           const pendingToolCallIds = new Map<string, number>();
           let anonymousToolCalls = 0;
@@ -414,7 +427,7 @@ async function startChatMode(agent: any, workspaceRoot?: string, modelId?: strin
           }
           console.log();
         } else if (typeof agent.generate === "function") {
-          const result = await agent.generate(trimmedInput, options);
+          const result = await agent.generate(turn.prompt, options);
           stopSpinner();
           const text =
             typeof result === "string"

@@ -77,7 +77,7 @@ import {
   loadSkillsFromDirectories,
   type SkillEntry,
 } from "./utils/skillsDiscovery";
-import { resolveModelInputTokenLimit, resolveModelSupportsVision } from "../../helpers/promptBudget";
+import { resolveModelContextBudget, resolveModelSupportsVision } from "../../helpers/promptBudget";
 // Browser-backed fallback for providers without native web search.
 import { webSearchTool as browserWebSearchTool } from "./tools/webSearch";
 //for skills to be called by the workspace
@@ -964,7 +964,8 @@ export const createCodingAgent = async (
   const basePath = workspacePath || process.cwd();
   const mcpServers = options.mcpServers || [];
   const terminalAutoApproveRules = options.terminalAutoApproveRules;
-  const modelInputTokenLimit = resolveModelInputTokenLimit(modelId);
+  const modelContextBudget = await resolveModelContextBudget(modelId);
+  const modelInputTokenLimit = modelContextBudget.inputTokens;
   const modelSupportsVision = resolveModelSupportsVision(modelId);
   const resolvedStreamErrorRetryConfig = resolveStreamErrorRetryConfig(
     options.streamErrorRetry,
@@ -1444,6 +1445,14 @@ export const createCodingAgent = async (
       maxSteps: options.maxSteps ?? 50,
       toolChoice: options.toolChoice ?? "auto",
       ...options.defaultOptions,
+      maxOutputTokens: Math.min(
+        modelContextBudget.maxOutputTokens,
+        typeof options.defaultOptions?.maxOutputTokens === "number" &&
+          Number.isFinite(options.defaultOptions.maxOutputTokens) &&
+          options.defaultOptions.maxOutputTokens > 0
+          ? options.defaultOptions.maxOutputTokens
+          : modelContextBudget.maxOutputTokens,
+      ),
     } as never,
   });
 

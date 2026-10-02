@@ -26,6 +26,12 @@ import {
   listMcpServerTools,
 } from "./core/agent/tools/mcpTools";
 import {
+  completeMcpOAuth,
+  getMcpOAuthFlow,
+  resolveMcpOAuthServer,
+  startMcpOAuth,
+} from "./core/agent/tools/mcpOAuth";
+import {
   initializeLanguageModelTools,
   getAvailableTools,
 } from "./core/agent/tools/languageModelToolsIntegration";
@@ -53,8 +59,9 @@ import {
 import {
   truncateText,
   buildPromptWithinTokenBudget,
-  resolveModelInputTokenLimit,
+  resolveModelContextBudget,
   resolveModelSupportsVision,
+  resolvePromptTokenBudget,
 } from "./helpers/promptBudget";
 import {
   isLikelyImageFile,
@@ -747,12 +754,9 @@ const envSnapshotCache = new Map<
 const AGENT_CACHE_MAX_SIZE = 50;
 const MAX_INLINE_FILE_CONTENT_CHARS = 6000;
 const MAX_CONVERSATION_MESSAGES = 12;
-const MAX_CONVERSATION_MESSAGE_CHARS = 4000;
 const MAX_CONVERSATION_MESSAGE_TOKENS = 1200;
 const MAX_CONTEXT_FILES = 8;
 const DEFAULT_PROMPT_TOKEN_BUDGET_RATIO = 0.55;
-const MIN_PROMPT_TOKEN_BUDGET = 4096;
-const PROMPT_TOKEN_RESERVE = 6144;
 const agentCache = new Map<string, GeneratedAgent>();
 type AgentCoreModule = typeof import("./core/agent/index");
 let agentCoreModulePromise: Promise<AgentCoreModule> | undefined;
@@ -2462,9 +2466,12 @@ router.post(
         : [];
 
       if (
-        messages.length === 0 &&
         typeof message === "string" &&
-        message.length > 0
+        message.length > 0 &&
+        !(
+          messages[messages.length - 1]?.role === "user" &&
+          messages[messages.length - 1]?.content === message
+        )
       ) {
         messages.push({ role: "user", content: message });
       }
@@ -2906,35 +2913,30 @@ _You have discovered the following in earlier interactions. Use this to avoid re
         }
       }
 
-      const modelInputTokenLimit = resolveModelInputTokenLimit(modelId);
+      const modelContextBudget = await resolveModelContextBudget(modelId);
+      const modelInputTokenLimit = modelContextBudget.inputTokens;
       const promptBudgetRatio = asBoundedFloat(
         process.env.IRIS_AGENT_PROMPT_TOKEN_BUDGET_RATIO,
         DEFAULT_PROMPT_TOKEN_BUDGET_RATIO,
         0.2,
         0.8,
       );
-      const promptTokenBudget = Math.max(
-        MIN_PROMPT_TOKEN_BUDGET,
-        Math.min(
-          Math.floor(modelInputTokenLimit * promptBudgetRatio),
-          Math.max(
-            MIN_PROMPT_TOKEN_BUDGET,
-            modelInputTokenLimit - PROMPT_TOKEN_RESERVE,
-          ),
-        ),
+      const promptTokenBudget = resolvePromptTokenBudget(
+        modelInputTokenLimit,
+        promptBudgetRatio,
       );
       const mastraManagedContextMode = shouldUseMastraManagedContextMode(
         useMastraObservationalMemory,
       );
 
       const promptBuild = await buildPromptWithinTokenBudget({
-        effectiveMessage: truncateText(
+        effectiveMessage:
           typeof messages[messages.length - 1]?.content === "string"
             ? messages[messages.length - 1].content
             : effectiveMessage,
-          MAX_CONVERSATION_MESSAGE_CHARS,
-        ),
-        conversationHistory: mastraManagedContextMode ? undefined : messages,
+        priorConversationHistory: mastraManagedContextMode
+          ? undefined
+          : messages.slice(0, -1),
         contextInfo,
         maxPromptTokens: promptTokenBudget,
         maxConversationMessages: MAX_CONVERSATION_MESSAGES,
@@ -3036,10 +3038,10 @@ _You have discovered the following in earlier interactions. Use this to avoid re
       // Cap completion tokens so providers don't bill for the model's full max
       // context window. Honors a per-request override, clamped to a safe range.
       const requestedMaxOutputTokens = req.body.maxOutputTokens;
-      const maxOutputTokens = Math.max(
-        256,
-        Math.min(
-          65536,
+      const maxOutputTokens = Math.min(
+        modelContextBudget.maxOutputTokens,
+        Math.max(
+          256,
           typeof requestedMaxOutputTokens === "number" &&
             Number.isFinite(requestedMaxOutputTokens)
             ? requestedMaxOutputTokens
@@ -5712,6 +5714,8 @@ export function requireDesktopAuth(
   next();
 }
 
+export { resolveMcpOAuthServer };
+
 // ── API Key management ─────────────────────────────────────────────
 // Allowed env vars that the frontend can set via this endpoint.
 const ALLOWED_KEY_NAMES = new Set([
@@ -5924,6 +5928,83 @@ router.delete(
         .status(500)
         .json({ success: false, error: "Failed to delete session" });
     }
+  },
+);
+
+router.post(
+  "/mcp/oauth/start",
+  requireDesktopAuth,
+  async (req: Request, res: Response) => {
+    const server = sanitizeMcpServers([req.body?.server], 1)[0];
+    if (!server?.url) {
+      return res
+        .status(400)
+        .json({ success: false, error: "A valid remote MCP URL is required." });
+    }
+
+    const port = req.socket.localPort;
+    if (!port) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Unable to determine the local callback port." });
+    }
+
+    try {
+      const flow = await startMcpOAuth(
+        server,
+        `http://127.0.0.1:${port}/api/agent/mcp/oauth/callback`,
+      );
+      res.setHeader("Cache-Control", "no-store");
+      return res.json({ success: true, ...flow });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return res.status(400).json({ success: false, error: message });
+    }
+  },
+);
+
+router.get("/mcp/oauth/callback", async (req: Request, res: Response) => {
+  const state = typeof req.query.state === "string" ? req.query.state : "";
+  const code = typeof req.query.code === "string" ? req.query.code : undefined;
+  const error = typeof req.query.error === "string" ? req.query.error : undefined;
+  if (!state) {
+    return res.status(400).send("OAuth callback is missing its state.");
+  }
+
+  try {
+    await completeMcpOAuth({ state, code, error });
+    res.setHeader("Cache-Control", "no-store");
+    return res.type("html").send(
+      "<!doctype html><html><head><meta charset=\"utf-8\"><title>MCP authorization</title></head>" +
+        "<body><p>Authorization response received. Return to your MCP client to finish connecting.</p>" +
+        "</body></html>",
+    );
+  } catch (caught) {
+    const message = caught instanceof Error ? caught.message : String(caught);
+    return res.status(400).send(message);
+  }
+});
+
+router.get(
+  "/mcp/oauth/status/:flowId",
+  requireDesktopAuth,
+  (req: Request, res: Response) => {
+    const flowId = Array.isArray(req.params.flowId)
+      ? req.params.flowId[0]
+      : req.params.flowId;
+    if (!flowId) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Missing OAuth flow id." });
+    }
+    const flow = getMcpOAuthFlow(flowId);
+    if (!flow) {
+      return res
+        .status(404)
+        .json({ success: false, error: "OAuth flow expired. Please connect again." });
+    }
+    res.setHeader("Cache-Control", "no-store");
+    return res.json({ success: true, ...flow });
   },
 );
 

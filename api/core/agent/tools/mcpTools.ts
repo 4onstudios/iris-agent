@@ -10,6 +10,10 @@ import {
 } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { redactMcpUrlForDisplay, type McpServerConfig } from "../../library/mcpSettings";
+import {
+  McpOAuthReconnectRequiredError,
+  resolveMcpOAuthServer,
+} from "./mcpOAuth";
 
 const MCP_TIMEOUT_MS = 20000;
 
@@ -229,8 +233,9 @@ const createRemoteTransport = (server: McpServerConfig): McpTransport => {
 const connectRemoteClient = async (
   server: McpServerConfig,
 ): Promise<{ client: Client; transport: McpTransport }> => {
+  const authenticatedServer = await resolveMcpOAuthServer(server);
   const client = new Client({ name: "iris-mcp", version: "1.0.0" });
-  const transport = createRemoteTransport(server);
+  const transport = createRemoteTransport(authenticatedServer);
 
   try {
     await client.connect(transport, { timeout: MCP_TIMEOUT_MS });
@@ -422,6 +427,7 @@ export const executeMcpToolByKey = async (
     inputKeys: Object.keys(input),
     serversCount: servers.length,
   });
+  let reconnectRequiredServer: string | undefined;
 
   for (const server of servers) {
     if (!server.enabled) {
@@ -439,6 +445,9 @@ export const executeMcpToolByKey = async (
       console.log(`✅ ${server.name} reports ${tools.length} tools available`);
     } catch (error) {
       console.error(`❌ Failed to list tools from ${server.name}:`, (error as Error).message);
+      if (error instanceof McpOAuthReconnectRequiredError) {
+        reconnectRequiredServer ??= server.name;
+      }
       continue;
     }
 
@@ -474,6 +483,15 @@ export const executeMcpToolByKey = async (
       });
       return result;
     }
+  }
+
+  if (reconnectRequiredServer) {
+    return {
+      success: false,
+      server: reconnectRequiredServer,
+      isError: true,
+      error: `MCP authorization for "${reconnectRequiredServer}" must be reconnected after restart. Reconnect the server in Settings.`,
+    };
   }
 
   console.warn("⚠️ Tool key not found on any server:", toolKey);
