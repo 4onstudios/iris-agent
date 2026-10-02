@@ -12,7 +12,9 @@ export type ConversationMessageLike = {
 };
 
 export {
+  resolveModelContextBudget,
   resolveModelInputTokenLimit,
+  resolveModelInputTokenLimitAsync,
   resolveModelSupportsVision,
 } from "./modelTokenLimits";
 
@@ -33,8 +35,91 @@ type PromptBudgetBuildResult<T extends ConversationMessageLike> = {
   promptEstimatedTokens: number;
 };
 
+export const resolvePromptTokenBudget = (
+  inputLimit: number,
+  ratio = 0.55,
+): number =>
+  Math.min(
+    inputLimit,
+    Math.max(
+      Math.min(4_096, Math.floor(inputLimit * 0.5)),
+      Math.min(Math.floor(inputLimit * ratio), Math.max(512, inputLimit - 6_144)),
+    ),
+  );
+
+type ConversationTurnOptions<T extends ConversationMessageLike> = {
+  currentMessage: string;
+  history?: T[];
+  maxPromptTokens: number;
+  maxConversationMessages: number;
+  maxConversationMessageTokens: number;
+  contextInfo?: string;
+  continuationInstruction?: string;
+};
+
+export const buildConversationTurn = async <T extends ConversationMessageLike>(
+  options: ConversationTurnOptions<T>,
+): Promise<PromptBudgetBuildResult<T> & { currentMessage: string }> => {
+  const maxTokens = Math.max(1, options.maxPromptTokens);
+  const instruction = options.continuationInstruction?.trim() || "";
+  const instructionSuffix = instruction ? `\n\n${instruction}` : "";
+  const contextBudget = options.contextInfo
+    ? Math.floor(maxTokens * 0.2)
+    : 0;
+  const budgetedContextInfo = truncateMiddleByTokens(
+    options.contextInfo || "",
+    contextBudget,
+  );
+  const contextSuffix = budgetedContextInfo ? `\n\n${budgetedContextInfo}` : "";
+  const available = maxTokens
+    - estimateTokensFromChars(instructionSuffix + contextSuffix)
+    - 24;
+  if (available < 1) {
+    throw new Error("Prompt budget cannot fit context and continuation instructions");
+  }
+  const currentBudget = Math.max(1, Math.floor(available * (
+    options.history?.length ? 0.4 : 1
+  )));
+  const currentMessage = truncateHeadByTokens(options.currentMessage, currentBudget);
+  const historyBudget = Math.max(
+    0,
+    available - estimateTokensFromChars(currentMessage),
+  );
+  const windowed = options.history?.slice(-options.maxConversationMessages) || [];
+  // Keep the immediately preceding exchange intact before compacting older turns.
+  const recent = windowed.slice(-2);
+  const older = windowed.slice(0, -2);
+  const recentHistory = await budgetConversationHistoryByTokens(
+    recent,
+    2,
+    options.maxConversationMessageTokens,
+    historyBudget,
+  );
+  const recentTokens = estimateTokensFromChars(formatConversationTranscript(recentHistory));
+  const olderHistory = older.length && historyBudget > recentTokens
+    ? await budgetConversationHistoryByTokens(
+      older,
+      options.maxConversationMessages,
+      options.maxConversationMessageTokens,
+      historyBudget - recentTokens,
+    )
+    : [];
+  const budgetedConversationHistory = [...olderHistory, ...recentHistory];
+  const historyText = formatConversationTranscript(budgetedConversationHistory);
+  const prompt = `${historyText ? `${historyText}\n\n**User:** ` : ""}${currentMessage}${contextSuffix}${instructionSuffix}`;
+  const boundedPrompt = estimateTokensFromChars(prompt) > maxTokens
+    ? truncateHeadByTokens(prompt, maxTokens)
+    : prompt;
+  return {
+    prompt: boundedPrompt,
+    currentMessage,
+    budgetedContextInfo,
+    budgetedConversationHistory,
+    promptEstimatedTokens: estimateTokensFromChars(boundedPrompt),
+  };
+};
+
 const TOKEN_TO_CHAR_RATIO = 4;
-const MIN_SECTION_TOKENS = 64;
 const TOOL_RESULTS_CONTINUATION_TYPE = "tool_results";
 const compactConversationHistory = composeStrategies(
   clearToolResults({ keepRecentToolResults: 3 }),
@@ -219,79 +304,19 @@ export const buildPromptWithinTokenBudget = async <T extends ConversationMessage
     continuationInstruction,
   } = options;
 
-  const safeMaxPromptTokens = Math.max(512, maxPromptTokens);
-  const safeContinuation =
-    typeof continuationInstruction === "string"
-      ? continuationInstruction.trim()
-      : "";
-  const continuationTokens = safeContinuation
-    ? estimateTokensFromChars(`\n\n${safeContinuation}`)
-    : 0;
-  const baseBudget = Math.max(
-    256,
-    safeMaxPromptTokens - continuationTokens,
-  );
-
-  const hasHistory = Array.isArray(conversationHistory) && conversationHistory.length > 0;
-  const historyBudget = hasHistory ? Math.max(MIN_SECTION_TOKENS, Math.floor(baseBudget * 0.6)) : 0;
-  const contextBudget = hasHistory
-    ? Math.max(MIN_SECTION_TOKENS, baseBudget - historyBudget)
-    : Math.max(MIN_SECTION_TOKENS, Math.floor(baseBudget * 0.7));
-
-  const budgetedConversationHistory = hasHistory
-    ? await budgetConversationHistoryByTokens(
-      conversationHistory,
-      maxConversationMessages,
-      maxConversationMessageTokens,
-      historyBudget,
-    )
-    : [];
-
-  const budgetedContextInfo = truncateMiddleByTokens(contextInfo || "", contextBudget);
-
-  let prompt = "";
-
-  if (budgetedConversationHistory.length > 0) {
-    const transcript = formatConversationTranscript(budgetedConversationHistory);
-    prompt = `${transcript}\n\n${budgetedContextInfo}`;
-  } else {
-    const messageBudget = Math.max(MIN_SECTION_TOKENS, baseBudget - contextBudget);
-    const budgetedMessage = truncateTextByTokens(effectiveMessage || "", messageBudget);
-    prompt = `${budgetedMessage}\n\n${budgetedContextInfo}`;
+  const history = conversationHistory?.slice() || [];
+  // HTTP callers include the current turn in conversationHistory; do not
+  // compact it as prior history or replay it twice.
+  if (history.length && history[history.length - 1]?.content === effectiveMessage) {
+    history.pop();
   }
-
-  if (safeContinuation.length > 0) {
-    const promptWithContinuation = `${prompt}\n\n${safeContinuation}`;
-    if (estimateTokensFromChars(promptWithContinuation) <= safeMaxPromptTokens) {
-      prompt = promptWithContinuation;
-    } else {
-      const compressedPrompt = truncateMiddleByTokens(
-        prompt,
-        Math.max(MIN_SECTION_TOKENS, safeMaxPromptTokens - continuationTokens),
-      );
-      prompt = `${compressedPrompt}\n\n${safeContinuation}`;
-    }
-  }
-
-  const promptEstimatedTokens = estimateTokensFromChars(prompt);
-  if (promptEstimatedTokens > safeMaxPromptTokens) {
-    const hardLimitedPrompt = budgetedConversationHistory.some(
-      (message) => message.continuationType === TOOL_RESULTS_CONTINUATION_TYPE,
-    )
-      ? truncateHeadByTokens(prompt, safeMaxPromptTokens)
-      : truncateMiddleByTokens(prompt, safeMaxPromptTokens);
-    return {
-      prompt: hardLimitedPrompt,
-      budgetedContextInfo,
-      budgetedConversationHistory,
-      promptEstimatedTokens: estimateTokensFromChars(hardLimitedPrompt),
-    };
-  }
-
-  return {
-    prompt,
-    budgetedContextInfo,
-    budgetedConversationHistory,
-    promptEstimatedTokens,
-  };
+  return buildConversationTurn({
+    currentMessage: effectiveMessage,
+    history,
+    contextInfo,
+    maxPromptTokens,
+    maxConversationMessages,
+    maxConversationMessageTokens,
+    continuationInstruction,
+  });
 };

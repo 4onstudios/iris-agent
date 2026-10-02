@@ -10,6 +10,7 @@ import {
 } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { redactMcpUrlForDisplay, type McpServerConfig } from "../../library/mcpSettings";
+import { resolveMcpOAuthServer } from "./mcpOAuth";
 
 const MCP_TIMEOUT_MS = 20000;
 
@@ -229,8 +230,9 @@ const createRemoteTransport = (server: McpServerConfig): McpTransport => {
 const connectRemoteClient = async (
   server: McpServerConfig,
 ): Promise<{ client: Client; transport: McpTransport }> => {
+  const authenticatedServer = await resolveMcpOAuthServer(server);
   const client = new Client({ name: "iris-mcp", version: "1.0.0" });
-  const transport = createRemoteTransport(server);
+  const transport = createRemoteTransport(authenticatedServer);
 
   try {
     await client.connect(transport, { timeout: MCP_TIMEOUT_MS });

@@ -18,6 +18,61 @@ const readToolCallId = (update: acp.SessionUpdate): string | undefined =>
     "toolCallId" in update ? update.toolCallId : undefined;
 
 describe("ACP server", () => {
+    it("budgets an arbitrary small OpenRouter model without losing the latest turn", async () => {
+        const metadata = jest.spyOn(globalThis, "fetch").mockResolvedValue({
+            ok: true,
+            json: async () => ({
+                data: {
+                    context_length: 4_096,
+                    top_provider: {
+                        context_length: 4_096,
+                        max_completion_tokens: 2_048,
+                    },
+                },
+            }),
+        } as Response);
+        const runtime: AcpRuntimeAgent = {
+            stream: jest.fn(async () => ({
+                fullStream: createChunkStream([
+                    { type: "text-delta", payload: { text: "Done" } },
+                ]),
+                text: Promise.resolve("Done"),
+            })),
+        };
+        const stream = runtime.stream as jest.MockedFunction<
+            NonNullable<AcpRuntimeAgent["stream"]>
+        >;
+
+        try {
+            await acp.client({ name: "iris-agent-test-client" }).connectWith(
+                createAcpAgentApp(runtime, undefined, "openrouter/example/acp-small-model"),
+                async (ctx) => {
+                    const session = await ctx.request(acp.methods.agent.session.new, {
+                        cwd: "/workspace",
+                        mcpServers: [],
+                    });
+                    for (let index = 0; index < 4; index += 1) {
+                        await ctx.request(acp.methods.agent.session.prompt, {
+                            sessionId: session.sessionId,
+                            prompt: [{ type: "text", text: `Turn ${index}: ${"x".repeat(1_000)}` }],
+                        });
+                    }
+                    await ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId: session.sessionId,
+                        prompt: [{ type: "text", text: "Next task" }],
+                    });
+                },
+            );
+            const lastCall = stream.mock.calls[4];
+            expect(lastCall?.[0]).toContain("Turn 3:");
+            expect(lastCall?.[0]).toContain("Next task");
+            expect((lastCall?.[0] ?? "").length).toBeLessThanOrEqual(656 * 4);
+            expect(metadata).toHaveBeenCalledTimes(1);
+        } finally {
+            metadata.mockRestore();
+        }
+    });
+
     it("passes bounded prior turns to the runtime on subsequent prompts", async () => {
         const runtime: AcpRuntimeAgent = {
             stream: jest.fn(async () => ({
@@ -71,7 +126,7 @@ describe("ACP server", () => {
                     (finalOptions.conversationHistory as Array<{ content: string }>)[
                         0
                     ]?.content,
-                ).toContain("Request 2");
+                ).toContain("Request 11");
             });
     });
 

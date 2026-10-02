@@ -20,17 +20,15 @@ import {
   type TokenUsageSummary,
 } from "../helpers/tokenUsage";
 import {
-  budgetConversationHistoryByTokens,
-  estimateTokensFromChars,
-  resolveModelInputTokenLimit,
-  truncateHeadByTokens,
+  buildConversationTurn,
+  resolveModelInputTokenLimitAsync,
+  resolvePromptTokenBudget,
   type ConversationMessageLike,
 } from "../helpers/promptBudget";
 
 const DEFAULT_MAX_STEPS = 50;
-const ACP_MAX_CONVERSATION_MESSAGES = 20;
-const ACP_MAX_CONVERSATION_MESSAGE_TOKENS = 4_000;
-const ACP_PROMPT_TOKEN_BUDGET_RATIO = 0.2;
+const ACP_MAX_CONVERSATION_MESSAGES = 12;
+const ACP_MAX_CONVERSATION_MESSAGE_TOKENS = 1_200;
 const MAX_CONCURRENT_SESSION_LOADS = 16;
 
 const CHAT_SESSIONS_DIR = path.join(os.homedir(), ".iris", "chat-sessions");
@@ -44,16 +42,6 @@ type RuntimeConversationMessage = ConversationMessageLike & {
   role: "user" | "assistant";
   content: string;
 };
-
-const formatConversationHistory = (
-  history: RuntimeConversationMessage[],
-): string =>
-  history
-    .map((message) => {
-      const role = message.role === "user" ? "User" : "Assistant";
-      return `**${role}:** ${message.content}`;
-    })
-    .join("\n\n");
 
 type PersistedChatSession = {
   id: string;
@@ -620,49 +608,19 @@ export const createAcpAgentApp = (
       // This avoids exposing an in-flight, possibly-cancelled turn to any
       // other request that reads session.history concurrently.
       const conversationHistory = session.history.slice();
-      const maxPromptTokens = Math.max(
-        512,
-        Math.floor(
-          resolveModelInputTokenLimit(turnModelId ?? defaultModelId ?? "") *
-            ACP_PROMPT_TOKEN_BUDGET_RATIO,
-        ),
+      const modelInputTokenLimit = await resolveModelInputTokenLimitAsync(
+        turnModelId ?? defaultModelId ?? "",
       );
-      const compactedConversationHistory =
-        conversationHistory.length > 0
-          ? await budgetConversationHistoryByTokens(
-              conversationHistory satisfies RuntimeConversationMessage[],
-              ACP_MAX_CONVERSATION_MESSAGES,
-              ACP_MAX_CONVERSATION_MESSAGE_TOKENS,
-              maxPromptTokens,
-            )
-          : [];
-      const runtimeHistoryOptions =
-        compactedConversationHistory.length > 0
-          ? { conversationHistory: compactedConversationHistory }
-          : {};
-      // The history budget above only covers prior turns. The current
-      // prompt itself is unbounded input from the client and must also be
-      // allocated from (and truncated to fit) the remaining token budget --
-      // otherwise a single oversized prompt can still exceed the model's
-      // context window even with a fully compacted history.
-      const formattedHistory =
-        compactedConversationHistory.length > 0
-          ? formatConversationHistory(compactedConversationHistory)
-          : "";
-      const historyTokens = formattedHistory
-        ? estimateTokensFromChars(formattedHistory)
-        : 0;
-      const remainingPromptTokens = Math.max(
-        256,
-        maxPromptTokens - historyTokens,
-      );
-      const boundedPromptText = truncateHeadByTokens(
-        promptText,
-        remainingPromptTokens,
-      );
-      const runtimePrompt = formattedHistory
-        ? `${formattedHistory}\n\n**User:** ${boundedPromptText}`
-        : boundedPromptText;
+      const promptBuild = await buildConversationTurn({
+        currentMessage: promptText,
+        history: conversationHistory satisfies RuntimeConversationMessage[],
+        maxPromptTokens: resolvePromptTokenBudget(modelInputTokenLimit),
+        maxConversationMessages: ACP_MAX_CONVERSATION_MESSAGES,
+        maxConversationMessageTokens: ACP_MAX_CONVERSATION_MESSAGE_TOKENS,
+      });
+      const compactedConversationHistory = promptBuild.budgetedConversationHistory;
+      const boundedPromptText = promptBuild.currentMessage;
+      const runtimePrompt = promptBuild.prompt;
       const persistTurn = async (assistantText: string): Promise<boolean> => {
         // Guard the commit itself: even though nothing is written until now,
         // the turn may have been cancelled (or superseded by a new prompt)
@@ -741,7 +699,6 @@ export const createAcpAgentApp = (
                   abortSignal: turnSignal,
                   maxSteps: effectiveMaxSteps,
                   modelId: turnModelId,
-                  ...runtimeHistoryOptions,
                 },
               ) as Promise<AgentStreamResult>,
           );
@@ -1287,7 +1244,6 @@ export const createAcpAgentApp = (
               abortSignal: turnSignal,
               maxSteps: effectiveMaxSteps,
               modelId: turnModelId,
-              ...runtimeHistoryOptions,
             })
             : runtimeAgent.chat
               ? runtimeAgent.chat({

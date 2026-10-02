@@ -11,10 +11,8 @@ const MODEL_INPUT_TOKEN_LIMITS: Record<string, number> = {
   "openrouter/openai/gpt-5.1-codex": 400_000,
   "openrouter/openai/gpt-5.1-codex-max": 400_000,
   "openrouter/openai/gpt-5.2-codex": 400_000,
-  // GPT-5.3 Codex sessions frequently include large tool schemas + long
-  // conversation state; keep a high effective budget to avoid hard drops where
-  // no message fits in the limiter window.
-  "openrouter/openai/gpt-5.3-codex": 400_000,
+  // OpenAI specifies 272k maximum input within the 400k context window.
+  "openrouter/openai/gpt-5.3-codex": 272_000,
   "openrouter/anthropic/claude-haiku-4.5": 200_000,
   "openrouter/anthropic/claude-opus-4.1": 1_000_000,
   "openrouter/anthropic/claude-fable-5": 1_000_000,
@@ -33,7 +31,7 @@ const MODEL_INPUT_TOKEN_LIMITS: Record<string, number> = {
   "gpt-5-mini": 192_000,
   "gpt-5.2": 192_000,
   "gpt-5.2-codex": 400_000,
-  "gpt-5.3-codex": 400_000,
+  "gpt-5.3-codex": 272_000,
   "gpt-5.4": 1_000_000,
   "gpt-5.4-mini": 400_000,
   "raptor-mini-preview": 264_000,
@@ -54,30 +52,154 @@ const MODEL_INPUT_TOKEN_LIMITS: Record<string, number> = {
 const clamp = (value: number, min: number, max: number): number =>
   Math.max(min, Math.min(max, value));
 
-const getEnvTokenLimitOverride = (): number | null => {
-  const raw = process.env.IRIS_AGENT_INPUT_TOKEN_LIMIT;
+const getEnvTokenLimitOverride = (env: NodeJS.ProcessEnv = process.env): number | null => {
+  const raw = env.IRIS_AGENT_INPUT_TOKEN_LIMIT;
   if (!raw) return null;
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isFinite(parsed)) return null;
   return clamp(parsed, 4_096, 1_000_000);
 };
 
-const inferModelLimitByPattern = (modelId: string): number | null => {
-  const normalized = modelId.toLowerCase();
-
-  if (normalized.includes("gemini") || normalized.includes("1m")) return 1_000_000;
-  if (normalized.includes("claude") && normalized.includes("haiku")) return 200_000;
-  if (normalized.includes("claude") && normalized.includes("sonnet")) return 1_000_000;
-  if (normalized.includes("claude") && normalized.includes("opus")) return 1_000_000;
-  if (normalized.includes("gpt-5.3-codex")) return 400_000;
-  if (normalized.includes("gpt-5.2-codex")) return 400_000;
-  if (normalized.includes("gpt-5")) return 192_000;
-  if (normalized.includes("gpt-4o")) return 128_000;
-  if (normalized.includes("deepseek") || normalized.includes("qwen") || normalized.includes("mistral")) return 128_000;
-  if (normalized.includes("laguna")) return 64_000;
-
-  return null;
+const OPENROUTER_METADATA_TTL_MS = 60 * 60 * 1000;
+const OPENROUTER_METADATA_FAILURE_TTL_MS = 5 * 60 * 1000;
+const OPENROUTER_METADATA_TIMEOUT_MS = 3_000;
+const UNKNOWN_MODEL_INPUT_LIMIT = 16_000;
+const OPENROUTER_MAX_INPUT_TOKENS: Record<string, number> = {
+  "openai/gpt-5.3-codex": 272_000,
 };
+export type ModelContextBudget = {
+  inputTokens: number;
+  maxOutputTokens: number;
+};
+const modelLimits = new Map<string, { budget: ModelContextBudget; expiresAt: number }>();
+const pendingModelLimits = new Map<string, Promise<ModelContextBudget>>();
+
+const positiveTokenCount = (value: unknown): number | undefined =>
+  typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : undefined;
+
+const openRouterSlug = (modelId: string, env: NodeJS.ProcessEnv): string | undefined => {
+  const normalized = stripProviderSuffix(modelId.trim());
+  if (normalized.startsWith("openrouter/")) {
+    return normalized.slice("openrouter/".length);
+  }
+  if (normalized.startsWith("ollama/") || normalized.startsWith("local/") ||
+      normalized.startsWith("huggingface/")) return undefined;
+  if (normalized.startsWith("anthropic/") || normalized.startsWith("openai/") ||
+      normalized.startsWith("google/")) return undefined;
+  if (normalized.includes("/")) return normalized;
+  if (!env.OPENROUTER_API_KEY) return undefined;
+  if (normalized.startsWith("claude") && !env.ANTHROPIC_API_KEY) return `anthropic/${normalized}`;
+  if (normalized.startsWith("gemini") && !env.GEMINI_API_KEY && !env.GOOGLE_GENERATIVE_AI_API_KEY) return `google/${normalized}`;
+  if (!env.OPENAI_API_KEY) return normalized.startsWith("gpt") || /^o[13]/.test(normalized)
+    ? `openai/${normalized}`
+    : normalized;
+  return undefined;
+};
+
+const fetchOpenRouterInputLimit = async (
+  slug: string,
+  env: NodeJS.ProcessEnv,
+): Promise<ModelContextBudget> => {
+  const baseURL = new URL(env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1");
+  const modelURL = new URL(`${baseURL.pathname.replace(/\/$/, "")}/model/${slug.split("/").map(encodeURIComponent).join("/")}`, baseURL);
+  const response = await fetch(modelURL, {
+    signal: AbortSignal.timeout(OPENROUTER_METADATA_TIMEOUT_MS),
+    ...(env.OPENROUTER_API_KEY
+      ? { headers: { Authorization: `Bearer ${env.OPENROUTER_API_KEY}` } }
+      : {}),
+  });
+  if (!response.ok) {
+    throw new Error(`OpenRouter model metadata returned HTTP ${response.status}`);
+  }
+  const raw: unknown = await response.json();
+  if (!raw || typeof raw !== "object" || !("data" in raw) ||
+      !raw.data || typeof raw.data !== "object") {
+    throw new Error("OpenRouter model metadata is missing data");
+  }
+  const data = raw.data as Record<string, unknown>;
+  const topProvider = data.top_provider && typeof data.top_provider === "object"
+    ? data.top_provider as Record<string, unknown>
+    : undefined;
+  const contextLength = positiveTokenCount(topProvider?.context_length) ??
+    positiveTokenCount(data.context_length);
+  if (!contextLength) throw new Error("OpenRouter model metadata is missing context_length");
+  const maxOutput = positiveTokenCount(topProvider?.max_completion_tokens);
+  // Reserve space for a response, even when the provider omits output metadata.
+  const outputReserve = Math.min(
+    maxOutput ?? contextLength,
+    Math.max(512, Math.min(65_536, Math.floor(contextLength * 0.2))),
+  );
+  const limit = contextLength - outputReserve;
+  if (limit < 1_024) throw new Error("Model context is too small for agent input");
+  return {
+    inputTokens: Math.min(limit, OPENROUTER_MAX_INPUT_TOKENS[slug] ?? limit),
+    maxOutputTokens: outputReserve,
+  };
+};
+
+/**
+ * Discover the effective input allowance for an OpenRouter model. Other
+ * providers do not consistently expose context limits, so use the local
+ * catalog or a conservative fallback for them.
+ */
+export const resolveModelContextBudget = async (
+  modelId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<ModelContextBudget> => {
+  const override = getEnvTokenLimitOverride(env);
+  if (override) return {
+    inputTokens: override,
+    maxOutputTokens: Math.min(8_192, Math.max(256, Math.floor(override * 0.2))),
+  };
+  const slug = openRouterSlug(modelId, env);
+  if (!slug) {
+    const inputTokens = resolveModelInputTokenLimit(modelId, UNKNOWN_MODEL_INPUT_LIMIT, env);
+    return {
+      inputTokens,
+      maxOutputTokens: Math.min(8_192, Math.max(256, Math.floor(inputTokens * 0.2))),
+    };
+  }
+  const key = `${env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1"}:${slug}`;
+  const cached = modelLimits.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.budget;
+  let pending = pendingModelLimits.get(key);
+  if (!pending) {
+    pending = fetchOpenRouterInputLimit(slug, env)
+      .then((budget) => {
+        modelLimits.set(key, { budget, expiresAt: Date.now() + OPENROUTER_METADATA_TTL_MS });
+        return budget;
+      })
+      .catch((error: unknown) => {
+        console.warn(
+          `[agent] Could not resolve context limit for OpenRouter model '${slug}':`,
+          error instanceof Error ? error.message : String(error),
+        );
+        const inputTokens = Math.min(
+          resolveModelInputTokenLimit(modelId, UNKNOWN_MODEL_INPUT_LIMIT, env),
+          UNKNOWN_MODEL_INPUT_LIMIT,
+        );
+        const budget = {
+          inputTokens,
+          maxOutputTokens: Math.min(8_192, Math.max(256, Math.floor(inputTokens * 0.2))),
+        };
+        modelLimits.set(key, {
+          budget,
+          expiresAt: Date.now() + OPENROUTER_METADATA_FAILURE_TTL_MS,
+        });
+        return budget;
+      })
+      .finally(() => { pendingModelLimits.delete(key); });
+    pendingModelLimits.set(key, pending);
+  }
+  return pending;
+};
+
+export const resolveModelInputTokenLimitAsync = async (
+  modelId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<number> => (await resolveModelContextBudget(modelId, env)).inputTokens;
 
 // Models known to accept image content parts at the provider/endpoint level.
 // Keep this exact-match metadata in sync with selectable model metadata rather
@@ -154,18 +276,16 @@ export const resolveModelSupportsVision = (modelId: string): boolean => {
 
 export const resolveModelInputTokenLimit = (
   modelId: string,
-  fallback = 64_000,
+  fallback = UNKNOWN_MODEL_INPUT_LIMIT,
+  env: NodeJS.ProcessEnv = process.env,
 ): number => {
-  const envOverride = getEnvTokenLimitOverride();
+  const envOverride = getEnvTokenLimitOverride(env);
   if (envOverride) return envOverride;
 
   const normalized = (modelId || "").trim();
   if (MODEL_INPUT_TOKEN_LIMITS[normalized]) {
     return MODEL_INPUT_TOKEN_LIMITS[normalized];
   }
-
-  const inferred = inferModelLimitByPattern(normalized);
-  if (inferred) return inferred;
 
   return clamp(fallback, 4_096, 1_000_000);
 };
