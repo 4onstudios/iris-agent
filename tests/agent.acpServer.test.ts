@@ -123,10 +123,10 @@ describe("ACP server", () => {
                     (finalOptions.conversationHistory as Array<unknown>).length,
                 ).toBeLessThanOrEqual(20);
                 expect(
-                    (finalOptions.conversationHistory as Array<{ content: string }>)[
-                        0
-                    ]?.content,
-                ).toContain("Request 11");
+                    (finalOptions.conversationHistory as Array<{ content: string }>).some(
+                        (message) => message.content.includes("Request 11"),
+                    ),
+                ).toBe(true);
             });
     });
 

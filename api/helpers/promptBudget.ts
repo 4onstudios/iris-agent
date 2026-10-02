@@ -37,14 +37,11 @@ type PromptBudgetBuildResult<T extends ConversationMessageLike> = {
 
 export const resolvePromptTokenBudget = (
   inputLimit: number,
-  ratio = 0.55,
+  ratio = 0.2,
 ): number =>
   Math.min(
     inputLimit,
-    Math.max(
-      Math.min(4_096, Math.floor(inputLimit * 0.5)),
-      Math.min(Math.floor(inputLimit * ratio), Math.max(512, inputLimit - 6_144)),
-    ),
+    Math.max(512, Math.floor(inputLimit * ratio)),
   );
 
 type ConversationTurnOptions<T extends ConversationMessageLike> = {

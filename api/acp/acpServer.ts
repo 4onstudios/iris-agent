@@ -699,6 +699,9 @@ export const createAcpAgentApp = (
                   abortSignal: turnSignal,
                   maxSteps: effectiveMaxSteps,
                   modelId: turnModelId,
+                  ...(compactedConversationHistory.length
+                    ? { conversationHistory: compactedConversationHistory }
+                    : {}),
                 },
               ) as Promise<AgentStreamResult>,
           );
