@@ -12,12 +12,12 @@ import { hideBin } from "yargs/helpers";
 import { createCodingAgent } from "./api/core/agent/index.js";
 import { startAcpServer } from "./api/acp/acpServer.js";
 import { getMissingProviderSetup } from "./api/core/library/providerSetup.js";
-import { resolveToolExecutionStatus } from "./api/core/agent/utils/toolLifecycle.js";
 import {
-  isCliSpinnerEnabled,
-  startCliSpinner,
-} from "./api/core/library/cliSpinner.js";
-import { renderCliMarkdown } from "./api/core/library/cliMarkdown.js";
+  createCliChatUi,
+  type CliChatUiMode,
+  type CliChatTurnOutcome,
+} from "./api/core/library/cliChatUi.js";
+import { runCliChatTurn } from "./api/core/library/cliChatTurn.js";
 import {
   buildConversationTurn,
   resolveModelInputTokenLimitAsync,
@@ -47,6 +47,11 @@ const argv = yargs(hideBin(process.argv))
     type: "boolean",
     description: "Interactive chat mode",
     default: false,
+  })
+  .option("chat-ui", {
+    choices: ["auto", "opentui", "plain"] as const,
+    default: "auto",
+    description: "Chat interface (auto uses OpenTUI on supported interactive terminals)",
   })
   .option("modelId", {
     type: "string",
@@ -105,7 +110,7 @@ async function main() {
     }
     const agent = await createCodingAgent(modelId, workspaceRoot);
     console.log(`💬 Entering chat mode (type "exit" to quit)`);
-    await startChatMode(agent, workspaceRoot, modelId);
+    await startChatMode(agent, workspaceRoot, modelId, argv["chat-ui"] as CliChatUiMode);
   } else {
     // Default: show help
     yargs(hideBin(process.argv))
@@ -250,209 +255,57 @@ function getCliErrorHint(error: unknown, modelId?: string): string | undefined {
   return undefined;
 }
 
-async function startChatMode(agent: any, workspaceRoot?: string, modelId?: string) {
-  const readline = await import("readline");
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
-
-  // Track whether the underlying input stream has ended (e.g. Ctrl+D, piped
-  // input reaching EOF, or the terminal disconnecting) so we never call
-  // `rl.question()` again once readline is closed — doing so throws a
-  // synchronous `ERR_USE_AFTER_CLOSE` ("readline was closed") that would
-  // otherwise crash the process as an uncaught error.
-  let rlClosed = false;
-  rl.on("close", () => {
-    rlClosed = true;
-  });
-
-  const question = (prompt: string) =>
-    new Promise<string | null>((resolve) => {
-      if (rlClosed) {
-        resolve(null);
-        return;
-      }
-      try {
-        rl.question(prompt, resolve);
-      } catch {
-        // Defensive: guards against a race where `rlClosed` hasn't been set
-        // yet but the interface was closed between the check above and the
-        // call to `rl.question()`.
-        resolve(null);
-      }
-    });
-
+async function startChatMode(
+  agent: any,
+  workspaceRoot?: string,
+  modelId?: string,
+  mode: CliChatUiMode = "auto",
+) {
+  const ui = await createCliChatUi({ mode, workspaceRoot, modelId });
   const threadId = `cli-chat-${Date.now()}`;
-  const resourceId = `cli-session`;
+  const resourceId = "cli-session";
 
   try {
     while (true) {
-      const input = await question("\n> ");
-
-      if (input === null) {
-        console.log("\n👋 Goodbye!");
-        break;
-      }
-
+      const input = await ui.readInput();
+      if (input === null) break;
       const trimmedInput = input.trim();
+      if (!trimmedInput) continue;
+      if (["exit", "quit"].includes(trimmedInput.toLowerCase())) break;
 
-      if (!trimmedInput) {
-        continue;
-      }
-
-      if (trimmedInput.toLowerCase() === "exit" || trimmedInput.toLowerCase() === "quit") {
-        console.log("👋 Goodbye!");
-        break;
-      }
-
-      let stopSpinner = (): void => {};
+      const controller = new AbortController();
+      let outcome: CliChatTurnOutcome = "completed";
+      ui.beginTurn(input, () => controller.abort());
       try {
         const turn = await buildConversationTurn({
-          currentMessage: trimmedInput,
+          // Preserve indentation and newlines in pasted code and multiline messages.
+          currentMessage: input,
           maxPromptTokens: resolvePromptTokenBudget(
             await resolveModelInputTokenLimitAsync(modelId || defaultModelId),
           ),
           maxConversationMessages: 12,
           maxConversationMessageTokens: 1_200,
         });
-        const options: Record<string, unknown> = {
-          // Use the preferred nested `memory` scope (flat threadId/resourceId
-          // is deprecated) so conversation history is reliably threaded
-          // across turns within this chat session.
+        await runCliChatTurn(agent, turn.prompt, {
           memory: { thread: threadId, resource: resourceId },
           maxSteps: 50,
           workspaceRoot,
-        };
-
-        stopSpinner = startCliSpinner("Thinking...");
-
-        if (typeof agent.stream === "function") {
-          const streamResult = await agent.stream(turn.prompt, options);
-          const reader = streamResult.fullStream.getReader();
-          const pendingToolCallIds = new Map<string, number>();
-          let anonymousToolCalls = 0;
-          let hasOutput = false;
-          let markdownOutput = "";
-
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            if (value?.type === "text-delta") {
-              const text = String(value.payload?.text || "");
-              if (text) {
-                markdownOutput += text;
-                hasOutput = true;
-              }
-            } else if (value?.type === "tool-call") {
-              stopSpinner();
-              process.stdout.write("\n");
-              const toolName =
-                typeof value.payload?.toolName === "string"
-                  ? value.payload.toolName
-                  : "tool";
-              const toolCallId =
-                typeof value.payload?.toolCallId === "string"
-                  ? value.payload.toolCallId
-                  : undefined;
-              if (toolCallId) {
-                pendingToolCallIds.set(
-                  toolCallId,
-                  (pendingToolCallIds.get(toolCallId) || 0) + 1,
-                );
-              } else {
-                anonymousToolCalls += 1;
-              }
-              process.stdout.write(`⚙️  [Calling tool: ${toolName}]...\n`);
-              stopSpinner = startCliSpinner(
-                pendingToolCallIds.size + anonymousToolCalls > 1
-                  ? "Running tools..."
-                  : `Running ${toolName}...`,
-              );
-            } else if (value?.type === "tool-result") {
-              const toolCallId =
-                typeof value.payload?.toolCallId === "string"
-                  ? value.payload.toolCallId
-                  : undefined;
-              const toolResultPayload =
-                value.payload?.result ??
-                value.payload?.output ??
-                value.payload?.content ??
-                value.payload?.data;
-              const executionStatus = resolveToolExecutionStatus(
-                toolResultPayload,
-              );
-              const isSettled =
-                executionStatus !== "pending" &&
-                executionStatus !== "in_progress";
-
-              if (isSettled) {
-                if (toolCallId) {
-                  const pendingCount = pendingToolCallIds.get(toolCallId) || 0;
-                  if (pendingCount > 1) {
-                    pendingToolCallIds.set(toolCallId, pendingCount - 1);
-                  } else if (pendingCount === 1) {
-                    pendingToolCallIds.delete(toolCallId);
-                  }
-                } else if (anonymousToolCalls > 0) {
-                  anonymousToolCalls -= 1;
-                }
-                if (!isCliSpinnerEnabled()) {
-                  // Preserve a completion marker for redirected/CI output
-                  // where the animated spinner itself never renders anything.
-                  process.stdout.write("done.\n");
-                }
-              }
-              const pendingToolCount =
-                [...pendingToolCallIds.values()].reduce(
-                  (total, count) => total + count,
-                  0,
-                ) + anonymousToolCalls;
-              if (pendingToolCount === 0) {
-                stopSpinner();
-                stopSpinner = startCliSpinner("Thinking...");
-              }
-            }
-          }
-
-          stopSpinner();
-          if (hasOutput) {
-            process.stdout.write(renderCliMarkdown(markdownOutput));
-          } else if (streamResult.text) {
-            const final = await streamResult.text;
-            if (final) {
-              process.stdout.write(renderCliMarkdown(final));
-            }
-          }
-          console.log();
-        } else if (typeof agent.generate === "function") {
-          const result = await agent.generate(turn.prompt, options);
-          stopSpinner();
-          const text =
-            typeof result === "string"
-              ? result
-              : result?.text || JSON.stringify(result, null, 2);
-          console.log("\n✅ Agent Response:");
-          process.stdout.write(renderCliMarkdown(text));
-        } else {
-          throw new Error("Agent does not support streaming or text generation");
-        }
+        }, ui, controller.signal);
       } catch (error) {
-        stopSpinner();
-        stopSpinner = () => {};
-        console.error(`❌ Error: ${formatCliError(error)}`);
-        const hint = getCliErrorHint(error, modelId);
-        if (hint) {
-          console.error(hint);
+        if (controller.signal.aborted) {
+          outcome = "cancelled";
+        } else {
+          outcome = "failed";
+          ui.showError(formatCliError(error), getCliErrorHint(error, modelId));
         }
       } finally {
-        stopSpinner();
+        ui.finishTurn(outcome);
       }
     }
   } finally {
-    rl.close();
+    ui.dispose();
   }
+  console.log("👋 Goodbye!");
 }
 
 /**
