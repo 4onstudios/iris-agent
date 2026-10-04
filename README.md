@@ -164,10 +164,13 @@ thread, prompt budgeting and workspace tools are reused.
 
 OpenTUI 0.5.14 requires **Bun >=1.3.0** or **Node.js >=26.4.0 with
 `--experimental-ffi`**. The HTTP service, SDK, ACP server and plain chat retain
-their Node.js >=22.13.0 requirement. npm may report an engine warning when
-installing on an older Node.js; Yarn 1 users on older Node.js must use
-`yarn install --ignore-engines`. Keep optional dependencies enabled, because
-OpenTUI installs a native library for the host platform.
+their Node.js >=22.13.0 requirement. The OpenTUI stack is optional, so unsupported
+runtimes can install and use the package without bypassing engine checks.
+Keep optional dependencies enabled to use OpenTUI, including its native library
+for the host platform. Build release packages with Node.js >=26.4.0 and the
+optional dependencies installed so the compiled OpenTUI interface is included.
+Source builds without those dependencies explicitly skip the native UI while
+still compiling the SDK, service, ACP and plain chat.
 
 ```sh
 # Source checkout, using Bun
@@ -214,6 +217,14 @@ Validate the native editor and rendering without provider credentials:
 
 ```sh
 npm run test:cli-opentui
+```
+
+Validate compilation and plain chat without the optional UI dependencies:
+
+```sh
+npm run test:cli-optional
+# On Node.js 22 with Yarn 1 available, also verify optional engine handling
+npm run test:cli-optional -- --check-yarn-install
 ```
 
 ### ACP Server

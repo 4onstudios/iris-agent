@@ -48,10 +48,12 @@ export const getOpenTuiRuntimeError = (
   if (versions.bun) {
     return atLeast(versions.bun, 1, 3) ? undefined : OPENTUI_RUNTIME_HINT;
   }
-  const flags = [...execArgv, ...nodeOptions.split(/\s+/)];
-  const ffiEnabled =
-    flags.includes("--experimental-ffi") &&
-    !flags.includes("--no-experimental-ffi");
+  const flags = [...nodeOptions.split(/\s+/), ...execArgv];
+  let ffiEnabled = false;
+  for (const flag of flags) {
+    if (flag === "--experimental-ffi") ffiEnabled = true;
+    else if (flag === "--no-experimental-ffi") ffiEnabled = false;
+  }
   return atLeast(versions.node, 26, 4) && ffiEnabled
     ? undefined
     : OPENTUI_RUNTIME_HINT;
@@ -82,7 +84,11 @@ export const createCliChatUi = async (
   }
   try {
     // The HTTP service, SDK, ACP transport and plain chat never load native UI code.
-    const { createOpenTuiChatUi } = await import("./cliOpenTui");
+    // Keep optional native code outside the compile-time dependency graph.
+    const modulePath = "./cliOpenTui.js";
+    const { createOpenTuiChatUi }: {
+      createOpenTuiChatUi(options: CliChatUiOptions): Promise<CliChatUi>;
+    } = await import(modulePath);
     return await createOpenTuiChatUi(options);
   } catch (error) {
     if (mode === "opentui") throw error;

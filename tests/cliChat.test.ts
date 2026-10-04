@@ -69,6 +69,19 @@ describe("CLI chat runtime selection", () => {
       ui.dispose();
     }
   });
+
+  it.each([
+    ["--no-experimental-ffi", ["--experimental-ffi"], true],
+    ["--experimental-ffi", ["--no-experimental-ffi"], false],
+    ["--experimental-ffi --no-experimental-ffi", [], false],
+    ["--no-experimental-ffi --experimental-ffi", [], true],
+    ["", ["--no-experimental-ffi", "--experimental-ffi"], true],
+    ["", ["--experimental-ffi", "--no-experimental-ffi"], false],
+  ])("applies Node flag precedence for %s and %j", (nodeOptions, execArgv, enabled) => {
+    expect(
+      getOpenTuiRuntimeError({ node: "26.4.0" }, execArgv, nodeOptions) === undefined,
+    ).toBe(enabled);
+  });
 });
 
 describe("plain chat input", () => {
