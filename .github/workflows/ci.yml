@@ -50,6 +50,6 @@ jobs:
         with:
           node-version: 26.4.0
       - name: Install Yarn
-        run: corepack enable
+        run: npm install --global yarn@1.22.22
       - name: Install dependencies from the Yarn lockfile
         run: yarn install --frozen-lockfile --ignore-scripts --non-interactive
