@@ -568,6 +568,56 @@ Clients can specify and change models at multiple levels:
 3. **Dynamic Switch**: Call `session/set_config_option` with `configId: "model"` and `value: "<modelId>"` to change the active model for subsequent prompts.
 4. **Per-Prompt Override**: Include `_meta.iris.modelId` or `_meta.modelId` in the `session/prompt` payload to run a single prompt turn with a specific model.
 
+### Embedding the agent directly
+
+Backend consumers can configure the factory without patching installed files:
+
+```ts
+import { createCodingAgent } from "@4onstudios/iris-agent/api/core/agent/index";
+
+const agent = await createCodingAgent("openai/gpt-4o", null, {
+  instructions: "You are a helpful assistant.",
+  disableWorkspaceTools: true,
+  disableSkills: true,
+  allowedToolNames: ["webSearch", "fetchWebpage"],
+  enableMemory: false,
+});
+```
+
+These optional `AgentFactoryOptions` preserve existing behavior when omitted:
+
+- `instructions` replaces the default coding instructions (including an explicit
+  empty string).
+- `disableWorkspaceTools` skips automatic filesystem Workspace initialization,
+  Workspace tool registration, MCP documentation writes, and LSP connection.
+  It does **not** remove Iris's explicit file, terminal, or LSP tools; use
+  `allowedToolNames` to restrict those.
+- `disableSkills` disables bundled skill discovery and registration. Use it
+  when the embedded agent should not expose skill capabilities.
+- `allowedToolNames` filters Iris runtime, MCP, and Workspace tools by their
+  exact registered names. An empty array exposes none of those tools; omitted,
+  all existing tools remain available. Skill tools are controlled separately
+  by `disableSkills`. `listMcpServerTools` returns server-local names; convert
+  them with `toMcpToolKey(server.name, tool.name)` before adding them to the
+  allowlist. Both helpers are exported from
+  `@4onstudios/iris-agent/api/core/agent/tools/mcpTools`. For example, `search`
+  on the `docs` server is registered as `mcp_docs_search`, not `search`.
+
+```ts
+import {
+  listMcpServerTools,
+  toMcpToolKey,
+} from "@4onstudios/iris-agent/api/core/agent/tools/mcpTools";
+
+// Use the same server configuration and workspace path for discovery and creation.
+const tools = await listMcpServerTools(server, workspacePath);
+const allowedToolNames = tools.map((tool) => toMcpToolKey(server.name, tool.name));
+const agent = await createCodingAgent(modelId, workspacePath, {
+  mcpServers: [server],
+  allowedToolNames,
+});
+```
+
 ### IrisClient SDK
 
 Install the published package in the Node.js process that owns your IDE's

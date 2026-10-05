@@ -3,23 +3,35 @@ import {
   type WorkspaceToolHooks,
 } from "@mastra/core/workspace";
 
-export const createIrisWorkspaceToolsConfig = (hooks?: WorkspaceToolHooks) => ({
-  ...(hooks ? { hooks } : {}),
-  [WORKSPACE_TOOLS.FILESYSTEM.READ_FILE]: { name: "readFile" },
-  [WORKSPACE_TOOLS.FILESYSTEM.LIST_FILES]: { name: "listDirectory" },
-  [WORKSPACE_TOOLS.FILESYSTEM.FILE_STAT]: { name: "fileStat" },
-  [WORKSPACE_TOOLS.FILESYSTEM.GREP]: { name: "grepSearch" },
-  // Keep native mutations disabled: their string results omit the rich diff
-  // contract. AIRIS writeFile/editFile are registered on the agent below.
-  [WORKSPACE_TOOLS.FILESYSTEM.WRITE_FILE]: { enabled: false },
-  [WORKSPACE_TOOLS.FILESYSTEM.EDIT_FILE]: {
-    enabled: false,
-  },
-  [WORKSPACE_TOOLS.FILESYSTEM.DELETE]: { name: "deleteFile" },
-  [WORKSPACE_TOOLS.FILESYSTEM.MKDIR]: { name: "createDirectory" },
-  [WORKSPACE_TOOLS.FILESYSTEM.AST_EDIT]: { enabled: false },
-  [WORKSPACE_TOOLS.SEARCH.SEARCH]: { name: "workspaceSearch" },
-});
+export const createIrisWorkspaceToolsConfig = (
+  hooks?: WorkspaceToolHooks,
+  allowedToolNames?: readonly string[],
+) => {
+  const enabledTool = (name: string) => ({
+    name,
+    ...(allowedToolNames === undefined
+      ? {}
+      : { enabled: allowedToolNames.includes(name) }),
+  });
+  return {
+    ...(hooks ? { hooks } : {}),
+    ...(allowedToolNames === undefined ? {} : { enabled: false }),
+    [WORKSPACE_TOOLS.FILESYSTEM.READ_FILE]: enabledTool("readFile"),
+    [WORKSPACE_TOOLS.FILESYSTEM.LIST_FILES]: enabledTool("listDirectory"),
+    [WORKSPACE_TOOLS.FILESYSTEM.FILE_STAT]: enabledTool("fileStat"),
+    [WORKSPACE_TOOLS.FILESYSTEM.GREP]: enabledTool("grepSearch"),
+    // Keep native mutations disabled: their string results omit the rich diff
+    // contract. AIRIS writeFile/editFile are registered on the agent below.
+    [WORKSPACE_TOOLS.FILESYSTEM.WRITE_FILE]: { enabled: false },
+    [WORKSPACE_TOOLS.FILESYSTEM.EDIT_FILE]: {
+      enabled: false,
+    },
+    [WORKSPACE_TOOLS.FILESYSTEM.DELETE]: enabledTool("deleteFile"),
+    [WORKSPACE_TOOLS.FILESYSTEM.MKDIR]: enabledTool("createDirectory"),
+    [WORKSPACE_TOOLS.FILESYSTEM.AST_EDIT]: { enabled: false },
+    [WORKSPACE_TOOLS.SEARCH.SEARCH]: enabledTool("workspaceSearch"),
+  };
+};
 
 export const CODING_AGENT_INSTRUCTIONS = `
 You are AIRIS, a senior coding agent working in the user's current workspace.
