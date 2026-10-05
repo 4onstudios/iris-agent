@@ -299,6 +299,12 @@ iris-agent --chat
 OPENROUTER_API_KEY=... iris-agent --acp
 ```
 
+Homebrew `0.4.0_4` and newer include OpenTUI and enable Node's experimental FFI
+automatically for chat mode. No `NODE_OPTIONS` setting is needed. Use
+`iris-agent --chat --chat-ui opentui` to require the TUI, or
+`iris-agent --chat --chat-ui plain` for the readline interface.
+ACP, help, and explicit plain chat do not enable FFI.
+
 The Homebrew formula installs the current Node.js release (Iris Agent requires
 Node.js >=26.4.0) and keeps Iris Agent and its
 dependencies under Homebrew's managed prefix. Upgrade it with:
