@@ -6,7 +6,7 @@ Thank you for helping improve Iris Agent.
 
 Requirements:
 
-- Node.js `>=22.13.0`
+- Node.js `>=26.4.0`
 - npm or Yarn
 
 ```sh

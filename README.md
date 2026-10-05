@@ -26,7 +26,7 @@ It provides streaming chat, workspace tools, LSP routes, MCP integration, comman
 - **CLI** - Interactive chat in the terminal
 - **ACP Server** - Agent Client Protocol via stdio for seamless IDE integration
 
-The SDK and ACP server require Node.js `>=22.13.0`. `IrisClient` is a
+Iris Agent requires Node.js `>=26.4.0`. `IrisClient` is a
 Node.js API for IDE desktop or backend processes; it is not intended to run in
 a browser renderer.
 
@@ -137,6 +137,95 @@ OPENROUTER_API_KEY=... npm run cli -- --workspace /path/to/project --chat --mode
 ```
 
 This starts an interactive streaming chat session in your terminal with access to the workspace and tools.
+OpenTUI is selected automatically on supported interactive terminals. With
+Node.js >=26.4.0, enable FFI to use it with the same npm launcher:
+
+```sh
+# With OPENROUTER_API_KEY already configured in your terminal
+NODE_OPTIONS="--experimental-ffi" npm run cli -- --workspace . --chat
+
+# Require OpenTUI rather than allowing a fallback to plain chat
+NODE_OPTIONS="--experimental-ffi" npm run cli -- --workspace . --chat --chat-ui opentui
+```
+
+Keep `NODE_OPTIONS="--experimental-ffi"` scoped to the Node.js OpenTUI launch
+command rather than exporting it globally. It is not needed for Bun, plain chat,
+the HTTP service or ACP, and older Node.js versions may reject the flag.
+
+Node.js and npm must be on your `PATH`. For a Homebrew Node installation on
+Apple Silicon macOS, use `export PATH="/opt/homebrew/bin:$PATH"` if needed.
+
+#### OpenTUI terminal chat
+
+Interactive chat uses `@opentui/core` directly, without a React renderer. On a
+supported runtime, `--chat` opens a scrollable transcript with streaming
+Markdown, tool activity and a multiline message editor. The existing memory
+thread, prompt budgeting and workspace tools are reused.
+
+OpenTUI 0.5.14 requires **Bun >=1.3.0** or **Node.js >=26.4.0 with
+`--experimental-ffi`**. The HTTP service, SDK, ACP server and plain chat also
+require Node.js >=26.4.0. The OpenTUI stack is optional, so it can be omitted
+when building or installing without using the native UI.
+Keep optional dependencies enabled to use OpenTUI, including its native library
+for the host platform. Build release packages with Node.js >=26.4.0 and the
+optional dependencies installed so the compiled OpenTUI interface is included.
+Source builds without those dependencies explicitly skip the native UI while
+still compiling the SDK, service, ACP and plain chat.
+
+```sh
+# Source checkout, using Bun
+OPENROUTER_API_KEY=... npm run cli:tui -- --workspace /path/to/project
+
+# Source checkout, using Node.js >=26.4.0
+OPENROUTER_API_KEY=... node --experimental-ffi --import tsx cli.ts --chat --workspace /path/to/project
+
+# Compiled CLI, using Bun
+OPENROUTER_API_KEY=... bun dist/cli.js --chat --workspace /path/to/project
+
+# Compiled CLI, using Node.js >=26.4.0
+OPENROUTER_API_KEY=... node --experimental-ffi dist/cli.js --chat --workspace /path/to/project
+
+# Explicitly request OpenTUI, or use the plain interface
+bun dist/cli.js --chat --chat-ui opentui
+iris-agent --chat --chat-ui plain
+```
+
+`--chat-ui auto` is the default: it prefers OpenTUI on supported interactive
+terminals and selects plain chat for redirected input or output, CI, dumb
+terminals or unsupported runtimes. If native UI initialization
+fails, auto restores the terminal and falls back to plain chat. Explicit
+`--chat-ui opentui` reports the initialization error instead.
+
+| Key | Action |
+| --- | --- |
+| Enter | Send a message |
+| Shift+Enter, Alt+Enter or Ctrl+J | Insert a newline; Ctrl+J works in terminals that cannot distinguish Shift+Enter |
+| Esc | Cancel the current request |
+| Ctrl+C | Cancel a running request, or quit while idle |
+| Ctrl+D | Quit while idle with an empty editor |
+| Page Up / Page Down or mouse wheel | Scroll the transcript |
+| Ctrl+L | Toggle captured agent logs |
+| `exit` or `quit` | End the session |
+
+The editor remains available for drafting during a response; sending is disabled
+until that response finishes or cancellation settles. Cancellation passes an
+abort signal to the agent and cancels the active stream; a tool that does not
+honor cancellation may still complete its work. Tool results requiring approval
+are labeled accordingly; this UI preserves the existing CLI execution policy.
+
+Validate the native editor and rendering without provider credentials:
+
+```sh
+npm run test:cli-opentui
+```
+
+Validate compilation and plain chat without the optional UI dependencies:
+
+```sh
+npm run test:cli-optional
+# On Node.js >=26.4.0 with Yarn 1 available, also verify Yarn installation
+npm run test:cli-optional -- --check-yarn-install
+```
 
 ### ACP Server
 
@@ -210,7 +299,7 @@ iris-agent --chat
 OPENROUTER_API_KEY=... iris-agent --acp
 ```
 
-The Homebrew formula installs Node.js 22 and keeps Iris Agent and its
+The Homebrew formula installs Node.js and keeps Iris Agent and its
 dependencies under Homebrew's managed prefix. Upgrade it with:
 
 ```sh
@@ -229,6 +318,7 @@ the repository's **Actions** tab. It requires a repository secret named
 - `--workspace` (`-w`) - Path to the workspace/project root; defaults to the current working directory
 - `--acp` (`-a`) - Start ACP protocol server (stdio-based)
 - `--chat` (`-c`) - Start interactive chat mode
+- `--chat-ui` - Select `auto` (default), `opentui`, or `plain`
 - `--modelId` - Model identifier used for chat/ACP sessions (default: `openrouter/openai/gpt-5.3-codex` or `MODEL_ID` / `OPENROUTER_MODEL` env vars)
 
 Running the CLI without `--chat` or `--acp` prints help.
@@ -844,7 +934,7 @@ NPM_CONFIG_OTP=<code> npm run release:publish
 
 `npm run release` requires a clean worktree, runs type checking, tests, build,
 and `npm pack --dry-run`. `npm run release:publish` performs the same checks
-before publishing with public npm access. Use Node.js `>=22.13.0`, matching the
+before publishing with public npm access. Use Node.js `>=26.4.0`, matching the
 package engine requirement.
 
 The repository also provides Make targets:

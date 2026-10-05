@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import process from "node:process";
 
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
@@ -99,6 +99,16 @@ console.log(`Preparing ${packageJson.name}@${packageJson.version}`);
 run("npm", ["run", "typecheck"]);
 run("npm", ["test", "--", "--runInBand"]);
 run("npm", ["run", "build"]);
+const openTuiArtifact = new URL(
+  "../dist/api/core/library/cliOpenTui.js",
+  import.meta.url,
+);
+if (!existsSync(openTuiArtifact)) {
+  throw new Error(
+    "Release build did not emit dist/api/core/library/cliOpenTui.js. " +
+      "Install optional dependencies before releasing.",
+  );
+}
 run("npm", ["pack", "--dry-run"]);
 
 if (shouldPublish) {
