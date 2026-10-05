@@ -35,7 +35,7 @@ const chunks = (
 
 describe("CLI chat runtime selection", () => {
   it("requires a compatible runtime and Node FFI", () => {
-    expect(getOpenTuiRuntimeError({ node: "22.13.0" }, [], "")).toContain(
+    expect(getOpenTuiRuntimeError({ node: "26.3.0" }, [], "")).toContain(
       "Bun",
     );
     expect(

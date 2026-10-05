@@ -5,10 +5,10 @@ class IrisAgent < Formula
   sha256 "8e2fb39f2cc081feabf6303963157111088adb7dbc8f526c278d0aaedc42a085"
   license "MIT"
 
-  depends_on "node@22"
+  depends_on "node"
 
   def install
-    ENV["PATH"] = "#{formula_opt_bin("node@22")}:#{ENV["PATH"]}"
+    ENV["PATH"] = "#{formula_opt_bin("node")}:#{ENV["PATH"]}"
 
     system "npm", "install", *std_npm_args
     bin.install_symlink libexec/"bin/iris-agent"

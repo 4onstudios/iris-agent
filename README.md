@@ -26,7 +26,7 @@ It provides streaming chat, workspace tools, LSP routes, MCP integration, comman
 - **CLI** - Interactive chat in the terminal
 - **ACP Server** - Agent Client Protocol via stdio for seamless IDE integration
 
-The SDK and ACP server require Node.js `>=22.13.0`. `IrisClient` is a
+Iris Agent requires Node.js `>=26.4.0`. `IrisClient` is a
 Node.js API for IDE desktop or backend processes; it is not intended to run in
 a browser renderer.
 
@@ -163,9 +163,9 @@ Markdown, tool activity and a multiline message editor. The existing memory
 thread, prompt budgeting and workspace tools are reused.
 
 OpenTUI 0.5.14 requires **Bun >=1.3.0** or **Node.js >=26.4.0 with
-`--experimental-ffi`**. The HTTP service, SDK, ACP server and plain chat retain
-their Node.js >=22.13.0 requirement. The OpenTUI stack is optional, so unsupported
-runtimes can install and use the package without bypassing engine checks.
+`--experimental-ffi`**. The HTTP service, SDK, ACP server and plain chat also
+require Node.js >=26.4.0. The OpenTUI stack is optional, so it can be omitted
+when building or installing without using the native UI.
 Keep optional dependencies enabled to use OpenTUI, including its native library
 for the host platform. Build release packages with Node.js >=26.4.0 and the
 optional dependencies installed so the compiled OpenTUI interface is included.
@@ -223,7 +223,7 @@ Validate compilation and plain chat without the optional UI dependencies:
 
 ```sh
 npm run test:cli-optional
-# On Node.js 22 with Yarn 1 available, also verify optional engine handling
+# On Node.js >=26.4.0 with Yarn 1 available, also verify Yarn installation
 npm run test:cli-optional -- --check-yarn-install
 ```
 
@@ -299,7 +299,7 @@ iris-agent --chat
 OPENROUTER_API_KEY=... iris-agent --acp
 ```
 
-The Homebrew formula installs Node.js 22 and keeps Iris Agent and its
+The Homebrew formula installs Node.js and keeps Iris Agent and its
 dependencies under Homebrew's managed prefix. Upgrade it with:
 
 ```sh
@@ -934,7 +934,7 @@ NPM_CONFIG_OTP=<code> npm run release:publish
 
 `npm run release` requires a clean worktree, runs type checking, tests, build,
 and `npm pack --dry-run`. `npm run release:publish` performs the same checks
-before publishing with public npm access. Use Node.js `>=22.13.0`, matching the
+before publishing with public npm access. Use Node.js `>=26.4.0`, matching the
 package engine requirement.
 
 The repository also provides Make targets:

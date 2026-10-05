@@ -23,12 +23,11 @@ try {
       stdio: "inherit",
     });
     const [major, minor] = process.versions.node.split(".").map(Number);
-    if (major < 26 || (major === 26 && minor < 4)) {
-      await assert.rejects(
-        fs.stat(path.join(installRoot, "node_modules/@opentui/core")),
-        { code: "ENOENT" },
-      );
-    }
+    assert.ok(
+      major > 26 || (major === 26 && minor >= 4),
+      "Yarn install validation requires Node.js >=26.4.0.",
+    );
+    await fs.access(path.join(installRoot, "node_modules/@opentui/core"));
   }
   for (const entry of [
     "api", "scripts", "tests", "index.ts", "server.ts", "cli.ts",

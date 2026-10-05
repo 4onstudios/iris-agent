@@ -18,7 +18,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 26.4.0
           cache: npm
       - name: Install dependencies
         run: npm ci
@@ -48,7 +48,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 26.4.0
       - name: Install Yarn
         run: corepack enable
       - name: Install dependencies from the Yarn lockfile
