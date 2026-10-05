@@ -4,9 +4,11 @@ class IrisAgent < Formula
   url "https://registry.npmjs.org/@4onstudios/iris-agent/-/iris-agent-0.4.0.tgz"
   sha256 "35783103411b6b0814c2985fd9312951d55a8d32c6424c3a0121d71f7db7c4af"
   license "MIT"
-  revision 2
+  revision 3
 
   depends_on "node"
+
+  preserve_rpath
 
   def install
     ENV["PATH"] = "#{formula_opt_bin("node")}:#{ENV["PATH"]}"
@@ -15,15 +17,19 @@ class IrisAgent < Formula
     bin.install_symlink libexec/"bin/iris-agent"
   end
 
-  def post_install
-    return unless OS.mac?
-
-    # npm native libraries can arrive with invalid linker signatures.
-    # Repair after Homebrew relocation, preserving valid vendor signatures.
-    libexec.glob("**/*.{node,dylib}").each do |library|
-      next if quiet_system("/usr/bin/codesign", "--verify", library)
-
-      system "/usr/bin/codesign", "--force", "--sign", "-", library
+  post_install_steps do
+    on_macos do
+      # Repair invalid npm native-library signatures after relocation.
+      run "/usr/bin/find",
+          args: ["{{libexec}}", "-type", "f", "(", "-name", "*.node", "-o", "-name", "*.dylib", ")",
+                 "-exec", "/bin/sh", "-c", <<~SH, "sh", "{}", "+"],
+                   for library do
+                     if ! /usr/bin/codesign --verify "$library" 2>/dev/null; then
+                       /usr/bin/codesign --force --sign - "$library" || exit 1
+                     fi
+                   done
+                 SH
+          writable_paths: ["."], writable_base: :libexec
     end
   end
 

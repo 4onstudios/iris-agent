@@ -310,7 +310,7 @@ brew upgrade iris-agent
 
 On macOS, the formula verifies native addon and dynamic-library signatures after
 installation and repairs invalid signatures with local ad-hoc signing. If an
-older installation exits with `zsh: killed`, upgrade to `0.4.0_2` or newer.
+older installation exits with `zsh: killed`, upgrade to `0.4.0_3` or newer.
 
 The tap is updated automatically by GitHub Actions when a newer version is
 published to npm. The updater runs daily and can also be started manually from
