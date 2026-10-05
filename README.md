@@ -152,6 +152,27 @@ Keep `NODE_OPTIONS="--experimental-ffi"` scoped to the Node.js OpenTUI launch
 command rather than exporting it globally. It is not needed for Bun, plain chat,
 the HTTP service or ACP, and older Node.js versions may reject the flag.
 
+#### Classic terminal chat (readline)
+
+To use the old terminal chat instead of OpenTUI, explicitly select `plain`:
+
+```sh
+# Installed CLI (including Homebrew)
+iris-agent --chat --chat-ui plain
+
+# Source checkout
+npm run cli -- --workspace /path/to/project --chat --chat-ui plain
+
+# Compiled CLI
+node dist/cli.js --chat --chat-ui plain
+```
+
+This uses Node.js's readline interface with the classic prompt and streamed
+responses. It retains the same agent, model, workspace tools, and conversation
+memory, but does not load the OpenTUI library or require experimental FFI.
+Use this option whenever you prefer the old chat interface, even on terminals
+that support OpenTUI.
+
 Node.js and npm must be on your `PATH`. For a Homebrew Node installation on
 Apple Silicon macOS, use `export PATH="/opt/homebrew/bin:$PATH"` if needed.
 
@@ -295,7 +316,16 @@ brew install iris-agent
 Then start an interactive session or an ACP server:
 
 ```sh
+# Automatic interface selection (prefers OpenTUI in supported terminals)
 iris-agent --chat
+
+# Old terminal chat (readline, no OpenTUI or experimental FFI)
+iris-agent --chat --chat-ui plain
+
+# Require OpenTUI instead of falling back to plain chat
+iris-agent --chat --chat-ui opentui
+
+# ACP server for IDE integration
 OPENROUTER_API_KEY=... iris-agent --acp
 ```
 
@@ -329,7 +359,7 @@ the repository's **Actions** tab. It requires a repository secret named
 - `--workspace` (`-w`) - Path to the workspace/project root; defaults to the current working directory
 - `--acp` (`-a`) - Start ACP protocol server (stdio-based)
 - `--chat` (`-c`) - Start interactive chat mode
-- `--chat-ui` - Select `auto` (default), `opentui`, or `plain`
+- `--chat-ui` - Select `auto` (default, prefers OpenTUI), `opentui` (require the TUI), or `plain` (old readline terminal chat, no FFI)
 - `--modelId` - Model identifier used for chat/ACP sessions (default: `openrouter/openai/gpt-5.3-codex` or `MODEL_ID` / `OPENROUTER_MODEL` env vars)
 
 Running the CLI without `--chat` or `--acp` prints help.
