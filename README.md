@@ -597,8 +597,26 @@ These optional `AgentFactoryOptions` preserve existing behavior when omitted:
 - `allowedToolNames` filters Iris runtime, MCP, and Workspace tools by their
   exact registered names. An empty array exposes none of those tools; omitted,
   all existing tools remain available. Skill tools are controlled separately
-  by `disableSkills`. MCP names can be discovered with `listMcpServerTools`
-  from `@4onstudios/iris-agent/api/core/agent/tools/mcpTools`.
+  by `disableSkills`. `listMcpServerTools` returns server-local names; convert
+  them with `toMcpToolKey(server.name, tool.name)` before adding them to the
+  allowlist. Both helpers are exported from
+  `@4onstudios/iris-agent/api/core/agent/tools/mcpTools`. For example, `search`
+  on the `docs` server is registered as `mcp_docs_search`, not `search`.
+
+```ts
+import {
+  listMcpServerTools,
+  toMcpToolKey,
+} from "@4onstudios/iris-agent/api/core/agent/tools/mcpTools";
+
+// Use the same server configuration and workspace path for discovery and creation.
+const tools = await listMcpServerTools(server, workspacePath);
+const allowedToolNames = tools.map((tool) => toMcpToolKey(server.name, tool.name));
+const agent = await createCodingAgent(modelId, workspacePath, {
+  mcpServers: [server],
+  allowedToolNames,
+});
+```
 
 ### IrisClient SDK
 
