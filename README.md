@@ -299,7 +299,8 @@ iris-agent --chat
 OPENROUTER_API_KEY=... iris-agent --acp
 ```
 
-The Homebrew formula installs Node.js and keeps Iris Agent and its
+The Homebrew formula installs the current Node.js release (Iris Agent requires
+Node.js >=26.4.0) and keeps Iris Agent and its
 dependencies under Homebrew's managed prefix. Upgrade it with:
 
 ```sh

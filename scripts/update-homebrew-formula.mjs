@@ -43,6 +43,8 @@ const updatedFormula = formula
     `url "${tarballUrl}"`,
   )
   .replace(/sha256 "[a-f0-9]+"/, `sha256 "${sha256}"`)
+  .replace('depends_on "node@22"', 'depends_on "node"')
+  .replace('formula_opt_bin("node@22")', 'formula_opt_bin("node")')
   .replace(
     'system "npm", "install", *std_npm_args, url',
     'system "npm", "install", *std_npm_args',
