@@ -38,4 +38,18 @@ describe("Iris Mastra Workspace tool migration", () => {
       ]),
     );
   });
+
+  it.each([
+    [["readFile"], ["readFile"]],
+    [[], []],
+    [["writeFile", "unknownTool"], []],
+  ])("restricts Workspace tools to %j", async (allowed, expected) => {
+    const workspace = new Workspace({
+      filesystem: new LocalFilesystem({ basePath: process.cwd() }),
+      tools: createIrisWorkspaceToolsConfig(undefined, allowed),
+    });
+
+    const tools = await createWorkspaceTools(workspace);
+    expect(Object.keys(tools)).toEqual(expected);
+  });
 });

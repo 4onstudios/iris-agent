@@ -109,6 +109,13 @@ export {
 export type AgentFactoryOptions = {
   id?: string;
   name?: string;
+  instructions?: string;
+  /** Skip automatic filesystem Workspace initialization and LSP connection. */
+  disableWorkspaceTools?: boolean;
+  /** Disable bundled skill discovery and registration. */
+  disableSkills?: boolean;
+  /** Expose only these Iris runtime, MCP, and Workspace tool names. */
+  allowedToolNames?: readonly string[];
   enableMemory?: boolean;
   goalJudgeModelId?: string;
   goalMaxRuns?: number;
@@ -990,7 +997,7 @@ export const createCodingAgent = async (
 
   let workspace: Workspace | undefined;
 
-  if (!isVirtualPath) {
+  if (!isVirtualPath && !options.disableWorkspaceTools) {
     try {
       workspace = new Workspace({
         // Provide concise, token-efficient filesystem guidance.
@@ -1001,7 +1008,10 @@ export const createCodingAgent = async (
             "Use workspaceSearch for conceptual discovery, grepSearch for exact text, and readFile before editing. Use editFile with filePath plus oldContent/newContent for small exact replacements, writeFile for full-file changes, and applyDiff for multi-hunk patches. File mutations return reversible diff metadata for user review; validate focused changes before finishing.",
         }),
         bm25: true,
-        tools: createIrisWorkspaceToolsConfig(workspaceMutationBridge.hooks),
+        tools: createIrisWorkspaceToolsConfig(
+          workspaceMutationBridge.hooks,
+          options.allowedToolNames,
+        ),
       });
       await workspace.init();
       console.log("Workspace initialized");
@@ -1012,7 +1022,7 @@ export const createCodingAgent = async (
         error.message,
       );
     }
-  } else {
+  } else if (isVirtualPath) {
     console.log(
       "⚠️ Virtual/web workspace detected — skipping filesystem initialization",
     );
@@ -1269,7 +1279,7 @@ export const createCodingAgent = async (
     : wrappedBrowserWebSearch;
 
   // Initialize LSP manager with workspace path
-  if (workspacePath) {
+  if (workspacePath && !options.disableWorkspaceTools) {
     coreLsp.connect(workspacePath);
   }
 
@@ -1378,22 +1388,31 @@ export const createCodingAgent = async (
     ...mcpTools,
   });
 
+  const allowedToolNames = options.allowedToolNames === undefined
+    ? undefined
+    : new Set(options.allowedToolNames);
+  const toolsForAgent = allowedToolNames
+    ? Object.fromEntries(
+      Object.entries(runtimeTools).filter(([name]) => allowedToolNames.has(name)),
+    )
+    : runtimeTools;
+
   const agent = createMastraCodingAgent({
     id: options.id || "custom-coding-agent",
     name: options.name || "Coding Agent",
-    skills: async ({ requestContext }) => {
+    skills: options.disableSkills ? undefined : async ({ requestContext }) => {
       const enabledSkills = (requestContext as { get?: (key: string) => unknown } | undefined)
         ?.get?.("enabledSkills") as
         | string[]
         | undefined;
       return resolveAgentSkillPaths(enabledSkills);
     },
-    instructions: CODING_AGENT_INSTRUCTIONS,
+    instructions: options.instructions ?? CODING_AGENT_INSTRUCTIONS,
 
     model: getModel(modelId),
     workspace,
     hooks: options.hooks,
-    tools: enforceToolCallBudgetForTools(runtimeTools as any),
+    tools: enforceToolCallBudgetForTools(toolsForAgent as any),
 
     // Add memory for conversation context with token-aware budgeting.
     // TokenLimiterProcessor moved to inputProcessors (new Mastra API).
