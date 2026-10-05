@@ -1689,6 +1689,41 @@
     "@opentui/core-win32-arm64" "0.5.14"
     "@opentui/core-win32-x64" "0.5.14"
 
+"@opentui/core-darwin-x64@0.5.14":
+  version "0.5.14"
+  resolved "https://registry.npmjs.org/@opentui/core-darwin-x64/-/core-darwin-x64-0.5.14.tgz"
+  integrity sha512-7smHKDH8IhUaBsgYuAClMl2mHWu+yjpMrtdw3wEvBVtCzKMrHi/TJ5PtydO+IfUzR3BXpVubdbR1irD8BTcR/w==
+
+"@opentui/core-linux-arm64@0.5.14":
+  version "0.5.14"
+  resolved "https://registry.npmjs.org/@opentui/core-linux-arm64/-/core-linux-arm64-0.5.14.tgz"
+  integrity sha512-xH1hP+NaLySEJeZkl21NlkZBMddMfQ1jU8NeX1AEBc2GNBOvDXU4Ud/xw87SrAvU1xG9K7/9C4oy4AmIMEpVGg==
+
+"@opentui/core-linux-arm64-musl@0.5.14":
+  version "0.5.14"
+  resolved "https://registry.npmjs.org/@opentui/core-linux-arm64-musl/-/core-linux-arm64-musl-0.5.14.tgz"
+  integrity sha512-mnBBAuTb92NiRLAjOD755tS8/tNQemDztbg9tMvoCT90G52FtVrRb31Ge6OrYqfm0c9DkZGhEBOhunsId/4zSA==
+
+"@opentui/core-linux-x64@0.5.14":
+  version "0.5.14"
+  resolved "https://registry.npmjs.org/@opentui/core-linux-x64/-/core-linux-x64-0.5.14.tgz"
+  integrity sha512-Hkk4kaDGMcn9bmJFJPW3/QOGGbPuWe3sCFV/CkiVb4+bCvcTm7EXQr4QTAA63BYy2dKE5bUFUi1zZlyeMkWpnA==
+
+"@opentui/core-linux-x64-musl@0.5.14":
+  version "0.5.14"
+  resolved "https://registry.npmjs.org/@opentui/core-linux-x64-musl/-/core-linux-x64-musl-0.5.14.tgz"
+  integrity sha512-ngJ+U2grOGEteeQvZdAJNqn09M+At5mfWInauK5aS427bea1yLo+e6hor/CRmbn9SxEEF+SwoyekaOrLPWyU7w==
+
+"@opentui/core-win32-arm64@0.5.14":
+  version "0.5.14"
+  resolved "https://registry.npmjs.org/@opentui/core-win32-arm64/-/core-win32-arm64-0.5.14.tgz"
+  integrity sha512-T9kNqKXg2jysmTsyyZ1A8LBQotFBM+iPjzyRslxyexqrs8a1UcmxbApEo+COtxQuqukMTbvwyqEdAT8vcmxEkQ==
+
+"@opentui/core-win32-x64@0.5.14":
+  version "0.5.14"
+  resolved "https://registry.npmjs.org/@opentui/core-win32-x64/-/core-win32-x64-0.5.14.tgz"
+  integrity sha512-mqKSkab8VdMLSmMdocna7+BTyMoIutkVXOV9lfmPrBO2g7Np5c6c4SJ4QIVZqPvast11XyT0/7FfXOYLKAS72w==
+
 "@parcel/watcher-darwin-arm64@2.6.0":
   version "2.6.0"
   resolved "https://registry.npmjs.org/@parcel/watcher-darwin-arm64/-/watcher-darwin-arm64-2.6.0.tgz"
