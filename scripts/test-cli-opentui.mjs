@@ -6,6 +6,7 @@ import {
 } from "../dist/api/core/library/cliOpenTui.js";
 
 const signalListeners = process.listenerCount("SIGINT");
+const previousExitCode = process.exitCode;
 const test = await createTestRenderer({
   ...chatRendererConfig,
   width: 100,
@@ -72,10 +73,12 @@ try {
   await test.renderOnce();
   assert.match(test.captureCharFrame(), /Enter send/);
   const waiting = ui.readInput();
-  ui.dispose();
+  process.emit("SIGHUP");
+  assert.equal(process.exitCode, 129);
   assert.equal(await waiting, null);
   assert.equal(process.listenerCount("SIGINT"), signalListeners);
 } finally {
   ui.dispose();
+  process.exitCode = previousExitCode;
 }
 console.log("OpenTUI native chat checks passed.");

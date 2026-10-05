@@ -134,7 +134,10 @@ export const createPlainChatUi = (
     process.exitCode = 143;
     close();
   };
-  const disconnect = () => close();
+  const disconnect = () => {
+    process.exitCode = 129;
+    close();
+  };
   rl.on("line", (line) => {
     if (pendingInput) resolveInput(line);
     else queued.push(line);

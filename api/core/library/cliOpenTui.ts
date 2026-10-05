@@ -192,6 +192,10 @@ export const mountOpenTuiChatUi = (
     process.exitCode = 143;
     close();
   };
+  const hangup = () => {
+    process.exitCode = 129;
+    close();
+  };
   const resize = (_width: number, height: number) => {
     composer.minHeight = Math.min(3, Math.max(1, height - 7));
     composer.maxHeight = Math.max(1, Math.min(8, height - 7));
@@ -206,7 +210,7 @@ export const mountOpenTuiChatUi = (
     renderer.off(CliRenderEvents.RESIZE, resize);
     process.off("SIGINT", interrupt);
     process.off("SIGTERM", terminate);
-    process.off("SIGHUP", close);
+    process.off("SIGHUP", hangup);
   };
   const onKey = (key: KeyEvent) => {
     if (key.eventType === "release") return;
@@ -233,7 +237,7 @@ export const mountOpenTuiChatUi = (
   renderer.once(CliRenderEvents.DESTROY, cleanup);
   process.on("SIGINT", interrupt);
   process.on("SIGTERM", terminate);
-  process.on("SIGHUP", close);
+  process.on("SIGHUP", hangup);
 
   const updateToolRow = (row: ToolRow) => {
     const label =

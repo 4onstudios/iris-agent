@@ -110,6 +110,21 @@ describe("plain chat input", () => {
     ui.dispose();
     expect(process.listenerCount("SIGINT")).toBe(before);
   });
+
+  it("sets a failing exit code when the terminal hangs up", async () => {
+    const previousExitCode = process.exitCode;
+    const input = new PassThrough();
+    const ui = createPlainChatUi(input, new PassThrough());
+    try {
+      const waiting = ui.readInput();
+      process.emit("SIGHUP");
+      expect(process.exitCode).toBe(129);
+      expect(await waiting).toBeNull();
+    } finally {
+      ui.dispose();
+      process.exitCode = previousExitCode;
+    }
+  });
 });
 
 describe("CLI agent stream", () => {
