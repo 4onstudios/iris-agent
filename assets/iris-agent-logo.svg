@@ -1,26 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 768 768" role="img" aria-labelledby="title desc">
   <title id="title">Iris Agent logo</title>
-  <desc id="desc">A monochrome coding terminal with an agent spark.</desc>
-
-  <rect width="512" height="512" rx="112" fill="#ffffff"/>
-  <rect x="56" y="56" width="400" height="400" rx="72" fill="#0a0a0a"/>
-
-  <!-- Four marks reference 4onStudios while the terminal keeps the coding focus. -->
-  <circle cx="116" cy="116" r="9" fill="#ffffff"/>
-  <circle cx="146" cy="116" r="9" fill="#ffffff"/>
-  <circle cx="176" cy="116" r="9" fill="#ffffff"/>
-  <circle cx="206" cy="116" r="9" fill="#ffffff"/>
-
-  <path d="M104 178h304" stroke="#888888" stroke-width="4"/>
-
-  <g fill="none" stroke="#ffffff" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
-    <path d="m122 244 52 48-52 48"/>
-    <path d="M202 340h82"/>
+  <desc id="desc">A bold, three-blade Iris mark in black on a white field.</desc>
+  <rect width="768" height="768" rx="112" fill="#ffffff"/>
+  <g fill="#08090c">
+    <path d="M260 104c82-31 180-35 249-3 78 36 116 111 70 220-23 56-65 117-107 174 15-78 10-153-15-222-19-75-92-143-197-169Z"/>
+    <path d="M433 280c-31-48-99-53-164-35-97 27-166 96-178 175-14 80 32 161 107 218-21-79-21-147 4-201 40-85 121-137 231-157Z"/>
+    <path d="M258 411c46 54 107 89 178 101 93 16 186-19 254-101-16 91-71 168-151 205-91 41-186 23-252-37-57-52-71-116-29-168Z"/>
   </g>
-
-  <circle cx="354" cy="292" r="56" fill="#ffffff"/>
-  <path d="m354 246 12 34 34 12-34 12-12 34-12-34-34-12 34-12 12-34Z"
-        fill="#0a0a0a"/>
-  <path d="M354 218v-18M354 374v-18M280 292h-18M446 292h-18"
-        stroke="#ffffff" stroke-width="8" stroke-linecap="round"/>
 </svg>

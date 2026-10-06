@@ -1,6 +1,6 @@
 {
   "name": "@4onstudios/iris-agent",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": false,
   "description": "Standalone HTTP coding-agent service and CLI with ACP (Agent Client Protocol) support.",
   "type": "module",
@@ -53,7 +53,8 @@
     "release:publish": "node scripts/release.mjs --publish"
   },
   "files": [
-    "dist"
+    "dist",
+    "assets/iris-agent-logo.svg"
   ],
   "license": "MIT",
   "repository": {
