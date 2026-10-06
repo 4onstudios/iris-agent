@@ -144,7 +144,11 @@ export const mountOpenTuiChatUi = (
       // Terminals without kitty/modifyOtherKeys send Shift+Enter as plain Enter;
       // a trailing backslash gives a portable line-continuation fallback.
       const cursor = composer.cursorOffset;
-      if (cursor > 0 && composer.getTextRange(cursor - 1, cursor) === "\\") {
+      if (
+        cursor > 0 &&
+        !composer.hasSelection() &&
+        composer.getTextRange(cursor - 1, cursor) === "\\"
+      ) {
         composer.deleteCharBackward();
         composer.newLine();
         return;

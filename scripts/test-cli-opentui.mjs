@@ -54,6 +54,16 @@ if (process.argv.includes("--check-sighup")) {
     test.mockInput.pressEnter();
     assert.equal(await legacyInput, "alpha\nbeta\ngamma");
 
+    // A selected trailing backslash must not trigger continuation (which would delete the selection).
+    const selectedInput = ui.readInput();
+    const composer = test.renderer.root.findDescendantById("chat-composer");
+    await test.mockInput.typeText("ab\\");
+    composer.setSelection(0, 3);
+    assert.equal(composer.cursorOffset, 3);
+    assert.ok(composer.hasSelection());
+    test.mockInput.pressEnter();
+    assert.equal(await selectedInput, "ab\\");
+
     let cancelled = 0;
     ui.beginTurn("first\n  second\nthird", () => cancelled++);
     ui.appendText("# Streaming response\n\nHello **world**.");
