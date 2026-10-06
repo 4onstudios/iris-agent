@@ -140,7 +140,16 @@ export const mountOpenTuiChatUi = (
       { name: "linefeed", action: "newline" },
     ],
     onSubmit: () => {
-      if (closed || busy || !pendingInput || !composer.plainText.trim()) return;
+      if (closed) return;
+      // Terminals without kitty/modifyOtherKeys send Shift+Enter as plain Enter;
+      // a trailing backslash gives a portable line-continuation fallback.
+      const cursor = composer.cursorOffset;
+      if (cursor > 0 && composer.getTextRange(cursor - 1, cursor) === "\\") {
+        composer.deleteCharBackward();
+        composer.newLine();
+        return;
+      }
+      if (busy || !pendingInput || !composer.plainText.trim()) return;
       const input = composer.plainText;
       composer.setText("");
       const resolve = pendingInput;
@@ -151,7 +160,7 @@ export const mountOpenTuiChatUi = (
   const help = new TextRenderable(renderer, {
     id: "chat-help",
     content:
-      "Enter send · Ctrl+J / Shift+Enter newline · Esc cancel · Ctrl+C cancel/quit · PgUp/PgDn scroll · Ctrl+L logs",
+      "Enter send · Shift/Option+Enter, Ctrl+J or \\+Enter newline · Esc cancel · Ctrl+C cancel/quit · PgUp/PgDn scroll · Ctrl+L logs",
     fg: theme.muted,
     wrapMode: "none",
     height: 1,

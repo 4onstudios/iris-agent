@@ -220,13 +220,29 @@ fails, auto restores the terminal and falls back to plain chat. Explicit
 | Key | Action |
 | --- | --- |
 | Enter | Send a message |
-| Shift+Enter, Alt+Enter or Ctrl+J | Insert a newline; Ctrl+J works in terminals that cannot distinguish Shift+Enter |
+| Shift+Enter, Option/Alt+Enter, Ctrl+J or `\` then Enter | Insert a newline |
 | Esc | Cancel the current request |
 | Ctrl+C | Cancel a running request, or quit while idle |
 | Ctrl+D | Quit while idle with an empty editor |
 | Page Up / Page Down or mouse wheel | Scroll the transcript |
 | Ctrl+L | Toggle captured agent logs |
 | `exit` or `quit` | End the session |
+
+Shift+Enter requires a terminal that reports modified Enter keys (for example
+kitty, Ghostty, WezTerm, or iTerm2 with CSI u reporting enabled). macOS
+Terminal and the VS Code integrated terminal send Shift+Enter as plain Enter, so
+use Ctrl+J, Option+Enter (with "Use Option as Meta key" enabled), or end the line
+with `\` and press Enter. To make Shift+Enter insert a newline in VS Code, add
+this to `keybindings.json`:
+
+```json
+{
+  "key": "shift+enter",
+  "command": "workbench.action.terminal.sendSequence",
+  "args": { "text": "\u001b\r" },
+  "when": "terminalFocus"
+}
+```
 
 The editor remains available for drafting during a response; sending is disabled
 until that response finishes or cancellation settles. Cancellation passes an

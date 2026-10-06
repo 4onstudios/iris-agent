@@ -44,6 +44,16 @@ if (process.argv.includes("--check-sighup")) {
     test.mockInput.pressEnter();
     assert.equal(await input, "first\n  second\nthird");
 
+    // Legacy terminals send Shift+Enter as plain CR, so cover their fallbacks.
+    const legacyInput = ui.readInput();
+    await test.mockInput.typeText("alpha\\");
+    test.mockInput.pressEnter();
+    await test.mockInput.typeText("beta");
+    test.mockInput.pressEnter({ meta: true });
+    await test.mockInput.typeText("gamma");
+    test.mockInput.pressEnter();
+    assert.equal(await legacyInput, "alpha\nbeta\ngamma");
+
     let cancelled = 0;
     ui.beginTurn("first\n  second\nthird", () => cancelled++);
     ui.appendText("# Streaming response\n\nHello **world**.");
