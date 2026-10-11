@@ -13,17 +13,23 @@ import type { McpServerConfig } from "../../library/mcpSettings";
 const adaptOAuthProviderForLegacySdk = (
   provider: OAuthClientProvider,
 ): LegacyOAuthClientProvider => {
-  const legacyProvider: LegacyOAuthClientProvider = {
-    ...provider,
-    get redirectUrl() {
-      const redirectUrl = provider.redirectUrl;
-      if (!redirectUrl) {
-        throw new Error("The OAuth provider does not have a redirect URL.");
+  return new Proxy(provider, {
+    get(target, property) {
+      if (property === "redirectUrl") {
+        const redirectUrl = Reflect.get(target, property, target) as
+          | string
+          | URL
+          | undefined;
+        if (!redirectUrl) {
+          throw new Error("The OAuth provider does not have a redirect URL.");
+        }
+        return redirectUrl;
       }
-      return redirectUrl;
+
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
     },
-  };
-  return legacyProvider;
+  }) as LegacyOAuthClientProvider;
 };
 
 export class LegacySseTransportAdapter implements Transport {
