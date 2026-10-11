@@ -102,6 +102,7 @@ describe("remote MCP OAuth", () => {
     expect(StreamableHTTPClientTransport).toHaveBeenCalledWith(
       new URL(server.url),
       {
+        authProvider: provider,
         requestInit: {
           headers: {
             "X-Workspace": "team-1",

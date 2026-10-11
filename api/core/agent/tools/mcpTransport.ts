@@ -6,6 +6,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk-legacy/client/sse.js";
 import { JSONRPCMessageSchema as LegacyJSONRPCMessageSchema } from "@modelcontextprotocol/sdk-legacy/types.js";
+import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { McpServerConfig } from "../../library/mcpSettings";
 
 export class LegacySseTransportAdapter implements Transport {
@@ -41,6 +42,7 @@ export type McpRemoteClientTransport =
 
 export const createMcpRemoteTransport = (
   server: McpServerConfig,
+  authProvider?: OAuthClientProvider,
 ): McpRemoteClientTransport => {
   if (!server.url) {
     throw new Error(`MCP server '${server.name}' has no remote URL`);
@@ -67,6 +69,7 @@ export const createMcpRemoteTransport = (
   }
 
   return new StreamableHTTPClientTransport(url, {
+    ...(authProvider ? { authProvider } : {}),
     requestInit: { headers },
   });
 };

@@ -250,7 +250,10 @@ export const completeMcpOAuth = async ({
     headers.Authorization = `Bearer ${tokens.access_token}`;
 
     const client = new Client({ name: "iris-agent", version: "1.0.0" });
-    const transport = createMcpRemoteTransport({ ...flow.server, headers });
+    const transport = createMcpRemoteTransport(
+      { ...flow.server, headers },
+      flow.provider,
+    );
     try {
       await client.connect(transport);
       const listed = await client.listTools();
@@ -279,6 +282,10 @@ export const getMcpOAuthFlow = (
   if (!flow) return undefined;
   return { status: flow.status, error: flow.error, tools: flow.tools };
 };
+
+export const getMcpOAuthProvider = (
+  server: Pick<McpServerConfig, "id" | "url">,
+): OAuthClientProvider | undefined => providersByServer.get(getServerKey(server));
 
 export const resolveMcpOAuthServer = async (
   server: McpServerConfig,

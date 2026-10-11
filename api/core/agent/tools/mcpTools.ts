@@ -11,6 +11,7 @@ import {
 import { redactMcpUrlForDisplay, type McpServerConfig } from "../../library/mcpSettings";
 import {
   McpOAuthReconnectRequiredError,
+  getMcpOAuthProvider,
   resolveMcpOAuthServer,
 } from "./mcpOAuth";
 import {
@@ -225,7 +226,10 @@ const connectRemoteClient = async (
 ): Promise<{ client: Client; transport: McpTransport }> => {
   const authenticatedServer = await resolveMcpOAuthServer(server);
   const client = new Client({ name: "iris-mcp", version: "1.0.0" });
-  const transport = createMcpRemoteTransport(authenticatedServer);
+  const transport = createMcpRemoteTransport(
+    authenticatedServer,
+    getMcpOAuthProvider(server),
+  );
 
   try {
     await client.connect(transport, { timeout: MCP_TIMEOUT_MS });
