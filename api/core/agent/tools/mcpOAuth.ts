@@ -247,7 +247,6 @@ export const completeMcpOAuth = async ({
       throw new Error("OAuth completed without an access token.");
     }
     const headers = withoutAuthorizationHeaders(flow.server.headers);
-    headers.Authorization = `Bearer ${tokens.access_token}`;
 
     const client = new Client({ name: "iris-agent", version: "1.0.0" });
     const transport = createMcpRemoteTransport(
@@ -318,6 +317,5 @@ export const resolveMcpOAuthServer = async (
   }
 
   const headers = withoutAuthorizationHeaders(server.headers);
-  headers.Authorization = `Bearer ${tokens.access_token}`;
   return { ...server, headers };
 };

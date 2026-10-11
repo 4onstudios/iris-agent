@@ -49,21 +49,16 @@ export const createMcpRemoteTransport = (
   }
 
   const url = new URL(server.url);
-  const headers = server.headers || {};
+  const headers = Object.fromEntries(
+    Object.entries(server.headers || {}).filter(
+      ([name]) => !authProvider || name.toLowerCase() !== "authorization",
+    ),
+  );
 
   if (server.transport === "sse") {
     const legacyTransport = new SSEClientTransport(url, {
+      ...(authProvider ? { authProvider } : {}),
       requestInit: { headers },
-      eventSourceInit: {
-        fetch: async (input, init) => {
-          const requestHeaders = new Headers(init?.headers);
-          Object.entries(headers).forEach(([name, value]) => {
-            requestHeaders.set(name, value);
-          });
-          requestHeaders.set("Accept", "text/event-stream");
-          return fetch(input, { ...init, headers: requestHeaders });
-        },
-      },
     });
     return new LegacySseTransportAdapter(legacyTransport);
   }

@@ -104,10 +104,7 @@ describe("remote MCP OAuth", () => {
       {
         authProvider: provider,
         requestInit: {
-          headers: {
-            "X-Workspace": "team-1",
-            Authorization: "Bearer miro-access-token",
-          },
+          headers: { "X-Workspace": "team-1" },
         },
       },
     );
@@ -117,15 +114,12 @@ describe("remote MCP OAuth", () => {
       tools: [{ name: "search_boards", description: "Search Miro boards" }],
     });
     const authenticatedServer = await resolveMcpOAuthServer(server);
-    expect(authenticatedServer.headers).toMatchObject({
-      "X-Workspace": "team-1",
-      Authorization: expect.stringMatching(/^Bearer /),
-    });
+    expect(authenticatedServer.headers).toEqual({ "X-Workspace": "team-1" });
     expect(
       Object.keys(authenticatedServer.headers || {}).filter(
         (key) => key.toLowerCase() === "authorization",
       ),
-    ).toEqual(["Authorization"]);
+    ).toEqual([]);
     expect(mockListTools).toHaveBeenCalledTimes(1);
     expect(mockClientClose).toHaveBeenCalledTimes(1);
   });
@@ -163,17 +157,16 @@ describe("remote MCP OAuth", () => {
     );
 
     const authenticatedServer = await resolveMcpOAuthServer(server);
-    const authorization = authenticatedServer.headers?.Authorization;
-    if (!authorization) throw new Error("Expected resolved OAuth authorization header");
+    expect(authenticatedServer.headers).toEqual({});
     await expect(
       restartedOAuth.resolveMcpOAuthServer(authenticatedServer),
-    ).resolves.toEqual(authenticatedServer);
+    ).rejects.toThrow(/must be reconnected after restart/);
 
     for (const name of ["authorization", "AUTHORIZATION", "aUtHoRiZaTiOn"]) {
       const forwardedServer = {
         ...server,
         headers: {
-          [name]: authorization,
+          [name]: "stale-token",
           "X-Workspace": "team-1",
         },
       };
