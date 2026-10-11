@@ -102,8 +102,12 @@ describe("remote MCP OAuth", () => {
     expect(StreamableHTTPClientTransport).toHaveBeenCalledWith(
       new URL(server.url),
       {
-        authProvider: provider,
-        requestInit: { headers: { "X-Workspace": "team-1" } },
+        requestInit: {
+          headers: {
+            "X-Workspace": "team-1",
+            Authorization: "Bearer miro-access-token",
+          },
+        },
       },
     );
     expect(server.headers).toEqual(configuredHeaders);

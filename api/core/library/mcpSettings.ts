@@ -1,5 +1,7 @@
 export const MCP_SERVERS_STORAGE_KEY = "settings.mcpServers";
 
+export type McpRemoteTransport = "streamable-http" | "sse";
+
 export const MAX_MCP_SERVERS = 10;
 const MAX_COMMAND_LENGTH = 300;
 const MAX_NAME_LENGTH = 100;
@@ -19,6 +21,7 @@ export type McpServerConfig = {
   args: string[];
   env: Record<string, string>;
   url?: string;
+  transport?: McpRemoteTransport;
   headers?: Record<string, string>;
   enabled: boolean;
 };
@@ -168,6 +171,15 @@ const normalizeMcpServerDraft = (
   // drop the stale/ambiguous `command` here rather than keep it around
   // unused and unvalidated.
   const command = url ? "" : safeString(raw.command, MAX_COMMAND_LENGTH);
+  const transport = raw.transport;
+  if (
+    url &&
+    transport !== undefined &&
+    transport !== "streamable-http" &&
+    transport !== "sse"
+  ) {
+    return null;
+  }
   const name = safeString(raw.name, MAX_NAME_LENGTH) || command || (url ? hostnameFromUrl(url) : "") || "New MCP Server";
 
   return {
@@ -177,6 +189,7 @@ const normalizeMcpServerDraft = (
     args: sanitizeArgs(raw.args),
     env: sanitizeEnv(raw.env),
     ...(url ? { url } : {}),
+    ...(url ? { transport: transport === "sse" ? "sse" : "streamable-http" } : {}),
     ...(Object.keys(sanitizeHeaders(raw.headers)).length > 0
       ? { headers: sanitizeHeaders(raw.headers) }
       : {}),
@@ -211,6 +224,16 @@ export const sanitizeMcpServer = (input: unknown, index = 0): McpServerConfig | 
   const command = url ? "" : safeString(raw.command, MAX_COMMAND_LENGTH);
   if (!command && !url) return null;
 
+  const transport = raw.transport;
+  if (
+    url &&
+    transport !== undefined &&
+    transport !== "streamable-http" &&
+    transport !== "sse"
+  ) {
+    return null;
+  }
+
   const id = safeString(raw.id, 120) || getDefaultId(index);
   const name = safeString(raw.name, MAX_NAME_LENGTH) || command || (url ? hostnameFromUrl(url) : "") || "MCP Server";
 
@@ -221,6 +244,7 @@ export const sanitizeMcpServer = (input: unknown, index = 0): McpServerConfig | 
     args: sanitizeArgs(raw.args),
     env: sanitizeEnv(raw.env),
     ...(url ? { url } : {}),
+    ...(url ? { transport: transport === "sse" ? "sse" : "streamable-http" } : {}),
     ...(Object.keys(sanitizeHeaders(raw.headers)).length > 0
       ? { headers: sanitizeHeaders(raw.headers) }
       : {}),
@@ -247,6 +271,7 @@ export const toStableMcpFingerprint = (servers: McpServerConfig[]): string => {
       name: server.name,
       command: server.command,
       args: [...server.args],
+      transport: server.transport,
       env: Object.fromEntries(Object.entries(server.env).sort(([a], [b]) => a.localeCompare(b))),
       url: server.url,
       headers: Object.fromEntries(

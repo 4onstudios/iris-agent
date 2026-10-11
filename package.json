@@ -74,6 +74,7 @@
     "@mastra/libsql": "^1.22.2",
     "@mastra/memory": "^1.28.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk-legacy": "npm:@modelcontextprotocol/sdk@1.12.1",
     "@openrouter/ai-sdk-provider": "^2.10.0",
     "@tanstack/ai": "^0.58.0",
     "@tanstack/ai-compaction": "^0.1.6",

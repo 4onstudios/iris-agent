@@ -11,6 +11,7 @@ describe("MCP server settings", () => {
         id: "remote",
         name: "Remote tools",
         url: "https://example.com/mcp",
+        transport: "sse",
         headers: {
           Authorization: "Bearer token",
         },
@@ -19,6 +20,7 @@ describe("MCP server settings", () => {
       id: "remote",
       name: "Remote tools",
       url: "https://example.com/mcp",
+      transport: "sse",
       command: "",
       headers: {
         Authorization: "Bearer token",
@@ -30,6 +32,18 @@ describe("MCP server settings", () => {
   it("rejects unsupported or invalid remote URLs", () => {
     expect(sanitizeMcpServer({ url: "file:///tmp/server" })).toBeNull();
     expect(sanitizeMcpServer({ url: "not-a-url" })).toBeNull();
+  });
+
+  it("defaults remote MCP servers to Streamable HTTP and rejects unknown transports", () => {
+    expect(sanitizeMcpServer({ url: "https://example.com/mcp" })?.transport).toBe(
+      "streamable-http",
+    );
+    expect(
+      sanitizeMcpServer({
+        url: "https://example.com/mcp",
+        transport: "websocket",
+      }),
+    ).toBeNull();
   });
 
   it("rejects the whole config when a malformed URL is paired with a stale command, instead of falling back to local mode", () => {
@@ -63,6 +77,11 @@ describe("MCP server settings", () => {
 
     expect(server).not.toBeNull();
     expect(toStableMcpFingerprint([server!])).toContain("https://example.com/mcp");
+    expect(
+      toStableMcpFingerprint([
+        { ...server!, transport: "sse" },
+      ]),
+    ).not.toBe(toStableMcpFingerprint([server!]));
   });
 
   it("drops a stale command when a URL is also supplied, rather than accepting both", () => {

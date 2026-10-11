@@ -511,6 +511,7 @@ never be resurrected as a local process launch.
 | `args` | `string[]` | local | Arguments passed to `command`. |
 | `env` | `object` | local | Extra environment variables merged into the spawned process's env. |
 | `url` | `string` | remote | HTTP(S) endpoint for a remote MCP server. |
+| `transport` | `"streamable-http" \| "sse"` | remote | HTTP transport; defaults to `streamable-http`. Use `sse` only for legacy SSE servers. |
 | `headers` | `object` | remote | Extra HTTP headers (e.g. `Authorization`) sent with every request. |
 
 Local stdio servers use `command`, `args`, and optional `env` fields:
@@ -527,9 +528,8 @@ Local stdio servers use `command`, `args`, and optional `env` fields:
 ```
 
 Remote MCP servers use an HTTP(S) `url` and may provide request headers for
-authentication. Iris connects using the MCP Streamable HTTP transport (the
-legacy SSE transport is not supported; the remote server must implement
-Streamable HTTP):
+authentication. The default transport is MCP Streamable HTTP. Set `transport`
+to `sse` for servers that require the legacy SSE protocol:
 
 ```json
 {

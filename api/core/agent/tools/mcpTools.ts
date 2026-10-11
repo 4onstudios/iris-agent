@@ -8,12 +8,15 @@ import {
   StdioClientTransport,
   type StdioServerParameters,
 } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { redactMcpUrlForDisplay, type McpServerConfig } from "../../library/mcpSettings";
 import {
   McpOAuthReconnectRequiredError,
   resolveMcpOAuthServer,
 } from "./mcpOAuth";
+import {
+  createMcpRemoteTransport,
+  type McpRemoteClientTransport,
+} from "./mcpTransport";
 
 const MCP_TIMEOUT_MS = 20000;
 
@@ -215,27 +218,14 @@ const createTransportParams = (
   };
 };
 
-type McpTransport = StdioClientTransport | StreamableHTTPClientTransport;
-
-const createRemoteTransport = (server: McpServerConfig): McpTransport => {
-  if (!server.url) {
-    throw new Error(`MCP server '${server.name}' has no remote URL`);
-  }
-
-  const url = new URL(server.url);
-  const requestInit: RequestInit = {
-    headers: server.headers,
-  };
-
-  return new StreamableHTTPClientTransport(url, { requestInit });
-};
+type McpTransport = StdioClientTransport | McpRemoteClientTransport;
 
 const connectRemoteClient = async (
   server: McpServerConfig,
 ): Promise<{ client: Client; transport: McpTransport }> => {
   const authenticatedServer = await resolveMcpOAuthServer(server);
   const client = new Client({ name: "iris-mcp", version: "1.0.0" });
-  const transport = createRemoteTransport(authenticatedServer);
+  const transport = createMcpRemoteTransport(authenticatedServer);
 
   try {
     await client.connect(transport, { timeout: MCP_TIMEOUT_MS });

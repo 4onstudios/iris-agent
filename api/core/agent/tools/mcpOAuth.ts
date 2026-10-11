@@ -13,7 +13,7 @@ import type {
   OAuthClientMetadata,
   OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { createMcpRemoteTransport } from "./mcpTransport";
 import type { McpServerConfig } from "../../library/mcpSettings";
 
 export type McpOAuthTool = {
@@ -242,11 +242,15 @@ export const completeMcpOAuth = async ({
     });
     if (result !== "AUTHORIZED") throw new Error("OAuth authorization did not complete.");
 
+    const tokens = await flow.provider.tokens();
+    if (!tokens?.access_token) {
+      throw new Error("OAuth completed without an access token.");
+    }
+    const headers = withoutAuthorizationHeaders(flow.server.headers);
+    headers.Authorization = `Bearer ${tokens.access_token}`;
+
     const client = new Client({ name: "iris-agent", version: "1.0.0" });
-    const transport = new StreamableHTTPClientTransport(new URL(flow.server.url), {
-      authProvider: flow.provider,
-      requestInit: { headers: withoutAuthorizationHeaders(flow.server.headers) },
-    });
+    const transport = createMcpRemoteTransport({ ...flow.server, headers });
     try {
       await client.connect(transport);
       const listed = await client.listTools();
@@ -258,8 +262,6 @@ export const completeMcpOAuth = async ({
       await client.close();
     }
 
-    const tokens = await flow.provider.tokens();
-    if (!tokens?.access_token) throw new Error("OAuth completed without an access token.");
     await persistReconnectRequiredState(flow.server);
     flow.status = "connected";
     providersByServer.set(getServerKey(flow.server), flow.provider);
