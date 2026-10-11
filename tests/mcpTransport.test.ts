@@ -125,22 +125,45 @@ describe("MCP remote transport selection", () => {
       tools: [{ name: "hello", inputSchema: { type: "object" } }],
     }));
 
-    let accessToken = "initial-token";
-    const authProvider: OAuthClientProvider = {
-      redirectUrl: "http://127.0.0.1/callback",
-      clientMetadata: { redirect_uris: ["http://127.0.0.1/callback"] },
-      clientInformation: () => ({ client_id: "legacy-oauth-test" }),
-      tokens: () => ({
-        access_token: accessToken,
-        token_type: "Bearer",
-      }),
-      saveTokens: (tokens) => {
-        accessToken = tokens.access_token;
-      },
-      redirectToAuthorization: () => undefined,
-      saveCodeVerifier: () => undefined,
-      codeVerifier: () => "test-verifier",
-    };
+    class StatefulOAuthProvider implements OAuthClientProvider {
+      private accessToken = "initial-token";
+      clientMetadataReads = 0;
+      redirectUrl = "http://127.0.0.1/callback";
+      clientId = "legacy-oauth-test";
+
+      get clientMetadata() {
+        this.clientMetadataReads += 1;
+        return { redirect_uris: [this.redirectUrl] };
+      }
+
+      clientInformation() {
+        return { client_id: this.clientId };
+      }
+
+      tokens() {
+        return {
+          access_token: this.accessToken,
+          token_type: "Bearer",
+        };
+      }
+
+      saveTokens(tokens: Awaited<ReturnType<OAuthClientProvider["tokens"]>>) {
+        if (!tokens) throw new Error("Expected OAuth tokens");
+        this.accessToken = tokens.access_token;
+      }
+
+      redirectToAuthorization() {}
+      saveCodeVerifier() {}
+      codeVerifier() {
+        return "test-verifier";
+      }
+
+      rotateAccessToken(accessToken: string) {
+        this.accessToken = accessToken;
+      }
+    }
+
+    const authProvider = new StatefulOAuthProvider();
     const transports = new Map<string, SSEServerTransport>();
     const authorizationHeaders: string[] = [];
     let httpServer: HttpServer | undefined;
@@ -196,10 +219,11 @@ describe("MCP remote transport selection", () => {
         },
         authProvider,
       );
+      expect(authProvider.clientMetadataReads).toBe(0);
       client = new Client({ name: "legacy-oauth-test", version: "1.0.0" });
       await client.connect(transport);
 
-      accessToken = "rotated-token";
+      authProvider.rotateAccessToken("rotated-token");
       await expect(client.listTools()).resolves.toMatchObject({
         tools: [{ name: "hello" }],
       });
