@@ -5,9 +5,26 @@ import {
   type JSONRPCMessage,
 } from "@modelcontextprotocol/sdk/types.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk-legacy/client/sse.js";
+import type { OAuthClientProvider as LegacyOAuthClientProvider } from "@modelcontextprotocol/sdk-legacy/client/auth.js";
 import { JSONRPCMessageSchema as LegacyJSONRPCMessageSchema } from "@modelcontextprotocol/sdk-legacy/types.js";
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { McpServerConfig } from "../../library/mcpSettings";
+
+const adaptOAuthProviderForLegacySdk = (
+  provider: OAuthClientProvider,
+): LegacyOAuthClientProvider => {
+  const legacyProvider: LegacyOAuthClientProvider = {
+    ...provider,
+    get redirectUrl() {
+      const redirectUrl = provider.redirectUrl;
+      if (!redirectUrl) {
+        throw new Error("The OAuth provider does not have a redirect URL.");
+      }
+      return redirectUrl;
+    },
+  };
+  return legacyProvider;
+};
 
 export class LegacySseTransportAdapter implements Transport {
   onclose?: () => void;
@@ -57,7 +74,9 @@ export const createMcpRemoteTransport = (
 
   if (server.transport === "sse") {
     const legacyTransport = new SSEClientTransport(url, {
-      ...(authProvider ? { authProvider } : {}),
+      ...(authProvider
+        ? { authProvider: adaptOAuthProviderForLegacySdk(authProvider) }
+        : {}),
       requestInit: { headers },
     });
     return new LegacySseTransportAdapter(legacyTransport);
