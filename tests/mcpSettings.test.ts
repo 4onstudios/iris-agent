@@ -110,6 +110,37 @@ describe("MCP server settings", () => {
     ).toThrow('"env" contains an invalid key or value');
   });
 
+  it("rejects invalid present URLs rather than falling back to a local command", () => {
+    for (const url of [42, "", "   "]) {
+      expect(() =>
+        parseMcpServerConfigFile(
+          JSON.stringify([{ url, command: "some-stale-command" }]),
+        ),
+      ).toThrow('"url" must be a non-empty string');
+    }
+  });
+
+  it("validates and preserves MCP header values from config files", () => {
+    expect(() =>
+      parseMcpServerConfigFile(
+        JSON.stringify([
+          { url: "https://example.com/mcp", headers: { Authorization: 42 } },
+        ]),
+      ),
+    ).toThrow('"headers" contains an invalid key or value');
+
+    expect(
+      parseMcpServerConfigFile(
+        JSON.stringify([
+          {
+            url: "https://example.com/mcp",
+            headers: { Authorization: "  Bearer token  " },
+          },
+        ]),
+      )[0].headers,
+    ).toEqual({ Authorization: "  Bearer token  " });
+  });
+
   it("rejects the whole config when a malformed URL is paired with a stale command, instead of falling back to local mode", () => {
     // A config that was previously remote but now has a broken/unsupported
     // url must not silently resurrect the leftover `command` and launch a

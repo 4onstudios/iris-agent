@@ -313,12 +313,24 @@ export const parseMcpServerConfigFile = (contents: string): McpServerConfig[] =>
     config: unknown;
     args?: string[];
     env?: Record<string, string>;
+    headers?: Record<string, string>;
   }> = servers.map((server) => {
     if (server && typeof server === "object" && !Array.isArray(server)) {
       const config = server as Record<string, unknown>;
       const validatedConfig = { ...config };
       if ("enabled" in config && typeof config.enabled !== "boolean") {
         throw new Error('MCP config server "enabled" value must be a boolean');
+      }
+      if ("url" in config) {
+        if (
+          typeof config.url !== "string" ||
+          !config.url.trim() ||
+          config.url.length > MAX_URL_LENGTH
+        ) {
+          throw new Error(
+            'MCP config server "url" must be a non-empty string',
+          );
+        }
       }
       if ("command" in config) {
         if (typeof config.command !== "string" || !config.command.trim()) {
@@ -399,7 +411,43 @@ export const parseMcpServerConfigFile = (contents: string): McpServerConfig[] =>
         validatedConfig.env = env;
       }
 
-      return { config: validatedConfig, args, env };
+      let headers: Record<string, string> | undefined;
+      if ("headers" in config) {
+        if (
+          !config.headers ||
+          typeof config.headers !== "object" ||
+          Array.isArray(config.headers)
+        ) {
+          throw new Error(
+            'MCP config server "headers" must be an object of strings',
+          );
+        }
+        const entries = Object.entries(config.headers);
+        if (entries.length > MAX_HEADERS) {
+          throw new Error(
+            `MCP config server "headers" supports at most ${MAX_HEADERS} values`,
+          );
+        }
+        headers = Object.fromEntries(
+          entries.map(([key, value]) => {
+            if (
+              !key ||
+              key !== key.trim() ||
+              key.length > MAX_HEADER_LENGTH ||
+              typeof value !== "string" ||
+              value.length > MAX_HEADER_LENGTH
+            ) {
+              throw new Error(
+                'MCP config server "headers" contains an invalid key or value',
+              );
+            }
+            return [key, value];
+          }),
+        );
+        validatedConfig.headers = headers;
+      }
+
+      return { config: validatedConfig, args, env, headers };
     }
     return { config: server };
   });
@@ -417,6 +465,9 @@ export const parseMcpServerConfigFile = (contents: string): McpServerConfig[] =>
       : {}),
     ...(validatedServers[index].env !== undefined
       ? { env: validatedServers[index].env }
+      : {}),
+    ...(validatedServers[index].headers !== undefined
+      ? { headers: validatedServers[index].headers }
       : {}),
   }));
 };
