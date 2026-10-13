@@ -120,6 +120,13 @@ describe("MCP server settings", () => {
     }
   });
 
+  it("reports the maximum length when a configured URL is oversized", () => {
+    const url = `https://example.com/${"a".repeat(2000)}`;
+    expect(() =>
+      parseMcpServerConfigFile(JSON.stringify([{ url }])),
+    ).toThrow('"url" exceeds 2000 characters');
+  });
+
   it("validates and preserves MCP header values from config files", () => {
     expect(() =>
       parseMcpServerConfigFile(

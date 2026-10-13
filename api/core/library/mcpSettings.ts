@@ -348,11 +348,15 @@ export const parseMcpServerConfigFile = (contents: string): McpServerConfig[] =>
       if ("url" in config) {
         if (
           typeof config.url !== "string" ||
-          !config.url.trim() ||
-          config.url.length > MAX_URL_LENGTH
+          !config.url.trim()
         ) {
           throw new Error(
             'MCP config server "url" must be a non-empty string',
+          );
+        }
+        if (config.url.length > MAX_URL_LENGTH) {
+          throw new Error(
+            `MCP config server "url" exceeds ${MAX_URL_LENGTH} characters`,
           );
         }
       }

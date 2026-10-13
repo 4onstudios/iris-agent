@@ -134,11 +134,12 @@ export const summarizeMcpToolError = (result: {
   return summarizeStructuredError(result.structuredContent) || summarizeMcpContent(result.content);
 };
 
-const buildAugmentedPath = (): string => {
+export const buildAugmentedPath = (
+  basePath = process.env.PATH || "",
+): string => {
   const home = process.env.HOME || os.homedir() || "";
-  const currentPath = process.env.PATH || "";
   const pathParts = [
-    currentPath,
+    basePath,
     "/opt/homebrew/bin",
     "/usr/local/bin",
     "/usr/bin",
@@ -208,7 +209,7 @@ const createTransportParams = (
     ...process.env,
     ...server.env,
   } as Record<string, string>;
-  env.PATH = buildAugmentedPath();
+  env.PATH = buildAugmentedPath(env.PATH);
 
   return {
     command: server.command!.trim(),
