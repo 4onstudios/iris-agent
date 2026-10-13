@@ -264,6 +264,33 @@ export const sanitizeMcpServers = (
     .slice(0, maxServers);
 };
 
+export const parseMcpServerConfigFile = (contents: string): McpServerConfig[] => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`MCP config is not valid JSON: ${message}`);
+  }
+
+  const servers =
+    parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>).mcpServers
+      : parsed;
+  if (!Array.isArray(servers)) {
+    throw new Error('MCP config must be an array or an object with a "mcpServers" array');
+  }
+  if (servers.length > MAX_MCP_SERVERS) {
+    throw new Error(`MCP config supports at most ${MAX_MCP_SERVERS} servers`);
+  }
+
+  const sanitizedServers = sanitizeMcpServers(servers);
+  if (sanitizedServers.length !== servers.length) {
+    throw new Error("MCP config contains an invalid server entry");
+  }
+  return sanitizedServers;
+};
+
 export const toStableMcpFingerprint = (servers: McpServerConfig[]): string => {
   const normalized = servers
     .map((server) => ({

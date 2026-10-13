@@ -1,4 +1,5 @@
 import {
+  parseMcpServerConfigFile,
   sanitizeMcpServer,
   toStableMcpFingerprint,
   redactMcpUrlForDisplay,
@@ -44,6 +45,30 @@ describe("MCP server settings", () => {
         transport: "websocket",
       }),
     ).toBeNull();
+  });
+
+  it("parses MCP config files as arrays or mcpServers objects", () => {
+    const server = {
+      id: "local-tools",
+      name: "Local tools",
+      command: "npx",
+      args: ["-y", "example-mcp-server"],
+    };
+
+    expect(parseMcpServerConfigFile(JSON.stringify([server]))).toMatchObject([
+      { ...server, env: {}, enabled: true, command: "npx" },
+    ]);
+    expect(
+      parseMcpServerConfigFile(JSON.stringify({ mcpServers: [server] })),
+    ).toMatchObject([{ ...server, env: {}, enabled: true, command: "npx" }]);
+  });
+
+  it("rejects malformed MCP config files and invalid server entries", () => {
+    expect(() => parseMcpServerConfigFile("{")).toThrow("not valid JSON");
+    expect(() => parseMcpServerConfigFile("{}")).toThrow("mcpServers");
+    expect(() => parseMcpServerConfigFile(JSON.stringify([{}]))).toThrow(
+      "invalid server entry",
+    );
   });
 
   it("rejects the whole config when a malformed URL is paired with a stale command, instead of falling back to local mode", () => {

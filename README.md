@@ -134,11 +134,36 @@ OPENROUTER_API_KEY=... npm run cli -- --workspace /path/to/project --chat
 
 # Interactive chat with a specific model
 OPENROUTER_API_KEY=... npm run cli -- --workspace /path/to/project --chat --modelId openrouter/anthropic/claude-3.7-sonnet
+
+# Interactive chat with MCP servers from a JSON config file
+OPENROUTER_API_KEY=... npm run cli -- --workspace /path/to/project --chat --mcp-config ./mcp-servers.json
 ```
 
 This starts an interactive streaming chat session in your terminal with access to the workspace and tools.
 OpenTUI is selected automatically on supported interactive terminals. With
 Node.js >=26.4.0, enable FFI to use it with the same npm launcher:
+
+The config file can contain an array of MCP server definitions or an object with
+an `mcpServers` array. For example, create `mcp-servers.json`:
+
+```json
+{
+  "mcpServers": [
+    {
+      "id": "local-tools",
+      "name": "Local tools",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/project"],
+      "enabled": true
+    }
+  ]
+}
+```
+
+Use `--mcp-config <path>` with `--chat`; relative paths are resolved from the
+current directory. Local server processes inherit the CLI environment, so set
+required credentials in the shell before launching. Keep config files containing
+secrets out of source control.
 
 ```sh
 # With OPENROUTER_API_KEY already configured in your terminal
