@@ -141,6 +141,40 @@ describe("MCP server settings", () => {
     ).toEqual({ Authorization: "  Bearer token  " });
   });
 
+  it("rejects malformed HTTP header names and values", () => {
+    for (const headers of [
+      { "Bad Header": "value" },
+      { Authorization: "Bearer token\r\nX-Injected: yes" },
+    ]) {
+      expect(() =>
+        parseMcpServerConfigFile(
+          JSON.stringify([{ url: "https://example.com/mcp", headers }]),
+        ),
+      ).toThrow('"headers" contains an invalid key or value');
+
+      expect(
+        sanitizeMcpServer({
+          url: "https://example.com/mcp",
+          headers,
+        }),
+      ).toBeNull();
+    }
+  });
+
+  it("rejects HTTP header values containing control characters", () => {
+    const value = `Bearer token${String.fromCharCode(13, 10)}X-Injected: yes`;
+    const headers = { Authorization: value + String.fromCharCode(13) };
+
+    expect(() =>
+      parseMcpServerConfigFile(
+        JSON.stringify([{ url: "https://example.com/mcp", headers }]),
+      ),
+    ).toThrow('"headers" contains an invalid key or value');
+    expect(
+      sanitizeMcpServer({ url: "https://example.com/mcp", headers }),
+    ).toBeNull();
+  });
+
   it("rejects the whole config when a malformed URL is paired with a stale command, instead of falling back to local mode", () => {
     // A config that was previously remote but now has a broken/unsupported
     // url must not silently resurrect the leftover `command` and launch a

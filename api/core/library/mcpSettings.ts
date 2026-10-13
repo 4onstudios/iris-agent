@@ -27,6 +27,34 @@ export type McpServerConfig = {
 };
 
 const isSafeEnvKey = (key: string): boolean => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key);
+const isValidHttpHeaderName = (name: string): boolean =>
+  /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name);
+const isValidHttpHeaderValue = (value: unknown): value is string =>
+  typeof value === "string" &&
+  value.length <= MAX_HEADER_LENGTH &&
+  /^[\t\x20-\x7E\x80-\xFF]*$/.test(value);
+
+const isValidHttpHeaders = (
+  headers: unknown,
+): headers is Record<string, string> => {
+  if (!headers || typeof headers !== "object" || Array.isArray(headers)) {
+    return false;
+  }
+
+  const entries = Object.entries(headers);
+  return (
+    entries.length <= MAX_HEADERS &&
+    entries.every(
+      ([name, value]) =>
+        name.length <= MAX_HEADER_LENGTH &&
+        isValidHttpHeaderName(name) &&
+        isValidHttpHeaderValue(value),
+    )
+  );
+};
+
+const hasValidHttpHeaders = (headers: unknown): boolean =>
+  headers === undefined || isValidHttpHeaders(headers);
 
 const splitCommandString = (value: string): string[] => {
   const parts: string[] = [];
@@ -79,16 +107,10 @@ const sanitizeEnv = (env: unknown): Record<string, string> => {
 };
 
 const sanitizeHeaders = (headers: unknown): Record<string, string> => {
-  if (!headers || typeof headers !== "object" || Array.isArray(headers)) return {};
+  if (!isValidHttpHeaders(headers)) return {};
 
   return Object.fromEntries(
-    Object.entries(headers)
-      .map(([key, value]) => [
-        safeString(key, MAX_HEADER_LENGTH),
-        safeString(value, MAX_HEADER_LENGTH),
-      ] as const)
-      .filter(([key, value]) => key.length > 0 && value.length > 0)
-      .slice(0, MAX_HEADERS),
+    Object.entries(headers).slice(0, MAX_HEADERS),
   );
 };
 
@@ -157,6 +179,7 @@ const normalizeMcpServerDraft = (
   if (!input || typeof input !== "object" || Array.isArray(input)) return null;
 
   const raw = input as Record<string, unknown>;
+  if (!hasValidHttpHeaders(raw.headers)) return null;
   const id = safeString(raw.id, 120) || getDefaultId(index);
   const hasUrlInput = typeof raw.url === "string" && raw.url.trim().length > 0;
   const url = sanitizeUrl(raw.url);
@@ -213,6 +236,7 @@ export const sanitizeMcpServer = (input: unknown, index = 0): McpServerConfig | 
   if (!input || typeof input !== "object" || Array.isArray(input)) return null;
 
   const raw = input as Record<string, unknown>;
+  if (!hasValidHttpHeaders(raw.headers)) return null;
   const hasUrlInput = typeof raw.url === "string" && raw.url.trim().length > 0;
   const url = sanitizeUrl(raw.url);
   // A non-empty url that fails sanitization is malformed/unsupported, not
@@ -431,11 +455,9 @@ export const parseMcpServerConfigFile = (contents: string): McpServerConfig[] =>
         headers = Object.fromEntries(
           entries.map(([key, value]) => {
             if (
-              !key ||
-              key !== key.trim() ||
               key.length > MAX_HEADER_LENGTH ||
-              typeof value !== "string" ||
-              value.length > MAX_HEADER_LENGTH
+              !isValidHttpHeaderName(key) ||
+              !isValidHttpHeaderValue(value)
             ) {
               throw new Error(
                 'MCP config server "headers" contains an invalid key or value',
