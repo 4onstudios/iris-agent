@@ -1,4 +1,5 @@
 import {
+  parseMcpServerConfigFile,
   sanitizeMcpServer,
   toStableMcpFingerprint,
   redactMcpUrlForDisplay,
@@ -43,6 +44,141 @@ describe("MCP server settings", () => {
         url: "https://example.com/mcp",
         transport: "websocket",
       }),
+    ).toBeNull();
+  });
+
+  it("parses array and keyed-object MCP server configs", () => {
+    const server = {
+      id: "local-tools",
+      name: "Local tools",
+      command: "npx",
+      args: ["-y", "example-mcp-server"],
+    };
+
+    expect(parseMcpServerConfigFile(JSON.stringify([server]))).toMatchObject([
+      { ...server, env: {}, enabled: true, command: "npx" },
+    ]);
+    expect(
+      parseMcpServerConfigFile(JSON.stringify({ mcpServers: [server] })),
+    ).toMatchObject([{ ...server, env: {}, enabled: true, command: "npx" }]);
+
+    expect(
+      parseMcpServerConfigFile(
+        JSON.stringify({
+          mcpServers: {
+            filesystem: {
+              command: "npx",
+              args: ["-y", "server-filesystem", " /path with spaces ", ""],
+              env: { TOKEN: " token " },
+            },
+          },
+        }),
+      ),
+    ).toMatchObject([
+      {
+        id: "filesystem",
+        name: "filesystem",
+        command: "npx",
+        args: ["-y", "server-filesystem", " /path with spaces ", ""],
+        env: { TOKEN: " token " },
+        enabled: true,
+      },
+    ]);
+  });
+
+  it("rejects malformed MCP entries instead of rewriting their executable fields", () => {
+    expect(() => parseMcpServerConfigFile("{")).toThrow("not valid JSON");
+    expect(() => parseMcpServerConfigFile("{}")).toThrow("mcpServers");
+    expect(() => parseMcpServerConfigFile(JSON.stringify([{}]))).toThrow(
+      "invalid server entry",
+    );
+    expect(() =>
+      parseMcpServerConfigFile(
+        JSON.stringify([{ command: "npx", enabled: "false" }]),
+      ),
+    ).toThrow('"enabled" value must be a boolean');
+    expect(() =>
+      parseMcpServerConfigFile(JSON.stringify([{ command: 42, args: [] }])),
+    ).toThrow('"command" must be a non-empty string');
+    expect(() =>
+      parseMcpServerConfigFile(JSON.stringify([{ command: "npx", args: ["-y", 42] }])),
+    ).toThrow('"args" must contain only strings');
+    expect(() =>
+      parseMcpServerConfigFile(
+        JSON.stringify([{ command: "npx", args: [], env: { TOKEN: 42 } }]),
+      ),
+    ).toThrow('"env" contains an invalid key or value');
+  });
+
+  it("rejects invalid present URLs rather than falling back to a local command", () => {
+    for (const url of [42, "", "   "]) {
+      expect(() =>
+        parseMcpServerConfigFile(
+          JSON.stringify([{ url, command: "some-stale-command" }]),
+        ),
+      ).toThrow('"url" must be a non-empty string');
+    }
+  });
+
+  it("reports the maximum length when a configured URL is oversized", () => {
+    const url = `https://example.com/${"a".repeat(2000)}`;
+    expect(() =>
+      parseMcpServerConfigFile(JSON.stringify([{ url }])),
+    ).toThrow('"url" exceeds 2000 characters');
+  });
+
+  it("validates and preserves MCP header values from config files", () => {
+    expect(() =>
+      parseMcpServerConfigFile(
+        JSON.stringify([
+          { url: "https://example.com/mcp", headers: { Authorization: 42 } },
+        ]),
+      ),
+    ).toThrow('"headers" contains an invalid key or value');
+
+    expect(
+      parseMcpServerConfigFile(
+        JSON.stringify([
+          {
+            url: "https://example.com/mcp",
+            headers: { Authorization: "  Bearer token  " },
+          },
+        ]),
+      )[0].headers,
+    ).toEqual({ Authorization: "  Bearer token  " });
+  });
+
+  it("rejects malformed HTTP header names and values", () => {
+    for (const headers of [
+      { "Bad Header": "value" },
+      { Authorization: "Bearer token\r\nX-Injected: yes" },
+    ]) {
+      expect(() =>
+        parseMcpServerConfigFile(
+          JSON.stringify([{ url: "https://example.com/mcp", headers }]),
+        ),
+      ).toThrow('"headers" contains an invalid key or value');
+
+      expect(
+        sanitizeMcpServer({
+          url: "https://example.com/mcp",
+          headers,
+        }),
+      ).toBeNull();
+    }
+  });
+
+  it("rejects HTTP header values containing control characters", () => {
+    const value = `Bearer token${String.fromCharCode(13, 10)}X-Injected: yes`;
+    const headers = { Authorization: value + String.fromCharCode(13) };
+
+    expect(() =>
+      parseMcpServerConfigFile(
+        JSON.stringify([{ url: "https://example.com/mcp", headers }]),
+      ),
+    ).toThrow('"headers" contains an invalid key or value');
+    expect(
+      sanitizeMcpServer({ url: "https://example.com/mcp", headers }),
     ).toBeNull();
   });
 

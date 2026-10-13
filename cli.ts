@@ -9,9 +9,12 @@
 
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { createCodingAgent } from "./api/core/agent/index.js";
 import { startAcpServer } from "./api/acp/acpServer.js";
 import { getMissingProviderSetup } from "./api/core/library/providerSetup.js";
+import { parseMcpServerConfigFile } from "./api/core/library/mcpSettings.js";
 import {
   createCliChatUi,
   type CliChatUiMode,
@@ -58,12 +61,20 @@ const argv = yargs(hideBin(process.argv))
     description: "Language model identifier",
     default: defaultModelId,
   })
+  .option("mcp-config", {
+    type: "string",
+    description: "Path to a JSON file containing MCP server configuration (chat mode)",
+  })
   .help()
   .parseSync();
 
 async function main() {
   const workspaceRoot = argv.workspace as string;
   const modelId = argv.modelId;
+
+  if (argv.mcpConfig && (!argv.chat || argv.acp)) {
+    throw new Error("--mcp-config can only be used with --chat");
+  }
 
   if (argv.acp) {
     const stderrLog = console.error.bind(console);
@@ -108,7 +119,15 @@ async function main() {
       process.exitCode = 1;
       return;
     }
-    const agent = await createCodingAgent(modelId, workspaceRoot);
+    const mcpServers = argv.mcpConfig
+      ? parseMcpServerConfigFile(
+          await readFile(resolve(argv.mcpConfig), "utf8"),
+        )
+      : [];
+    const agent = await createCodingAgent(modelId, workspaceRoot, { mcpServers });
+    if (mcpServers.length > 0) {
+      console.log(`🧩 MCP servers configured: ${mcpServers.length}`);
+    }
     console.log(`💬 Entering chat mode (type "exit" to quit)`);
     await startChatMode(agent, workspaceRoot, modelId, argv["chat-ui"] as CliChatUiMode);
   } else {

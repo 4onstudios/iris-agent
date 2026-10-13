@@ -3,6 +3,7 @@ import { z } from "zod";
 import Ajv from "ajv";
 import type { JSONSchema7 } from "json-schema";
 import os from "os";
+import { delimiter as pathDelimiter } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
   StdioClientTransport,
@@ -134,11 +135,12 @@ export const summarizeMcpToolError = (result: {
   return summarizeStructuredError(result.structuredContent) || summarizeMcpContent(result.content);
 };
 
-const buildAugmentedPath = (): string => {
+export const buildAugmentedPath = (
+  basePath = process.env.PATH || "",
+): string => {
   const home = process.env.HOME || os.homedir() || "";
-  const currentPath = process.env.PATH || "";
   const pathParts = [
-    currentPath,
+    basePath,
     "/opt/homebrew/bin",
     "/usr/local/bin",
     "/usr/bin",
@@ -147,7 +149,9 @@ const buildAugmentedPath = (): string => {
     home ? `${home}/.cargo/bin` : "",
   ].filter(Boolean);
 
-  return Array.from(new Set(pathParts.join(":").split(":"))).join(":");
+  return Array.from(
+    new Set(pathParts.join(pathDelimiter).split(pathDelimiter)),
+  ).join(pathDelimiter);
 };
 
 type CommandCandidate = {
@@ -208,7 +212,7 @@ const createTransportParams = (
     ...process.env,
     ...server.env,
   } as Record<string, string>;
-  env.PATH = buildAugmentedPath();
+  env.PATH = buildAugmentedPath(env.PATH);
 
   return {
     command: server.command!.trim(),

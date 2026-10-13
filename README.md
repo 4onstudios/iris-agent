@@ -134,6 +134,9 @@ OPENROUTER_API_KEY=... npm run cli -- --workspace /path/to/project --chat
 
 # Interactive chat with a specific model
 OPENROUTER_API_KEY=... npm run cli -- --workspace /path/to/project --chat --modelId openrouter/anthropic/claude-3.7-sonnet
+
+# Interactive chat with MCP servers from a JSON config file
+OPENROUTER_API_KEY=... npm run cli -- --workspace /path/to/project --chat --mcp-config ./mcp-servers.json
 ```
 
 This starts an interactive streaming chat session in your terminal with access to the workspace and tools.
@@ -151,6 +154,27 @@ NODE_OPTIONS="--experimental-ffi" npm run cli -- --workspace . --chat --chat-ui 
 Keep `NODE_OPTIONS="--experimental-ffi"` scoped to the Node.js OpenTUI launch
 command rather than exporting it globally. It is not needed for Bun, plain chat,
 the HTTP service or ACP, and older Node.js versions may reject the flag.
+
+The MCP config file can contain a server array or an object with `mcpServers`
+as either an array or a map keyed by server name. Keyed entries inherit their
+key as the server `id` and `name` unless those fields are explicitly set.
+For example, create `mcp-servers.json`:
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/project"]
+    }
+  }
+}
+```
+
+Use `--mcp-config <path>` with `--chat`; relative paths are resolved from the
+current directory. Local server processes inherit the CLI environment, so set
+required credentials in the shell before launching. Keep config files containing
+secrets out of source control.
 
 #### Classic terminal chat (readline)
 

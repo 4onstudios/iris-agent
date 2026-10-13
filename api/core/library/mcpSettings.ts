@@ -27,6 +27,34 @@ export type McpServerConfig = {
 };
 
 const isSafeEnvKey = (key: string): boolean => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key);
+const isValidHttpHeaderName = (name: string): boolean =>
+  /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name);
+const isValidHttpHeaderValue = (value: unknown): value is string =>
+  typeof value === "string" &&
+  value.length <= MAX_HEADER_LENGTH &&
+  /^[\t\x20-\x7E\x80-\xFF]*$/.test(value);
+
+const isValidHttpHeaders = (
+  headers: unknown,
+): headers is Record<string, string> => {
+  if (!headers || typeof headers !== "object" || Array.isArray(headers)) {
+    return false;
+  }
+
+  const entries = Object.entries(headers);
+  return (
+    entries.length <= MAX_HEADERS &&
+    entries.every(
+      ([name, value]) =>
+        name.length <= MAX_HEADER_LENGTH &&
+        isValidHttpHeaderName(name) &&
+        isValidHttpHeaderValue(value),
+    )
+  );
+};
+
+const hasValidHttpHeaders = (headers: unknown): boolean =>
+  headers === undefined || isValidHttpHeaders(headers);
 
 const splitCommandString = (value: string): string[] => {
   const parts: string[] = [];
@@ -79,16 +107,10 @@ const sanitizeEnv = (env: unknown): Record<string, string> => {
 };
 
 const sanitizeHeaders = (headers: unknown): Record<string, string> => {
-  if (!headers || typeof headers !== "object" || Array.isArray(headers)) return {};
+  if (!isValidHttpHeaders(headers)) return {};
 
   return Object.fromEntries(
-    Object.entries(headers)
-      .map(([key, value]) => [
-        safeString(key, MAX_HEADER_LENGTH),
-        safeString(value, MAX_HEADER_LENGTH),
-      ] as const)
-      .filter(([key, value]) => key.length > 0 && value.length > 0)
-      .slice(0, MAX_HEADERS),
+    Object.entries(headers).slice(0, MAX_HEADERS),
   );
 };
 
@@ -157,6 +179,7 @@ const normalizeMcpServerDraft = (
   if (!input || typeof input !== "object" || Array.isArray(input)) return null;
 
   const raw = input as Record<string, unknown>;
+  if (!hasValidHttpHeaders(raw.headers)) return null;
   const id = safeString(raw.id, 120) || getDefaultId(index);
   const hasUrlInput = typeof raw.url === "string" && raw.url.trim().length > 0;
   const url = sanitizeUrl(raw.url);
@@ -213,6 +236,7 @@ export const sanitizeMcpServer = (input: unknown, index = 0): McpServerConfig | 
   if (!input || typeof input !== "object" || Array.isArray(input)) return null;
 
   const raw = input as Record<string, unknown>;
+  if (!hasValidHttpHeaders(raw.headers)) return null;
   const hasUrlInput = typeof raw.url === "string" && raw.url.trim().length > 0;
   const url = sanitizeUrl(raw.url);
   // A non-empty url that fails sanitization is malformed/unsupported, not
@@ -262,6 +286,216 @@ export const sanitizeMcpServers = (
     .map((entry, index) => sanitizeMcpServer(entry, index))
     .filter((entry): entry is McpServerConfig => entry !== null)
     .slice(0, maxServers);
+};
+
+export const parseMcpServerConfigFile = (contents: string): McpServerConfig[] => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`MCP config is not valid JSON: ${message}`);
+  }
+
+  let servers: unknown[];
+  if (Array.isArray(parsed)) {
+    servers = parsed;
+  } else if (parsed && typeof parsed === "object") {
+    const configuredServers = (parsed as Record<string, unknown>).mcpServers;
+    if (Array.isArray(configuredServers)) {
+      servers = configuredServers;
+    } else if (configuredServers && typeof configuredServers === "object") {
+      servers = Object.entries(configuredServers).map(([key, value]) => {
+        if (!key.trim() || key !== key.trim() || key.length > MAX_NAME_LENGTH) {
+          throw new Error(`MCP config has an invalid server key: "${key}"`);
+        }
+        if (!value || typeof value !== "object" || Array.isArray(value)) {
+          return value;
+        }
+        const server = value as Record<string, unknown>;
+        return {
+          ...server,
+          id: server.id ?? key,
+          name: server.name ?? key,
+        };
+      });
+    } else {
+      throw new Error(
+        'MCP config must be an array or an object with a "mcpServers" array or object',
+      );
+    }
+  } else {
+    throw new Error(
+      'MCP config must be an array or an object with a "mcpServers" array or object',
+    );
+  }
+  if (servers.length > MAX_MCP_SERVERS) {
+    throw new Error(`MCP config supports at most ${MAX_MCP_SERVERS} servers`);
+  }
+
+  const validatedServers: Array<{
+    config: unknown;
+    args?: string[];
+    env?: Record<string, string>;
+    headers?: Record<string, string>;
+  }> = servers.map((server) => {
+    if (server && typeof server === "object" && !Array.isArray(server)) {
+      const config = server as Record<string, unknown>;
+      const validatedConfig = { ...config };
+      if ("enabled" in config && typeof config.enabled !== "boolean") {
+        throw new Error('MCP config server "enabled" value must be a boolean');
+      }
+      if ("url" in config) {
+        if (
+          typeof config.url !== "string" ||
+          !config.url.trim()
+        ) {
+          throw new Error(
+            'MCP config server "url" must be a non-empty string',
+          );
+        }
+        if (config.url.length > MAX_URL_LENGTH) {
+          throw new Error(
+            `MCP config server "url" exceeds ${MAX_URL_LENGTH} characters`,
+          );
+        }
+      }
+      if ("command" in config) {
+        if (typeof config.command !== "string" || !config.command.trim()) {
+          throw new Error(
+            'MCP config server "command" must be a non-empty string',
+          );
+        }
+        if (config.command !== config.command.trim()) {
+          throw new Error(
+            'MCP config server "command" cannot have surrounding whitespace',
+          );
+        }
+        if (config.command.length > MAX_COMMAND_LENGTH) {
+          throw new Error(
+            `MCP config server "command" exceeds ${MAX_COMMAND_LENGTH} characters`,
+          );
+        }
+      }
+
+      let args: string[] | undefined;
+      if ("args" in config) {
+        if (!Array.isArray(config.args)) {
+          throw new Error(
+            'MCP config server "args" must be an array of strings',
+          );
+        }
+        if (config.args.length > MAX_ARGS) {
+          throw new Error(
+            `MCP config server "args" supports at most ${MAX_ARGS} values`,
+          );
+        }
+        args = config.args.map((argument) => {
+          if (typeof argument !== "string") {
+            throw new Error(
+              'MCP config server "args" must contain only strings',
+            );
+          }
+          if (argument.length > MAX_ARG_LENGTH) {
+            throw new Error(
+              `MCP config server arguments cannot exceed ${MAX_ARG_LENGTH} characters`,
+            );
+          }
+          return argument;
+        });
+        validatedConfig.args = args;
+      }
+
+      let env: Record<string, string> | undefined;
+      if ("env" in config) {
+        if (
+          !config.env ||
+          typeof config.env !== "object" ||
+          Array.isArray(config.env)
+        ) {
+          throw new Error('MCP config server "env" must be an object of strings');
+        }
+        const entries = Object.entries(config.env);
+        if (entries.length > MAX_ENV_VARS) {
+          throw new Error(
+            `MCP config server "env" supports at most ${MAX_ENV_VARS} values`,
+          );
+        }
+        env = Object.fromEntries(
+          entries.map(([key, value]) => {
+            if (
+              key.length > MAX_ENV_KEY_LENGTH ||
+              !isSafeEnvKey(key) ||
+              typeof value !== "string" ||
+              value.length > MAX_ENV_VALUE_LENGTH
+            ) {
+              throw new Error(
+                'MCP config server "env" contains an invalid key or value',
+              );
+            }
+            return [key, value];
+          }),
+        );
+        validatedConfig.env = env;
+      }
+
+      let headers: Record<string, string> | undefined;
+      if ("headers" in config) {
+        if (
+          !config.headers ||
+          typeof config.headers !== "object" ||
+          Array.isArray(config.headers)
+        ) {
+          throw new Error(
+            'MCP config server "headers" must be an object of strings',
+          );
+        }
+        const entries = Object.entries(config.headers);
+        if (entries.length > MAX_HEADERS) {
+          throw new Error(
+            `MCP config server "headers" supports at most ${MAX_HEADERS} values`,
+          );
+        }
+        headers = Object.fromEntries(
+          entries.map(([key, value]) => {
+            if (
+              key.length > MAX_HEADER_LENGTH ||
+              !isValidHttpHeaderName(key) ||
+              !isValidHttpHeaderValue(value)
+            ) {
+              throw new Error(
+                'MCP config server "headers" contains an invalid key or value',
+              );
+            }
+            return [key, value];
+          }),
+        );
+        validatedConfig.headers = headers;
+      }
+
+      return { config: validatedConfig, args, env, headers };
+    }
+    return { config: server };
+  });
+
+  const sanitizedServers = sanitizeMcpServers(
+    validatedServers.map(({ config }) => config),
+  );
+  if (sanitizedServers.length !== servers.length) {
+    throw new Error("MCP config contains an invalid server entry");
+  }
+  return sanitizedServers.map((server, index) => ({
+    ...server,
+    ...(validatedServers[index].args !== undefined
+      ? { args: validatedServers[index].args }
+      : {}),
+    ...(validatedServers[index].env !== undefined
+      ? { env: validatedServers[index].env }
+      : {}),
+    ...(validatedServers[index].headers !== undefined
+      ? { headers: validatedServers[index].headers }
+      : {}),
+  }));
 };
 
 export const toStableMcpFingerprint = (servers: McpServerConfig[]): string => {
