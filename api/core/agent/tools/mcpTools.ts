@@ -3,6 +3,7 @@ import { z } from "zod";
 import Ajv from "ajv";
 import type { JSONSchema7 } from "json-schema";
 import os from "os";
+import { delimiter as pathDelimiter } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
   StdioClientTransport,
@@ -148,7 +149,9 @@ export const buildAugmentedPath = (
     home ? `${home}/.cargo/bin` : "",
   ].filter(Boolean);
 
-  return Array.from(new Set(pathParts.join(":").split(":"))).join(":");
+  return Array.from(
+    new Set(pathParts.join(pathDelimiter).split(pathDelimiter)),
+  ).join(pathDelimiter);
 };
 
 type CommandCandidate = {
