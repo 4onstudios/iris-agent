@@ -1,10 +1,9 @@
 class IrisAgent < Formula
   desc "Standalone coding-agent service and CLI with ACP support"
   homepage "https://github.com/4onstudios/iris-agent"
-  url "https://registry.npmjs.org/@4onstudios/iris-agent/-/iris-agent-0.4.0.tgz"
-  sha256 "35783103411b6b0814c2985fd9312951d55a8d32c6424c3a0121d71f7db7c4af"
+  url "https://registry.npmjs.org/@4onstudios/iris-agent/-/iris-agent-0.5.0.tgz"
+  sha256 "59418e74b29e61ed6895707248b094f44472a8ab5136523217235ad835082670"
   license "MIT"
-  revision 4
 
   depends_on "node"
 
