@@ -283,6 +283,17 @@ export const parseMcpServerConfigFile = (contents: string): McpServerConfig[] =>
   if (servers.length > MAX_MCP_SERVERS) {
     throw new Error(`MCP config supports at most ${MAX_MCP_SERVERS} servers`);
   }
+  for (const server of servers) {
+    if (
+      server &&
+      typeof server === "object" &&
+      !Array.isArray(server) &&
+      "enabled" in server &&
+      typeof server.enabled !== "boolean"
+    ) {
+      throw new Error('MCP config server "enabled" value must be a boolean');
+    }
+  }
 
   const sanitizedServers = sanitizeMcpServers(servers);
   if (sanitizedServers.length !== servers.length) {

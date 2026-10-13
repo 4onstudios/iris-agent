@@ -143,8 +143,20 @@ This starts an interactive streaming chat session in your terminal with access t
 OpenTUI is selected automatically on supported interactive terminals. With
 Node.js >=26.4.0, enable FFI to use it with the same npm launcher:
 
-The config file can contain an array of MCP server definitions or an object with
-an `mcpServers` array. For example, create `mcp-servers.json`:
+```sh
+# With OPENROUTER_API_KEY already configured in your terminal
+NODE_OPTIONS="--experimental-ffi" npm run cli -- --workspace . --chat
+
+# Require OpenTUI rather than allowing a fallback to plain chat
+NODE_OPTIONS="--experimental-ffi" npm run cli -- --workspace . --chat --chat-ui opentui
+```
+
+Keep `NODE_OPTIONS="--experimental-ffi"` scoped to the Node.js OpenTUI launch
+command rather than exporting it globally. It is not needed for Bun, plain chat,
+the HTTP service or ACP, and older Node.js versions may reject the flag.
+
+The MCP config file can contain an array of server definitions or an object
+with an `mcpServers` array. For example, create `mcp-servers.json`:
 
 ```json
 {
@@ -164,18 +176,6 @@ Use `--mcp-config <path>` with `--chat`; relative paths are resolved from the
 current directory. Local server processes inherit the CLI environment, so set
 required credentials in the shell before launching. Keep config files containing
 secrets out of source control.
-
-```sh
-# With OPENROUTER_API_KEY already configured in your terminal
-NODE_OPTIONS="--experimental-ffi" npm run cli -- --workspace . --chat
-
-# Require OpenTUI rather than allowing a fallback to plain chat
-NODE_OPTIONS="--experimental-ffi" npm run cli -- --workspace . --chat --chat-ui opentui
-```
-
-Keep `NODE_OPTIONS="--experimental-ffi"` scoped to the Node.js OpenTUI launch
-command rather than exporting it globally. It is not needed for Bun, plain chat,
-the HTTP service or ACP, and older Node.js versions may reject the flag.
 
 #### Classic terminal chat (readline)
 

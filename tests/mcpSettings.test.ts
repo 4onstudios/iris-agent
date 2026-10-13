@@ -69,6 +69,11 @@ describe("MCP server settings", () => {
     expect(() => parseMcpServerConfigFile(JSON.stringify([{}]))).toThrow(
       "invalid server entry",
     );
+    expect(() =>
+      parseMcpServerConfigFile(
+        JSON.stringify([{ command: "npx", enabled: "false" }]),
+      ),
+    ).toThrow('"enabled" value must be a boolean');
   });
 
   it("rejects the whole config when a malformed URL is paired with a stale command, instead of falling back to local mode", () => {
