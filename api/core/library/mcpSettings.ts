@@ -273,33 +273,152 @@ export const parseMcpServerConfigFile = (contents: string): McpServerConfig[] =>
     throw new Error(`MCP config is not valid JSON: ${message}`);
   }
 
-  const servers =
-    parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>).mcpServers
-      : parsed;
-  if (!Array.isArray(servers)) {
-    throw new Error('MCP config must be an array or an object with a "mcpServers" array');
+  let servers: unknown[];
+  if (Array.isArray(parsed)) {
+    servers = parsed;
+  } else if (parsed && typeof parsed === "object") {
+    const configuredServers = (parsed as Record<string, unknown>).mcpServers;
+    if (Array.isArray(configuredServers)) {
+      servers = configuredServers;
+    } else if (configuredServers && typeof configuredServers === "object") {
+      servers = Object.entries(configuredServers).map(([key, value]) => {
+        if (!key.trim() || key !== key.trim() || key.length > MAX_NAME_LENGTH) {
+          throw new Error(`MCP config has an invalid server key: "${key}"`);
+        }
+        if (!value || typeof value !== "object" || Array.isArray(value)) {
+          return value;
+        }
+        const server = value as Record<string, unknown>;
+        return {
+          ...server,
+          id: server.id ?? key,
+          name: server.name ?? key,
+        };
+      });
+    } else {
+      throw new Error(
+        'MCP config must be an array or an object with a "mcpServers" array or object',
+      );
+    }
+  } else {
+    throw new Error(
+      'MCP config must be an array or an object with a "mcpServers" array or object',
+    );
   }
   if (servers.length > MAX_MCP_SERVERS) {
     throw new Error(`MCP config supports at most ${MAX_MCP_SERVERS} servers`);
   }
-  for (const server of servers) {
-    if (
-      server &&
-      typeof server === "object" &&
-      !Array.isArray(server) &&
-      "enabled" in server &&
-      typeof server.enabled !== "boolean"
-    ) {
-      throw new Error('MCP config server "enabled" value must be a boolean');
-    }
-  }
 
-  const sanitizedServers = sanitizeMcpServers(servers);
+  const validatedServers: Array<{
+    config: unknown;
+    args?: string[];
+    env?: Record<string, string>;
+  }> = servers.map((server) => {
+    if (server && typeof server === "object" && !Array.isArray(server)) {
+      const config = server as Record<string, unknown>;
+      const validatedConfig = { ...config };
+      if ("enabled" in config && typeof config.enabled !== "boolean") {
+        throw new Error('MCP config server "enabled" value must be a boolean');
+      }
+      if ("command" in config) {
+        if (typeof config.command !== "string" || !config.command.trim()) {
+          throw new Error(
+            'MCP config server "command" must be a non-empty string',
+          );
+        }
+        if (config.command !== config.command.trim()) {
+          throw new Error(
+            'MCP config server "command" cannot have surrounding whitespace',
+          );
+        }
+        if (config.command.length > MAX_COMMAND_LENGTH) {
+          throw new Error(
+            `MCP config server "command" exceeds ${MAX_COMMAND_LENGTH} characters`,
+          );
+        }
+      }
+
+      let args: string[] | undefined;
+      if ("args" in config) {
+        if (!Array.isArray(config.args)) {
+          throw new Error(
+            'MCP config server "args" must be an array of strings',
+          );
+        }
+        if (config.args.length > MAX_ARGS) {
+          throw new Error(
+            `MCP config server "args" supports at most ${MAX_ARGS} values`,
+          );
+        }
+        args = config.args.map((argument) => {
+          if (typeof argument !== "string") {
+            throw new Error(
+              'MCP config server "args" must contain only strings',
+            );
+          }
+          if (argument.length > MAX_ARG_LENGTH) {
+            throw new Error(
+              `MCP config server arguments cannot exceed ${MAX_ARG_LENGTH} characters`,
+            );
+          }
+          return argument;
+        });
+        validatedConfig.args = args;
+      }
+
+      let env: Record<string, string> | undefined;
+      if ("env" in config) {
+        if (
+          !config.env ||
+          typeof config.env !== "object" ||
+          Array.isArray(config.env)
+        ) {
+          throw new Error('MCP config server "env" must be an object of strings');
+        }
+        const entries = Object.entries(config.env);
+        if (entries.length > MAX_ENV_VARS) {
+          throw new Error(
+            `MCP config server "env" supports at most ${MAX_ENV_VARS} values`,
+          );
+        }
+        env = Object.fromEntries(
+          entries.map(([key, value]) => {
+            if (
+              key.length > MAX_ENV_KEY_LENGTH ||
+              !isSafeEnvKey(key) ||
+              typeof value !== "string" ||
+              value.length > MAX_ENV_VALUE_LENGTH
+            ) {
+              throw new Error(
+                'MCP config server "env" contains an invalid key or value',
+              );
+            }
+            return [key, value];
+          }),
+        );
+        validatedConfig.env = env;
+      }
+
+      return { config: validatedConfig, args, env };
+    }
+    return { config: server };
+  });
+
+  const sanitizedServers = sanitizeMcpServers(
+    validatedServers.map(({ config }) => config),
+  );
   if (sanitizedServers.length !== servers.length) {
     throw new Error("MCP config contains an invalid server entry");
   }
-  return sanitizedServers;
+  return sanitizedServers.map((server, index) => ({
+    ...server,
+    ...(validatedServers[index].args !== undefined
+      ? { args: validatedServers[index].args }
+      : {}),
+    ...(validatedServers[index].env !== undefined
+      ? { env: validatedServers[index].env }
+      : {}),
+  }));
 };
 
 export const toStableMcpFingerprint = (servers: McpServerConfig[]): string => {

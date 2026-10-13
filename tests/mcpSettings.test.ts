@@ -47,7 +47,7 @@ describe("MCP server settings", () => {
     ).toBeNull();
   });
 
-  it("parses MCP config files as arrays or mcpServers objects", () => {
+  it("parses array and keyed-object MCP server configs", () => {
     const server = {
       id: "local-tools",
       name: "Local tools",
@@ -61,9 +61,32 @@ describe("MCP server settings", () => {
     expect(
       parseMcpServerConfigFile(JSON.stringify({ mcpServers: [server] })),
     ).toMatchObject([{ ...server, env: {}, enabled: true, command: "npx" }]);
+
+    expect(
+      parseMcpServerConfigFile(
+        JSON.stringify({
+          mcpServers: {
+            filesystem: {
+              command: "npx",
+              args: ["-y", "server-filesystem", " /path with spaces ", ""],
+              env: { TOKEN: " token " },
+            },
+          },
+        }),
+      ),
+    ).toMatchObject([
+      {
+        id: "filesystem",
+        name: "filesystem",
+        command: "npx",
+        args: ["-y", "server-filesystem", " /path with spaces ", ""],
+        env: { TOKEN: " token " },
+        enabled: true,
+      },
+    ]);
   });
 
-  it("rejects malformed MCP config files and invalid server entries", () => {
+  it("rejects malformed MCP entries instead of rewriting their executable fields", () => {
     expect(() => parseMcpServerConfigFile("{")).toThrow("not valid JSON");
     expect(() => parseMcpServerConfigFile("{}")).toThrow("mcpServers");
     expect(() => parseMcpServerConfigFile(JSON.stringify([{}]))).toThrow(
@@ -74,6 +97,17 @@ describe("MCP server settings", () => {
         JSON.stringify([{ command: "npx", enabled: "false" }]),
       ),
     ).toThrow('"enabled" value must be a boolean');
+    expect(() =>
+      parseMcpServerConfigFile(JSON.stringify([{ command: 42, args: [] }])),
+    ).toThrow('"command" must be a non-empty string');
+    expect(() =>
+      parseMcpServerConfigFile(JSON.stringify([{ command: "npx", args: ["-y", 42] }])),
+    ).toThrow('"args" must contain only strings');
+    expect(() =>
+      parseMcpServerConfigFile(
+        JSON.stringify([{ command: "npx", args: [], env: { TOKEN: 42 } }]),
+      ),
+    ).toThrow('"env" contains an invalid key or value');
   });
 
   it("rejects the whole config when a malformed URL is paired with a stale command, instead of falling back to local mode", () => {

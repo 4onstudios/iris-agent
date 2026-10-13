@@ -155,20 +155,19 @@ Keep `NODE_OPTIONS="--experimental-ffi"` scoped to the Node.js OpenTUI launch
 command rather than exporting it globally. It is not needed for Bun, plain chat,
 the HTTP service or ACP, and older Node.js versions may reject the flag.
 
-The MCP config file can contain an array of server definitions or an object
-with an `mcpServers` array. For example, create `mcp-servers.json`:
+The MCP config file can contain a server array or an object with `mcpServers`
+as either an array or a map keyed by server name. Keyed entries inherit their
+key as the server `id` and `name` unless those fields are explicitly set.
+For example, create `mcp-servers.json`:
 
 ```json
 {
-  "mcpServers": [
-    {
-      "id": "local-tools",
-      "name": "Local tools",
+  "mcpServers": {
+    "filesystem": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/project"],
-      "enabled": true
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/project"]
     }
-  ]
+  }
 }
 ```
 
