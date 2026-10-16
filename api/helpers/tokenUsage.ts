@@ -1,7 +1,48 @@
+import type { ModelContextBudget } from "./modelTokenLimits";
+
 export type TokenUsageSummary = {
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
+};
+
+export type ContextWindowStats = {
+  contextWindowTokens: number;
+  inputLimitTokens: number;
+  outputLimitTokens: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  usedTokens?: number;
+  remainingTokens?: number;
+  utilizationPercent?: number;
+};
+
+export const buildContextWindowStats = (
+  budget: ModelContextBudget,
+  usage: TokenUsageSummary | undefined,
+): ContextWindowStats => {
+  const usedTokens = usage?.totalTokens ??
+    (usage?.inputTokens !== undefined && usage.outputTokens !== undefined
+      ? usage.inputTokens + usage.outputTokens
+      : undefined);
+
+  return {
+    contextWindowTokens: budget.contextWindowTokens,
+    inputLimitTokens: budget.inputTokens,
+    outputLimitTokens: budget.maxOutputTokens,
+    ...(usage?.inputTokens !== undefined ? { inputTokens: usage.inputTokens } : {}),
+    ...(usage?.outputTokens !== undefined ? { outputTokens: usage.outputTokens } : {}),
+    ...(usedTokens !== undefined
+      ? {
+          usedTokens,
+          remainingTokens: Math.max(0, budget.contextWindowTokens - usedTokens),
+          utilizationPercent: Math.min(
+            100,
+            Math.round((usedTokens / budget.contextWindowTokens) * 100),
+          ),
+        }
+      : {}),
+  };
 };
 
 const asFiniteNonNegativeInt = (value: unknown): number | undefined => {

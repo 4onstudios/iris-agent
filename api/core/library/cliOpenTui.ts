@@ -13,6 +13,7 @@ import {
 } from "@opentui/core";
 import type { CliChatUi, CliChatUiOptions } from "./cliChatUi";
 import type { ToolExecutionStatus } from "../agent/utils/toolLifecycle";
+import type { ContextWindowStats } from "../../helpers/tokenUsage";
 
 type ToolRow = {
   id?: string;
@@ -337,6 +338,17 @@ export const mountOpenTuiChatUi = (
       if (closed) return;
       finishAssistant();
       addText(`Error: ${message}${hint ? `\n${hint}` : ""}`, theme.error);
+    },
+    showContextStats: (stats: ContextWindowStats) => {
+      if (
+        closed ||
+        stats.remainingTokens === undefined ||
+        stats.usedTokens === undefined
+      ) return;
+      addText(
+        `Context: ${stats.usedTokens.toLocaleString()} / ${stats.contextWindowTokens.toLocaleString()} tokens used (${stats.remainingTokens.toLocaleString()} remaining)`,
+        theme.muted,
+      );
     },
     finishTurn: (outcome) => {
       if (closed) return;

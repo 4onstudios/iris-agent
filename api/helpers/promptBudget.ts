@@ -12,6 +12,7 @@ export type ConversationMessageLike = {
 };
 
 export {
+  parseContextWindow,
   resolveModelContextBudget,
   resolveModelInputTokenLimit,
   resolveModelInputTokenLimitAsync,

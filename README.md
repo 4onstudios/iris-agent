@@ -101,6 +101,16 @@ The service also exposes file, chat-session, semantic-search, and LSP routes und
 implemented in [`api/`](./api/); use `GET /api/agent/tools` and
 `GET /api/agent/skills` for runtime discovery.
 
+Chat responses and streamed `done` events include `contextStats` with the
+effective context/input/output limits and, when the provider reports token
+usage, used and remaining context. CLI chat displays used and remaining tokens
+when the provider reports usage. Model context limits may be estimates when
+provider metadata is unavailable. `--context-window` overrides the model's
+total context window; Iris Agent reserves up to 20% for output, enables
+Observational Memory consolidation at 75% of the input allowance (capped at
+200K tokens), and retains the token limiter as a final guard. Remaining context
+is omitted when the provider does not report token usage.
+
 Example chat request:
 
 ```sh
@@ -401,6 +411,7 @@ the repository's **Actions** tab. It requires a repository secret named
 - `--chat` (`-c`) - Start interactive chat mode
 - `--chat-ui` - Select `auto` (default, prefers OpenTUI), `opentui` (require the TUI), or `plain` (old readline terminal chat, no FFI)
 - `--modelId` - Model identifier used for chat/ACP sessions (default: `openrouter/openai/gpt-5.3-codex` or `MODEL_ID` / `OPENROUTER_MODEL` env vars)
+- `--context-window` - Override the total context window in tokens; accepts plain counts or `K`/`M` values (for example, `100K`)
 
 Running the CLI without `--chat` or `--acp` prints help.
 
@@ -412,6 +423,9 @@ npm run cli -- --workspace . --chat
 
 # Interactive chat with custom model
 npm run cli -- --workspace . --chat --modelId openrouter/anthropic/claude-3.7-sonnet
+
+# Interactive chat with a 100K-token context window
+npm run cli -- --workspace . --chat --modelId openrouter/openai/gpt-4o --context-window 100K
 
 # ACP server for IDE integration
 npm run cli -- --workspace . --acp

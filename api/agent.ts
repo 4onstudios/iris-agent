@@ -74,6 +74,7 @@ import {
   isSlashCommandsFeatureEnabled,
 } from "./helpers/slashCommands";
 import {
+  buildContextWindowStats,
   normalizeTokenUsage,
   mergeTokenUsage,
   extractTokenUsageFromChunkPayload,
@@ -3048,6 +3049,10 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             : modelProfile.maxOutputTokens,
         ),
       );
+      const effectiveModelContextBudget = {
+        ...modelContextBudget,
+        maxOutputTokens,
+      };
 
       const toolCallBudget: ToolCallBudget = {
         limit: maxToolCalls,
@@ -4217,6 +4222,10 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             toolCallsUsed: streamToolCallsUsed,
             maxToolCalls,
             usage: streamTokenUsage,
+            contextStats: buildContextWindowStats(
+              effectiveModelContextBudget,
+              streamTokenUsage,
+            ),
             ...(buildTokenUsageDebug({
               mode: "stream",
               source: streamUsageSource,
@@ -5147,6 +5156,10 @@ _You have discovered the following in earlier interactions. Use this to avoid re
           reflectionStopReason,
           gitSafety,
           usage: usageSummary,
+          contextStats: buildContextWindowStats(
+            effectiveModelContextBudget,
+            usageSummary,
+          ),
           ...(nonStreamTokenUsageDebug
             ? { tokenUsageDebug: nonStreamTokenUsageDebug }
             : {}),
@@ -5219,6 +5232,10 @@ _You have discovered the following in earlier interactions. Use this to avoid re
           reflectionStopReason,
           gitSafety,
           usage: usageSummary,
+          contextStats: buildContextWindowStats(
+            effectiveModelContextBudget,
+            usageSummary,
+          ),
           ...(nonStreamTokenUsageDebug
             ? { tokenUsageDebug: nonStreamTokenUsageDebug }
             : {}),
@@ -5347,6 +5364,10 @@ _You have discovered the following in earlier interactions. Use this to avoid re
         reflectionStopReason,
         gitSafety,
         usage: usageSummary,
+        contextStats: buildContextWindowStats(
+          effectiveModelContextBudget,
+          usageSummary,
+        ),
         ...(nonStreamTokenUsageDebug
           ? { tokenUsageDebug: nonStreamTokenUsageDebug }
           : {}),
