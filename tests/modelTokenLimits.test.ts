@@ -1,4 +1,5 @@
 import {
+  parseContextWindow,
   resolveModelContextBudget,
   resolveModelInputTokenLimit,
   resolveModelInputTokenLimitAsync,
@@ -25,6 +26,7 @@ describe("model input limits", () => {
     expect(first).toBe(3_277);
     expect(second).toBe(first);
     expect(await resolveModelContextBudget("openrouter/example/small-model", env)).toEqual({
+      contextWindowTokens: 4_096,
       inputTokens: 3_277,
       maxOutputTokens: 819,
     });
@@ -64,7 +66,30 @@ describe("model input limits", () => {
     expect(await resolveModelContextBudget(
       "openrouter/z-ai/glm-5.2",
       {},
-    )).toEqual({ inputTokens: 224_000, maxOutputTokens: 32_000 });
+    )).toEqual({
+      contextWindowTokens: 256_000,
+      inputTokens: 224_000,
+      maxOutputTokens: 32_000,
+    });
+  });
+
+  it("parses human-readable context-window values and applies an explicit total window", async () => {
+    expect(parseContextWindow("100K")).toBe(100_000);
+    expect(parseContextWindow("1M")).toBe(1_000_000);
+
+    await expect(
+      resolveModelContextBudget("custom/model", {}, parseContextWindow("100K")),
+    ).resolves.toEqual({
+      contextWindowTokens: 100_000,
+      inputTokens: 80_000,
+      maxOutputTokens: 20_000,
+    });
+  });
+
+  it("rejects invalid and out-of-range context-window values", () => {
+    expect(() => parseContextWindow("100 tokens")).toThrow("--context-window");
+    expect(() => parseContextWindow("100")).toThrow("--context-window");
+    expect(() => parseContextWindow("2M")).toThrow("--context-window");
   });
 
   it("discovers Google models through OpenRouter when only its key is configured", async () => {

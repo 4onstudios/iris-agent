@@ -23,9 +23,11 @@ import {
 import { runCliChatTurn } from "./api/core/library/cliChatTurn.js";
 import {
   buildConversationTurn,
-  resolveModelInputTokenLimitAsync,
+  parseContextWindow,
+  resolveModelContextBudget,
   resolvePromptTokenBudget,
 } from "./api/helpers/promptBudget.js";
+import { buildContextWindowStats } from "./api/helpers/tokenUsage.js";
 
 const defaultModelId =
   process.env.MODEL_ID ||
@@ -61,6 +63,10 @@ const argv = yargs(hideBin(process.argv))
     description: "Language model identifier",
     default: defaultModelId,
   })
+  .option("context-window", {
+    type: "string",
+    description: "Override the model context window (for example, 100K)",
+  })
   .option("mcp-config", {
     type: "string",
     description: "Path to a JSON file containing MCP server configuration (chat mode)",
@@ -71,6 +77,27 @@ const argv = yargs(hideBin(process.argv))
 async function main() {
   const workspaceRoot = argv.workspace as string;
   const modelId = argv.modelId;
+  const contextWindow = argv.contextWindow
+    ? parseContextWindow(argv.contextWindow)
+    : undefined;
+  const getContextMemoryOptions = (selectedModelId: string) => {
+    if (contextWindow === undefined) return {};
+    const outputTokens = Math.min(
+      65_536,
+      Math.max(512, Math.floor(contextWindow * 0.2)),
+    );
+    const inputTokens = contextWindow - outputTokens;
+    return {
+      useMastraObservationalMemory: true,
+      observationalMemorySettings: {
+        model: selectedModelId,
+        observationMessageTokens: Math.max(
+          4_000,
+          Math.min(200_000, Math.floor(inputTokens * 0.75)),
+        ),
+      },
+    };
+  };
 
   if (argv.mcpConfig && (!argv.chat || argv.acp)) {
     throw new Error("--mcp-config can only be used with --chat");
@@ -107,6 +134,10 @@ async function main() {
         createCodingAgent(
           requestedModelId || modelId,
           targetWorkspace || workspaceRoot,
+          {
+            contextWindow,
+            ...getContextMemoryOptions(requestedModelId || modelId),
+          },
         ),
       workspaceRoot,
       modelId,
@@ -124,12 +155,22 @@ async function main() {
           await readFile(resolve(argv.mcpConfig), "utf8"),
         )
       : [];
-    const agent = await createCodingAgent(modelId, workspaceRoot, { mcpServers });
+    const agent = await createCodingAgent(modelId, workspaceRoot, {
+      mcpServers,
+      contextWindow,
+      ...getContextMemoryOptions(modelId),
+    });
     if (mcpServers.length > 0) {
       console.log(`🧩 MCP servers configured: ${mcpServers.length}`);
     }
     console.log(`💬 Entering chat mode (type "exit" to quit)`);
-    await startChatMode(agent, workspaceRoot, modelId, argv["chat-ui"] as CliChatUiMode);
+    await startChatMode(
+      agent,
+      workspaceRoot,
+      modelId,
+      argv["chat-ui"] as CliChatUiMode,
+      contextWindow,
+    );
   } else {
     // Default: show help
     yargs(hideBin(process.argv))
@@ -279,6 +320,7 @@ async function startChatMode(
   workspaceRoot?: string,
   modelId?: string,
   mode: CliChatUiMode = "auto",
+  contextWindow?: number,
 ) {
   const ui = await createCliChatUi({ mode, workspaceRoot, modelId });
   const threadId = `cli-chat-${Date.now()}`;
@@ -296,20 +338,30 @@ async function startChatMode(
       let outcome: CliChatTurnOutcome = "completed";
       ui.beginTurn(input, () => controller.abort());
       try {
+        const modelContextBudget = await resolveModelContextBudget(
+          modelId || defaultModelId,
+          process.env,
+          contextWindow,
+        );
         const turn = await buildConversationTurn({
           // Preserve indentation and newlines in pasted code and multiline messages.
           currentMessage: input,
           maxPromptTokens: resolvePromptTokenBudget(
-            await resolveModelInputTokenLimitAsync(modelId || defaultModelId),
+            modelContextBudget.inputTokens,
           ),
           maxConversationMessages: 12,
           maxConversationMessageTokens: 1_200,
         });
-        await runCliChatTurn(agent, turn.prompt, {
+        const usage = await runCliChatTurn(agent, turn.prompt, {
           memory: { thread: threadId, resource: resourceId },
           maxSteps: 50,
           workspaceRoot,
         }, ui, controller.signal);
+        if (usage) {
+          ui.showContextStats?.(
+            buildContextWindowStats(modelContextBudget, usage),
+          );
+        }
       } catch (error) {
         if (controller.signal.aborted) {
           outcome = "cancelled";

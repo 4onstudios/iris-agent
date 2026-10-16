@@ -110,6 +110,7 @@ export type AgentFactoryOptions = {
   id?: string;
   name?: string;
   instructions?: string;
+  contextWindow?: number;
   /** Skip automatic filesystem Workspace initialization and LSP connection. */
   disableWorkspaceTools?: boolean;
   /** Disable bundled skill discovery and registration. */
@@ -971,7 +972,11 @@ export const createCodingAgent = async (
   const basePath = workspacePath || process.cwd();
   const mcpServers = options.mcpServers || [];
   const terminalAutoApproveRules = options.terminalAutoApproveRules;
-  const modelContextBudget = await resolveModelContextBudget(modelId);
+  const modelContextBudget = await resolveModelContextBudget(
+    modelId,
+    process.env,
+    options.contextWindow,
+  );
   const modelInputTokenLimit = modelContextBudget.inputTokens;
   const modelSupportsVision = resolveModelSupportsVision(modelId);
   const resolvedStreamErrorRetryConfig = resolveStreamErrorRetryConfig(

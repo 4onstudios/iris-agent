@@ -128,6 +128,24 @@ describe("plain chat input", () => {
 });
 
 describe("CLI agent stream", () => {
+  it("returns provider token usage for context statistics", async () => {
+    const usage = { inputTokens: 42, outputTokens: 8, totalTokens: 50 };
+    const turnUsage = await runCliChatTurn(
+      {
+        stream: async () => ({
+          fullStream: chunks({ type: "text-delta", payload: { text: "ok" } }),
+          usage: Promise.resolve(usage),
+        }),
+      },
+      "hello",
+      {},
+      makeUi(),
+      new AbortController().signal,
+    );
+
+    expect(turnUsage).toEqual(usage);
+  });
+
   it("updates the UI before the stream completes and keeps the memory scope", async () => {
     const ui = makeUi();
     const controller = new AbortController();

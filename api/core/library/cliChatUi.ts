@@ -2,6 +2,7 @@ import { createInterface } from "node:readline";
 import { isCliSpinnerEnabled, startCliSpinner } from "./cliSpinner";
 import { renderCliMarkdown } from "./cliMarkdown";
 import type { ToolExecutionStatus } from "../agent/utils/toolLifecycle";
+import type { ContextWindowStats } from "../../helpers/tokenUsage";
 
 export type CliChatUiMode = "auto" | "opentui" | "plain";
 export type CliChatTurnOutcome = "completed" | "cancelled" | "failed";
@@ -14,6 +15,7 @@ export interface CliChatUi {
   toolResult(status: ToolExecutionStatus, id?: string, name?: string): void;
   setStatus(label: string): void;
   showError(message: string, hint?: string): void;
+  showContextStats?(stats: ContextWindowStats): void;
   finishTurn(outcome: CliChatTurnOutcome): void;
   dispose(): void;
 }
@@ -194,6 +196,12 @@ export const createPlainChatUi = (
       stopSpinner();
       console.error(`❌ Error: ${message}`);
       if (hint) console.error(hint);
+    },
+    showContextStats: (stats) => {
+      if (stats.remainingTokens === undefined || stats.usedTokens === undefined) return;
+      output.write(
+        `Context: ${stats.usedTokens.toLocaleString()} / ${stats.contextWindowTokens.toLocaleString()} tokens used (${stats.remainingTokens.toLocaleString()} remaining)\n`,
+      );
     },
     finishTurn: (outcome) => {
       stopSpinner();

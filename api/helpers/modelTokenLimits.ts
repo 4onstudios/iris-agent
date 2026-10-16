@@ -49,6 +49,32 @@ const MODEL_INPUT_TOKEN_LIMITS: Record<string, number> = {
   "claude-sonnet-4-6": 1_000_000,
 };
 
+export const parseContextWindow = (value: string): number => {
+  const normalized = value.trim().replaceAll(",", "");
+  const match = /^(\d+(?:\.\d+)?)\s*([kKmM]?)$/.exec(normalized);
+  if (!match) {
+    throw new Error(
+      "Invalid --context-window value. Use a token count such as 100000, 100K, or 1M.",
+    );
+  }
+
+  const multiplier = match[2]?.toLowerCase() === "m"
+    ? 1_000_000
+    : match[2]?.toLowerCase() === "k"
+      ? 1_000
+      : 1;
+  const tokenCount = Number(match[1]) * multiplier;
+  if (
+    !Number.isSafeInteger(tokenCount) ||
+    tokenCount < 8_000 ||
+    tokenCount > 1_000_000
+  ) {
+    throw new Error("--context-window must be between 8K and 1M tokens.");
+  }
+
+  return tokenCount;
+};
+
 const clamp = (value: number, min: number, max: number): number =>
   Math.max(min, Math.min(max, value));
 
@@ -68,6 +94,7 @@ const OPENROUTER_MAX_INPUT_TOKENS: Record<string, number> = {
   "openai/gpt-5.3-codex": 272_000,
 };
 export type ModelContextBudget = {
+  contextWindowTokens: number;
   inputTokens: number;
   maxOutputTokens: number;
 };
@@ -162,6 +189,7 @@ const fetchOpenRouterInputLimit = async (
   const limit = contextLength - outputReserve;
   if (limit < 1_024) throw new Error("Model context is too small for agent input");
   return {
+    contextWindowTokens: contextLength,
     inputTokens: Math.min(limit, OPENROUTER_MAX_INPUT_TOKENS[slug] ?? limit),
     maxOutputTokens: outputReserve,
   };
@@ -175,18 +203,47 @@ const fetchOpenRouterInputLimit = async (
 export const resolveModelContextBudget = async (
   modelId: string,
   env: NodeJS.ProcessEnv = process.env,
+  contextWindowTokens?: number,
 ): Promise<ModelContextBudget> => {
+  if (contextWindowTokens !== undefined) {
+    if (
+      !Number.isSafeInteger(contextWindowTokens) ||
+      contextWindowTokens < 8_000 ||
+      contextWindowTokens > 1_000_000
+    ) {
+      throw new Error("contextWindow must be between 8K and 1M tokens.");
+    }
+    const outputTokens = Math.min(
+      65_536,
+      Math.max(512, Math.floor(contextWindowTokens * 0.2)),
+    );
+    return {
+      contextWindowTokens,
+      inputTokens: contextWindowTokens - outputTokens,
+      maxOutputTokens: outputTokens,
+    };
+  }
+
   const override = getEnvTokenLimitOverride(env);
-  if (override) return {
-    inputTokens: override,
-    maxOutputTokens: Math.min(8_192, Math.max(256, Math.floor(override * 0.2))),
-  };
+  if (override) {
+    const maxOutputTokens = Math.min(
+      8_192,
+      Math.max(256, Math.floor(override * 0.2)),
+    );
+    return {
+      contextWindowTokens: override + maxOutputTokens,
+      inputTokens: override,
+      maxOutputTokens,
+    };
+  }
   const slug = openRouterSlug(modelId, env);
   if (!slug) {
     const inputTokens = resolveModelInputTokenLimit(modelId, UNKNOWN_MODEL_INPUT_LIMIT, env);
+    const maxOutputTokens = Math.min(8_192, Math.max(256, Math.floor(inputTokens * 0.2)));
     return {
+      contextWindowTokens: inputTokens + maxOutputTokens,
       inputTokens,
-      maxOutputTokens: Math.min(8_192, Math.max(256, Math.floor(inputTokens * 0.2))),
+      maxOutputTokens,
     };
   }
   const key = `${env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1"}:${slug}`;
@@ -208,9 +265,14 @@ export const resolveModelContextBudget = async (
           resolveModelInputTokenLimit(modelId, UNKNOWN_MODEL_INPUT_LIMIT, env),
           UNKNOWN_MODEL_INPUT_LIMIT,
         );
+        const maxOutputTokens = Math.min(
+          8_192,
+          Math.max(256, Math.floor(inputTokens * 0.2)),
+        );
         const budget = {
+          contextWindowTokens: inputTokens + maxOutputTokens,
           inputTokens,
-          maxOutputTokens: Math.min(8_192, Math.max(256, Math.floor(inputTokens * 0.2))),
+          maxOutputTokens,
         };
         modelLimits.set(key, {
           budget,
