@@ -4,6 +4,7 @@ import { Readable, Writable } from "node:stream";
 import os from "node:os";
 import fs from "node:fs/promises";
 import * as acp from "@agentclientprotocol/sdk";
+import type { MastraDBMessage } from "@mastra/core/agent/message-list";
 import path from "path";
 import {
   getToolCallSignature,
@@ -244,6 +245,23 @@ export type AcpRuntimeAgent = {
     signal?: AbortSignal;
     abortSignal?: AbortSignal;
   }) => Promise<unknown>;
+  getMemory?: () => Promise<AcpMemoryAdapter | undefined>;
+};
+
+export type AcpMemoryAdapter = {
+  getThreadById(args: { threadId: string }): Promise<{ resourceId?: string } | null>;
+  recall(args: {
+    threadId: string;
+    resourceId: string;
+    page: number;
+    perPage: number;
+  }): Promise<{ messages: unknown[] }>;
+  createThread(args: {
+    threadId: string;
+    resourceId: string;
+    title?: string;
+  }): Promise<unknown>;
+  saveMessages(args: { messages: MastraDBMessage[] }): Promise<unknown>;
 };
 
 export type AcpAgentFactory = (
@@ -269,6 +287,7 @@ type AcpSessionState = {
   title?: string;
   activeTurn?: ActiveTurn;
   history: PersistedChatMessage[];
+  memoryHistoryHydrated?: boolean;
 };
 
 type PendingToolInvocation = {
@@ -350,6 +369,54 @@ const extractText = (value: unknown): string => {
     if (typeof record.content === "string") return record.content;
   }
   return value === undefined ? "" : JSON.stringify(value);
+};
+
+const hydrateAcpMemoryHistory = async (
+  runtimeAgent: AcpRuntimeAgent,
+  sessionId: string,
+  resourceId: string,
+  title: string | undefined,
+  history: PersistedChatMessage[],
+): Promise<boolean> => {
+  if (history.length === 0) return true;
+  if (typeof runtimeAgent.getMemory !== "function") return false;
+  const memory = await runtimeAgent.getMemory();
+  if (!memory) return false;
+
+  const existingThread = await memory.getThreadById({ threadId: sessionId });
+  if (existingThread) {
+    if (existingThread.resourceId !== resourceId) {
+      throw new Error(`ACP memory thread '${sessionId}' belongs to a different resource`);
+    }
+    const existingMessages = await memory.recall({
+      threadId: sessionId,
+      resourceId,
+      page: 0,
+      perPage: 1,
+    });
+    if (existingMessages.messages.length > 0) return true;
+  } else {
+    await memory.createThread({
+      threadId: sessionId,
+      resourceId,
+      ...(title ? { title } : {}),
+    });
+  }
+
+  const messages: MastraDBMessage[] = history.map((message) => ({
+    id: randomUUID(),
+    role: message.role,
+    createdAt: new Date(),
+    threadId: sessionId,
+    resourceId,
+    content: {
+      format: 2,
+      parts: [{ type: "text", text: message.content }],
+      content: message.content,
+    },
+  }));
+  await memory.saveMessages({ messages });
+  return true;
 };
 
 export const createAcpAgentApp = (
@@ -465,6 +532,7 @@ export const createAcpAgentApp = (
         cwd: sessionWorkspace,
         modelId: requestedModel,
         history: [],
+        memoryHistoryHydrated: true,
       });
       await notifyAvailableCommands(ctx, sessionId);
       return {
@@ -500,12 +568,24 @@ export const createAcpAgentApp = (
         );
       }
       const history = persisted.messages.slice();
-      sessions.set(sessionId, {
+      const session: AcpSessionState = {
         cwd: sessionWorkspace,
         modelId: requestedModel,
         title: getPersistedSessionTitle(persisted),
         history,
-      });
+        memoryHistoryHydrated: history.length === 0,
+      };
+      sessions.set(sessionId, session);
+      if (options.useMastraObservationalMemory && history.length > 0) {
+        const runtimeAgent = await resolveAgent(requestedModel, sessionWorkspace);
+        session.memoryHistoryHydrated = await hydrateAcpMemoryHistory(
+          runtimeAgent,
+          sessionId,
+          `acp-session:${sessionId}`,
+          session.title,
+          history,
+        );
+      }
       for (const message of history) {
         await ctx.client.notify(acp.methods.client.session.update, {
           sessionId,
@@ -620,12 +700,18 @@ export const createAcpAgentApp = (
         options.contextWindowTokens,
       );
       const modelInputTokenLimit = modelContextBudget.inputTokens;
-      const memoryScope = options.useMastraObservationalMemory
+      const runtimeSupportsScopedMemory =
+        options.useMastraObservationalMemory === true &&
+        (typeof runtimeAgent.stream === "function" ||
+          typeof runtimeAgent.generate === "function");
+      const memoryScope = runtimeSupportsScopedMemory
         ? { thread: sessionId, resource: `acp-session:${sessionId}` }
         : undefined;
+      const useMemoryWithoutTranscriptReplay =
+        memoryScope !== undefined && session.memoryHistoryHydrated === true;
       const promptBuild = await buildConversationTurn({
         currentMessage: promptText,
-        history: options.useMastraObservationalMemory
+        history: useMemoryWithoutTranscriptReplay
           ? undefined
           : conversationHistory satisfies RuntimeConversationMessage[],
         maxPromptTokens: resolvePromptTokenBudget(modelInputTokenLimit),
@@ -663,6 +749,9 @@ export const createAcpAgentApp = (
           session,
           await loadPersistedChatSession(sessionId),
         );
+        if (memoryScope) {
+          session.memoryHistoryHydrated = true;
+        }
         return true;
       };
       const turnSignal = activeTurn.abortController.signal;
@@ -1252,9 +1341,7 @@ export const createAcpAgentApp = (
           };
         }
 
-        const chatMessages = options.useMastraObservationalMemory
-          ? [{ role: "user" as const, content: boundedPromptText }]
-          : [
+        const chatMessages = [
             ...compactedConversationHistory.map((message) => ({
               role: message.role === "assistant" ? "assistant" as const : "user" as const,
               content: message.content,

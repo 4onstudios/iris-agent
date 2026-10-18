@@ -1,9 +1,16 @@
+import { randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import * as acp from "@agentclientprotocol/sdk";
 import {
     createAcpAgentApp,
     type AcpRuntimeAgent,
 } from "../api/acp/acpServer";
 import { resolvePromptTokenBudget } from "../api/helpers/promptBudget";
+
+const persistedSessionPath = (sessionId: string): string =>
+    path.join(os.homedir(), ".iris", "chat-sessions", `${sessionId}.json`);
 
 const createChunkStream = (
     chunks: Array<{ type: string; payload?: Record<string, unknown> }>,
@@ -127,6 +134,124 @@ describe("ACP server", () => {
                     });
                 },
             );
+    });
+
+    it("hydrates a restored transcript before relying on ACP observational memory", async () => {
+        const sessionId = `acp-memory-${randomUUID()}`;
+        const sessionPath = persistedSessionPath(sessionId);
+        await fs.mkdir(path.dirname(sessionPath), { recursive: true });
+        await fs.writeFile(
+            sessionPath,
+            JSON.stringify({
+                id: sessionId,
+                cwd: "/workspace",
+                messages: [
+                    { role: "user", content: "Restored question" },
+                    { role: "assistant", content: "Restored answer" },
+                ],
+            }),
+        );
+        const savedMessages: unknown[] = [];
+        const memory = {
+            getThreadById: jest.fn(async () => null),
+            createThread: jest.fn(async () => ({})),
+            saveMessages: jest.fn(async ({ messages }: { messages: unknown[] }) => {
+                savedMessages.push(...messages);
+                return { messages };
+            }),
+            recall: jest.fn(async () => ({
+                messages: [],
+                total: 0,
+                page: 0,
+                perPage: 1,
+                hasMore: false,
+            })),
+        };
+        const runtime: AcpRuntimeAgent = {
+            getMemory: async () => memory,
+            stream: jest.fn(async () => ({
+                fullStream: createChunkStream([
+                    { type: "text-delta", payload: { text: "Done" } },
+                ]),
+                text: Promise.resolve("Done"),
+            })),
+        };
+        const stream = runtime.stream as jest.MockedFunction<
+            NonNullable<AcpRuntimeAgent["stream"]>
+        >;
+
+        try {
+            await acp
+                .client({ name: "iris-agent-test-client" })
+                .connectWith(
+                    createAcpAgentApp(runtime, undefined, "local/custom-model", {
+                        useMastraObservationalMemory: true,
+                    }),
+                    async (ctx) => {
+                        await ctx.request(acp.methods.agent.session.load, {
+                            sessionId,
+                            cwd: "/workspace",
+                            mcpServers: [],
+                        });
+                        await ctx.request(acp.methods.agent.session.prompt, {
+                            sessionId,
+                            prompt: [{ type: "text", text: "New prompt" }],
+                        });
+                    },
+                );
+
+            expect(memory.createThread).toHaveBeenCalledWith({
+                threadId: sessionId,
+                resourceId: `acp-session:${sessionId}`,
+            });
+            expect(savedMessages).toHaveLength(2);
+            expect(stream.mock.calls[0]?.[0]).toBe("New prompt");
+            expect(stream.mock.calls[0]?.[1]).toMatchObject({
+                memory: {
+                    thread: sessionId,
+                    resource: `acp-session:${sessionId}`,
+                },
+            });
+        } finally {
+            await fs.unlink(sessionPath);
+        }
+    });
+
+    it("keeps bounded prior turns for chat-only ACP runtimes with observational memory enabled", async () => {
+        const runtime: AcpRuntimeAgent = {
+            chat: jest.fn(async () => ({ text: "Done" })),
+        };
+        const chat = runtime.chat as jest.MockedFunction<
+            NonNullable<AcpRuntimeAgent["chat"]>
+        >;
+
+        await acp
+            .client({ name: "iris-agent-test-client" })
+            .connectWith(
+                createAcpAgentApp(runtime, undefined, undefined, {
+                    useMastraObservationalMemory: true,
+                }),
+                async (ctx) => {
+                    const session = await ctx.request(acp.methods.agent.session.new, {
+                        cwd: "/workspace",
+                        mcpServers: [],
+                    });
+                    await ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId: session.sessionId,
+                        prompt: [{ type: "text", text: "Earlier question" }],
+                    });
+                    await ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId: session.sessionId,
+                        prompt: [{ type: "text", text: "Current question" }],
+                    });
+                },
+            );
+
+        expect(chat.mock.calls[1]?.[0].messages).toEqual([
+            { role: "user", content: "Earlier question" },
+            { role: "assistant", content: "Done" },
+            { role: "user", content: "Current question" },
+        ]);
     });
 
     it("passes bounded prior turns to the runtime on subsequent prompts", async () => {
