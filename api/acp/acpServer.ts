@@ -33,6 +33,7 @@ const ACP_MAX_CONVERSATION_MESSAGE_TOKENS = 1_200;
 const MAX_CONCURRENT_SESSION_LOADS = 16;
 
 const CHAT_SESSIONS_DIR = path.join(os.homedir(), ".iris", "chat-sessions");
+const ACP_TRANSCRIPT_CHECKPOINT = "irisAgentAcpTranscriptMessageCount";
 
 type PersistedChatMessage = {
   role: "user" | "assistant";
@@ -249,19 +250,28 @@ export type AcpRuntimeAgent = {
 };
 
 export type AcpMemoryAdapter = {
-  getThreadById(args: { threadId: string }): Promise<{ resourceId?: string } | null>;
+  getThreadById(args: {
+    threadId: string;
+  }): Promise<{
+    resourceId?: string;
+    metadata?: Record<string, unknown>;
+  } | null>;
   recall(args: {
     threadId: string;
     resourceId: string;
     page: number;
-    perPage: number;
-  }): Promise<{ messages: unknown[] }>;
+    perPage: number | false;
+  }): Promise<{ messages: MastraDBMessage[] }>;
   createThread(args: {
     threadId: string;
     resourceId: string;
     title?: string;
   }): Promise<unknown>;
   saveMessages(args: { messages: MastraDBMessage[] }): Promise<unknown>;
+  updateThread(args: {
+    id: string;
+    metadata: Record<string, unknown>;
+  }): Promise<unknown>;
 };
 
 export type AcpAgentFactory = (
@@ -371,38 +381,13 @@ const extractText = (value: unknown): string => {
   return value === undefined ? "" : JSON.stringify(value);
 };
 
-const hydrateAcpMemoryHistory = async (
-  runtimeAgent: AcpRuntimeAgent,
+const saveTranscriptMessages = async (
+  memory: AcpMemoryAdapter,
   sessionId: string,
   resourceId: string,
-  title: string | undefined,
   history: PersistedChatMessage[],
-): Promise<boolean> => {
-  if (history.length === 0) return true;
-  if (typeof runtimeAgent.getMemory !== "function") return false;
-  const memory = await runtimeAgent.getMemory();
-  if (!memory) return false;
-
-  const existingThread = await memory.getThreadById({ threadId: sessionId });
-  if (existingThread) {
-    if (existingThread.resourceId !== resourceId) {
-      throw new Error(`ACP memory thread '${sessionId}' belongs to a different resource`);
-    }
-    const existingMessages = await memory.recall({
-      threadId: sessionId,
-      resourceId,
-      page: 0,
-      perPage: 1,
-    });
-    if (existingMessages.messages.length > 0) return true;
-  } else {
-    await memory.createThread({
-      threadId: sessionId,
-      resourceId,
-      ...(title ? { title } : {}),
-    });
-  }
-
+): Promise<void> => {
+  if (history.length === 0) return;
   const messages: MastraDBMessage[] = history.map((message) => ({
     id: randomUUID(),
     role: message.role,
@@ -416,6 +401,103 @@ const hydrateAcpMemoryHistory = async (
     },
   }));
   await memory.saveMessages({ messages });
+};
+
+const updateTranscriptCheckpoint = async (
+  memory: AcpMemoryAdapter,
+  sessionId: string,
+  messageCount: number,
+): Promise<boolean> => {
+  const thread = await memory.getThreadById({ threadId: sessionId });
+  if (!thread) return false;
+  await memory.updateThread({
+    id: sessionId,
+    metadata: {
+      ...thread.metadata,
+      [ACP_TRANSCRIPT_CHECKPOINT]: messageCount,
+    },
+  });
+  return true;
+};
+
+const transcriptMessageMatches = (
+  memoryMessage: MastraDBMessage,
+  transcriptMessage: PersistedChatMessage,
+): boolean => {
+  if (memoryMessage.role !== transcriptMessage.role) return false;
+  const content = memoryMessage.content;
+  const text = typeof content === "string"
+    ? content
+    : content.parts
+      .filter((part) => part.type === "text" && "text" in part)
+      .map((part) => "text" in part && typeof part.text === "string" ? part.text : "")
+      .join("");
+  return text === transcriptMessage.content;
+};
+
+const hydrateAcpMemoryHistory = async (
+  runtimeAgent: AcpRuntimeAgent,
+  sessionId: string,
+  resourceId: string,
+  title: string | undefined,
+  history: PersistedChatMessage[],
+): Promise<boolean> => {
+  if (history.length === 0) return false;
+  if (typeof runtimeAgent.getMemory !== "function") return false;
+  const memory = await runtimeAgent.getMemory();
+  if (!memory) return false;
+
+  const existingThread = await memory.getThreadById({ threadId: sessionId });
+  let existingMessageCount = 0;
+  if (existingThread) {
+    if (existingThread.resourceId !== resourceId) {
+      throw new Error(`ACP memory thread '${sessionId}' belongs to a different resource`);
+    }
+    const checkpoint = existingThread.metadata?.[ACP_TRANSCRIPT_CHECKPOINT];
+    if (typeof checkpoint === "number" && Number.isSafeInteger(checkpoint)) {
+      if (checkpoint < 0 || checkpoint > history.length) return false;
+      existingMessageCount = checkpoint;
+    } else {
+      const existingMessages = await memory.recall({
+        threadId: sessionId,
+        resourceId,
+        page: 0,
+        perPage: false,
+      });
+      const transcriptMessages = existingMessages.messages.filter(
+        (message): message is MastraDBMessage & {
+          role: "user" | "assistant";
+        } => message.role === "user" || message.role === "assistant",
+      );
+      if (
+        transcriptMessages.length > history.length ||
+        transcriptMessages.some(
+          (message, index) =>
+            history[index] === undefined ||
+            !transcriptMessageMatches(message, history[index]),
+        )
+      ) {
+        return false;
+      }
+      existingMessageCount = transcriptMessages.length;
+    }
+  } else {
+    await memory.createThread({
+      threadId: sessionId,
+      resourceId,
+      ...(title ? { title } : {}),
+    });
+  }
+
+  await saveTranscriptMessages(
+    memory,
+    sessionId,
+    resourceId,
+    history.slice(existingMessageCount),
+  );
+  if (!(await updateTranscriptCheckpoint(memory, sessionId, history.length))) {
+    return false;
+  }
   return true;
 };
 
@@ -532,7 +614,7 @@ export const createAcpAgentApp = (
         cwd: sessionWorkspace,
         modelId: requestedModel,
         history: [],
-        memoryHistoryHydrated: true,
+        memoryHistoryHydrated: false,
       });
       await notifyAvailableCommands(ctx, sessionId);
       return {
@@ -573,18 +655,26 @@ export const createAcpAgentApp = (
         modelId: requestedModel,
         title: getPersistedSessionTitle(persisted),
         history,
-        memoryHistoryHydrated: history.length === 0,
+        memoryHistoryHydrated: false,
       };
       sessions.set(sessionId, session);
       if (options.useMastraObservationalMemory && history.length > 0) {
         const runtimeAgent = await resolveAgent(requestedModel, sessionWorkspace);
-        session.memoryHistoryHydrated = await hydrateAcpMemoryHistory(
-          runtimeAgent,
-          sessionId,
-          `acp-session:${sessionId}`,
-          session.title,
-          history,
-        );
+        try {
+          session.memoryHistoryHydrated = await hydrateAcpMemoryHistory(
+            runtimeAgent,
+            sessionId,
+            `acp-session:${sessionId}`,
+            session.title,
+            history,
+          );
+        } catch (error) {
+          session.memoryHistoryHydrated = false;
+          console.warn(
+            `[acp] Could not hydrate transcript for session '${sessionId}'; retaining bounded transcript replay:`,
+            error instanceof Error ? error.message : String(error),
+          );
+        }
       }
       for (const message of history) {
         await ctx.client.notify(acp.methods.client.session.update, {
@@ -750,7 +840,28 @@ export const createAcpAgentApp = (
           await loadPersistedChatSession(sessionId),
         );
         if (memoryScope) {
-          session.memoryHistoryHydrated = true;
+          session.memoryHistoryHydrated = false;
+          if (
+            (conversationHistory.length === 0 || useMemoryWithoutTranscriptReplay) &&
+            typeof runtimeAgent.getMemory === "function"
+          ) {
+            try {
+              const memory = await runtimeAgent.getMemory();
+              if (memory) {
+                session.memoryHistoryHydrated =
+                  await updateTranscriptCheckpoint(
+                    memory,
+                    sessionId,
+                    session.history.length,
+                  );
+              }
+            } catch (error) {
+              console.warn(
+                `[acp] Could not checkpoint restored transcript for session '${sessionId}':`,
+                error instanceof Error ? error.message : String(error),
+              );
+            }
+          }
         }
         return true;
       };
