@@ -146,6 +146,31 @@ describe("CLI agent stream", () => {
     expect(turnUsage).toEqual(usage);
   });
 
+  it("propagates cancellation while waiting for provider token usage", async () => {
+    const controller = new AbortController();
+    const warning = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const turn = runCliChatTurn(
+        {
+          stream: async () => ({
+            fullStream: chunks(),
+            usage: new Promise(() => undefined),
+          }),
+        },
+        "hello",
+        {},
+        makeUi(),
+        controller.signal,
+      );
+      setTimeout(() => controller.abort(), 0);
+
+      await expect(turn).rejects.toMatchObject({ name: "AbortError" });
+      expect(warning).not.toHaveBeenCalled();
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
   it("updates the UI before the stream completes and keeps the memory scope", async () => {
     const ui = makeUi();
     const controller = new AbortController();

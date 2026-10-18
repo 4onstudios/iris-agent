@@ -76,6 +76,59 @@ describe("ACP server", () => {
         }
     });
 
+    it("uses the configured ACP context window and isolated observational memory", async () => {
+        const runtime: AcpRuntimeAgent = {
+            stream: jest.fn(async () => ({
+                fullStream: createChunkStream([
+                    { type: "text-delta", payload: { text: "Done" } },
+                ]),
+                text: Promise.resolve("Done"),
+            })),
+        };
+        const stream = runtime.stream as jest.MockedFunction<
+            NonNullable<AcpRuntimeAgent["stream"]>
+        >;
+        const previousRequest = `Previous request ${"x".repeat(20_000)}`;
+
+        await acp
+            .client({ name: "iris-agent-test-client" })
+            .connectWith(
+                createAcpAgentApp(runtime, undefined, "local/custom-model", {
+                    contextWindowTokens: 100_000,
+                    useMastraObservationalMemory: true,
+                }),
+                async (ctx) => {
+                    const session = await ctx.request(acp.methods.agent.session.new, {
+                        cwd: "/workspace",
+                        mcpServers: [],
+                    });
+                    await ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId: session.sessionId,
+                        prompt: [{ type: "text", text: previousRequest }],
+                    });
+                    await ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId: session.sessionId,
+                        prompt: [{ type: "text", text: "Follow-up request" }],
+                    });
+
+                    expect(stream.mock.calls[0]?.[0]).toContain(previousRequest);
+                    expect(stream.mock.calls[0]?.[1]).toMatchObject({
+                        memory: {
+                            thread: session.sessionId,
+                            resource: `acp-session:${session.sessionId}`,
+                        },
+                    });
+                    expect(stream.mock.calls[1]?.[0]).toBe("Follow-up request");
+                    expect(stream.mock.calls[1]?.[1]).toMatchObject({
+                        memory: {
+                            thread: session.sessionId,
+                            resource: `acp-session:${session.sessionId}`,
+                        },
+                    });
+                },
+            );
+    });
+
     it("passes bounded prior turns to the runtime on subsequent prompts", async () => {
         const runtime: AcpRuntimeAgent = {
             stream: jest.fn(async () => ({

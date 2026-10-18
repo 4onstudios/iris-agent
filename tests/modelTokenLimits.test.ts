@@ -86,6 +86,45 @@ describe("model input limits", () => {
     });
   });
 
+  it("preserves provider input and completion caps with an explicit total window", async () => {
+    jest.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: {
+          context_length: 400_000,
+          top_provider: {
+            context_length: 400_000,
+            max_completion_tokens: 16_000,
+          },
+        },
+      }),
+    } as Response);
+
+    await expect(
+      resolveModelContextBudget(
+        "openrouter/example/model-with-provider-caps",
+        { OPENROUTER_API_KEY: "test-key" },
+        400_000,
+      ),
+    ).resolves.toEqual({
+      contextWindowTokens: 400_000,
+      inputTokens: 384_000,
+      maxOutputTokens: 16_000,
+    });
+  });
+
+  it("preserves known catalog input caps when provider metadata is unavailable", async () => {
+    expect(await resolveModelContextBudget(
+      "gpt-5.3-codex",
+      {},
+      400_000,
+    )).toEqual({
+      contextWindowTokens: 400_000,
+      inputTokens: 272_000,
+      maxOutputTokens: 65_536,
+    });
+  });
+
   it("rejects invalid and out-of-range context-window values", () => {
     expect(() => parseContextWindow("100 tokens")).toThrow("--context-window");
     expect(() => parseContextWindow("100")).toThrow("--context-window");

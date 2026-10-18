@@ -99,12 +99,34 @@ export type ModelContextBudget = {
   maxOutputTokens: number;
 };
 const modelLimits = new Map<string, { budget: ModelContextBudget; expiresAt: number }>();
+const providerModelLimits = new Map<string, { budget: ModelContextBudget; expiresAt: number }>();
 const pendingModelLimits = new Map<string, Promise<ModelContextBudget>>();
+const failedModelLimitLookups = new Map<string, number>();
 
 const positiveTokenCount = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isSafeInteger(value) && value > 0
     ? value
     : undefined;
+
+const getKnownModelInputTokenLimit = (
+  modelId: string,
+  env: NodeJS.ProcessEnv,
+): number | undefined => {
+  const envOverride = getEnvTokenLimitOverride(env);
+  if (envOverride) return envOverride;
+
+  const normalized = stripProviderSuffix(modelId.trim());
+  const slug = openRouterSlug(normalized, env);
+  const candidates = [
+    modelId.trim(),
+    normalized,
+    slug,
+    slug ? `openrouter/${slug}` : undefined,
+  ];
+  return candidates
+    .map((candidate) => candidate && MODEL_INPUT_TOKEN_LIMITS[candidate])
+    .find((limit): limit is number => typeof limit === "number");
+};
 
 const openRouterSlug = (modelId: string, env: NodeJS.ProcessEnv): string | undefined => {
   const normalized = stripProviderSuffix(modelId.trim());
@@ -195,6 +217,48 @@ const fetchOpenRouterInputLimit = async (
   };
 };
 
+const getCachedOpenRouterBudget = async (
+  slug: string,
+  env: NodeJS.ProcessEnv,
+): Promise<ModelContextBudget> => {
+  const key = `${env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1"}:${slug}`;
+  const failedUntil = failedModelLimitLookups.get(key);
+  if (failedUntil && failedUntil > Date.now()) {
+    throw new Error("OpenRouter model metadata lookup is temporarily unavailable");
+  }
+  const cached = providerModelLimits.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.budget;
+
+  let pending = pendingModelLimits.get(key);
+  if (!pending) {
+    pending = fetchOpenRouterInputLimit(slug, env)
+      .then((budget) => {
+        failedModelLimitLookups.delete(key);
+        providerModelLimits.set(key, {
+          budget,
+          expiresAt: Date.now() + OPENROUTER_METADATA_TTL_MS,
+        });
+        modelLimits.set(key, {
+          budget,
+          expiresAt: Date.now() + OPENROUTER_METADATA_TTL_MS,
+        });
+        return budget;
+      })
+      .catch((error: unknown) => {
+        failedModelLimitLookups.set(
+          key,
+          Date.now() + OPENROUTER_METADATA_FAILURE_TTL_MS,
+        );
+        throw error;
+      })
+      .finally(() => {
+        pendingModelLimits.delete(key);
+      });
+    pendingModelLimits.set(key, pending);
+  }
+  return pending;
+};
+
 /**
  * Discover the effective input allowance for an OpenRouter model. Other
  * providers do not consistently expose context limits, so use the local
@@ -213,13 +277,35 @@ export const resolveModelContextBudget = async (
     ) {
       throw new Error("contextWindow must be between 8K and 1M tokens.");
     }
-    const outputTokens = Math.min(
+    const requestedOutputTokens = Math.min(
       65_536,
       Math.max(512, Math.floor(contextWindowTokens * 0.2)),
     );
+    let providerBudget: ModelContextBudget | undefined;
+    const slug = openRouterSlug(modelId, env);
+    if (slug) {
+      try {
+        providerBudget = await getCachedOpenRouterBudget(slug, env);
+      } catch (error) {
+        console.warn(
+          `[agent] Could not resolve provider caps for OpenRouter model '${slug}' while applying contextWindow:`,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
+    const outputTokens = Math.min(
+      requestedOutputTokens,
+      providerBudget?.maxOutputTokens ?? requestedOutputTokens,
+    );
+    const requestedInputTokens = contextWindowTokens - outputTokens;
     return {
       contextWindowTokens,
-      inputTokens: contextWindowTokens - outputTokens,
+      inputTokens: Math.min(
+        requestedInputTokens,
+        providerBudget?.inputTokens ??
+          getKnownModelInputTokenLimit(modelId, env) ??
+          requestedInputTokens,
+      ),
       maxOutputTokens: outputTokens,
     };
   }
@@ -249,41 +335,32 @@ export const resolveModelContextBudget = async (
   const key = `${env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1"}:${slug}`;
   const cached = modelLimits.get(key);
   if (cached && cached.expiresAt > Date.now()) return cached.budget;
-  let pending = pendingModelLimits.get(key);
-  if (!pending) {
-    pending = fetchOpenRouterInputLimit(slug, env)
-      .then((budget) => {
-        modelLimits.set(key, { budget, expiresAt: Date.now() + OPENROUTER_METADATA_TTL_MS });
-        return budget;
-      })
-      .catch((error: unknown) => {
-        console.warn(
-          `[agent] Could not resolve context limit for OpenRouter model '${slug}':`,
-          error instanceof Error ? error.message : String(error),
-        );
-        const inputTokens = Math.min(
-          resolveModelInputTokenLimit(modelId, UNKNOWN_MODEL_INPUT_LIMIT, env),
-          UNKNOWN_MODEL_INPUT_LIMIT,
-        );
-        const maxOutputTokens = Math.min(
-          8_192,
-          Math.max(256, Math.floor(inputTokens * 0.2)),
-        );
-        const budget = {
-          contextWindowTokens: inputTokens + maxOutputTokens,
-          inputTokens,
-          maxOutputTokens,
-        };
-        modelLimits.set(key, {
-          budget,
-          expiresAt: Date.now() + OPENROUTER_METADATA_FAILURE_TTL_MS,
-        });
-        return budget;
-      })
-      .finally(() => { pendingModelLimits.delete(key); });
-    pendingModelLimits.set(key, pending);
+  try {
+    return await getCachedOpenRouterBudget(slug, env);
+  } catch (error: unknown) {
+    console.warn(
+      `[agent] Could not resolve context limit for OpenRouter model '${slug}':`,
+      error instanceof Error ? error.message : String(error),
+    );
+    const inputTokens = Math.min(
+      resolveModelInputTokenLimit(modelId, UNKNOWN_MODEL_INPUT_LIMIT, env),
+      UNKNOWN_MODEL_INPUT_LIMIT,
+    );
+    const maxOutputTokens = Math.min(
+      8_192,
+      Math.max(256, Math.floor(inputTokens * 0.2)),
+    );
+    const budget = {
+      contextWindowTokens: inputTokens + maxOutputTokens,
+      inputTokens,
+      maxOutputTokens,
+    };
+    modelLimits.set(key, {
+      budget,
+      expiresAt: Date.now() + OPENROUTER_METADATA_FAILURE_TTL_MS,
+    });
+    return budget;
   }
-  return pending;
 };
 
 export const resolveModelInputTokenLimitAsync = async (

@@ -91,6 +91,7 @@ async function main() {
       useMastraObservationalMemory: true,
       observationalMemorySettings: {
         model: selectedModelId,
+        scope: "thread" as const,
         observationMessageTokens: Math.max(
           4_000,
           Math.min(200_000, Math.floor(inputTokens * 0.75)),
@@ -141,6 +142,10 @@ async function main() {
         ),
       workspaceRoot,
       modelId,
+      {
+        contextWindowTokens: contextWindow,
+        useMastraObservationalMemory: contextWindow !== undefined,
+      },
     );
   } else if (argv.chat) {
     // Interactive chat mode

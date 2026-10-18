@@ -21,6 +21,28 @@ export interface CliChatAgent {
   ) => Promise<unknown>;
 }
 
+const waitForAbortable = async <T>(
+  value: PromiseLike<T> | T,
+  signal: AbortSignal,
+): Promise<T> => {
+  signal.throwIfAborted();
+  let onAbort: (() => void) | undefined;
+  const abort = new Promise<never>((_, reject) => {
+    onAbort = () =>
+      reject(
+        signal.reason ??
+          new DOMException("The operation was aborted", "AbortError"),
+      );
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+  try {
+    return await Promise.race([Promise.resolve(value), abort]);
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+  }
+};
+
 /** Consume the existing agent protocol; the UI never owns agent execution. */
 export const runCliChatTurn = async (
   agent: CliChatAgent,
@@ -141,8 +163,11 @@ export const runCliChatTurn = async (
       if (text) ui.appendText(text);
     }
     try {
-      usage = normalizeTokenUsage(await streamResult.usage);
+      usage = normalizeTokenUsage(
+        await waitForAbortable(streamResult.usage, signal),
+      );
     } catch (error) {
+      signal.throwIfAborted();
       console.warn(
         "[cli] Could not read provider token usage for context stats:",
         error instanceof Error ? error.message : String(error),

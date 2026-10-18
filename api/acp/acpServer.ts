@@ -21,10 +21,10 @@ import {
 } from "../helpers/tokenUsage";
 import {
   buildConversationTurn,
-  resolveModelInputTokenLimitAsync,
   resolvePromptTokenBudget,
   type ConversationMessageLike,
 } from "../helpers/promptBudget";
+import { resolveModelContextBudget } from "../helpers/modelTokenLimits";
 
 const DEFAULT_MAX_STEPS = 50;
 const ACP_MAX_CONVERSATION_MESSAGES = 12;
@@ -253,6 +253,11 @@ export type AcpAgentFactory = (
 
 export type AcpAgentProvider = AcpRuntimeAgent | AcpAgentFactory;
 
+export type AcpAgentAppOptions = {
+  contextWindowTokens?: number;
+  useMastraObservationalMemory?: boolean;
+};
+
 type ActiveTurn = {
   abortController: AbortController;
   cancelStream?: () => Promise<void>;
@@ -351,6 +356,7 @@ export const createAcpAgentApp = (
   agentProvider: AcpAgentProvider,
   workspaceRoot?: string,
   defaultModelId?: string,
+  options: AcpAgentAppOptions = {},
 ): acp.AgentApp => {
   const boundWorkspaceRoot = workspaceRoot
     ? path.resolve(workspaceRoot)
@@ -608,12 +614,20 @@ export const createAcpAgentApp = (
       // This avoids exposing an in-flight, possibly-cancelled turn to any
       // other request that reads session.history concurrently.
       const conversationHistory = session.history.slice();
-      const modelInputTokenLimit = await resolveModelInputTokenLimitAsync(
+      const modelContextBudget = await resolveModelContextBudget(
         turnModelId ?? defaultModelId ?? "",
+        process.env,
+        options.contextWindowTokens,
       );
+      const modelInputTokenLimit = modelContextBudget.inputTokens;
+      const memoryScope = options.useMastraObservationalMemory
+        ? { thread: sessionId, resource: `acp-session:${sessionId}` }
+        : undefined;
       const promptBuild = await buildConversationTurn({
         currentMessage: promptText,
-        history: conversationHistory satisfies RuntimeConversationMessage[],
+        history: options.useMastraObservationalMemory
+          ? undefined
+          : conversationHistory satisfies RuntimeConversationMessage[],
         maxPromptTokens: resolvePromptTokenBudget(modelInputTokenLimit),
         maxConversationMessages: ACP_MAX_CONVERSATION_MESSAGES,
         maxConversationMessageTokens: ACP_MAX_CONVERSATION_MESSAGE_TOKENS,
@@ -699,6 +713,7 @@ export const createAcpAgentApp = (
                   abortSignal: turnSignal,
                   maxSteps: effectiveMaxSteps,
                   modelId: turnModelId,
+                  ...(memoryScope ? { memory: memoryScope } : {}),
                 },
               ) as Promise<AgentStreamResult>,
           );
@@ -1237,6 +1252,15 @@ export const createAcpAgentApp = (
           };
         }
 
+        const chatMessages = options.useMastraObservationalMemory
+          ? [{ role: "user" as const, content: boundedPromptText }]
+          : [
+            ...compactedConversationHistory.map((message) => ({
+              role: message.role === "assistant" ? "assistant" as const : "user" as const,
+              content: message.content,
+            })),
+            { role: "user" as const, content: boundedPromptText },
+          ];
         const generated = await raceWithAbort(async () =>
           runtimeAgent.generate
             ? runtimeAgent.generate(runtimePrompt, {
@@ -1244,16 +1268,11 @@ export const createAcpAgentApp = (
               abortSignal: turnSignal,
               maxSteps: effectiveMaxSteps,
               modelId: turnModelId,
+              ...(memoryScope ? { memory: memoryScope } : {}),
             })
             : runtimeAgent.chat
               ? runtimeAgent.chat({
-                messages: [
-                  ...compactedConversationHistory.map((message) => ({
-                    role: message.role,
-                    content: message.content,
-                  })),
-                  { role: "user" as const, content: boundedPromptText },
-                ],
+                messages: chatMessages,
                 signal: turnSignal,
                 abortSignal: turnSignal,
               })
@@ -1302,6 +1321,7 @@ export async function startAcpServer(
   runtimeAgentOrFactory: AcpAgentProvider,
   workspaceRoot?: string,
   defaultModelId?: string,
+  options: AcpAgentAppOptions = {},
 ): Promise<void> {
   const output = Writable.toWeb(process.stdout) as WritableStream<Uint8Array>;
   const input = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
@@ -1309,6 +1329,7 @@ export async function startAcpServer(
     runtimeAgentOrFactory,
     workspaceRoot,
     defaultModelId,
+    options,
   ).connect(acp.ndJsonStream(output, input));
 
   console.error("ACP agent ready: iris-agent (stdio)");
