@@ -334,66 +334,68 @@ describe("ACP server", () => {
     it.each(["missing", "undefined"] as const)(
         "keeps replaying restored history when the runtime memory adapter is %s",
         async (memoryAdapter) => {
-        const sessionId = `acp-no-memory-${randomUUID()}`;
-        const sessionPath = persistedSessionPath(sessionId);
-        await fs.mkdir(path.dirname(sessionPath), { recursive: true });
-        await fs.writeFile(
-            sessionPath,
-            JSON.stringify({
-                id: sessionId,
-                cwd: "/workspace",
-                messages: [
-                    { role: "user", content: "Restored question" },
-                    { role: "assistant", content: "Restored answer" },
-                ],
-            }),
-        );
-        const runtime: AcpRuntimeAgent = {
-            stream: jest.fn(async () => ({
-                fullStream: createChunkStream([
-                    { type: "text-delta", payload: { text: "Done" } },
-                ]),
-                text: Promise.resolve("Done"),
-            })),
-        };
-        if (memoryAdapter === "undefined") {
-            runtime.getMemory = async () => undefined;
-        }
-        const stream = runtime.stream as jest.MockedFunction<
-            NonNullable<AcpRuntimeAgent["stream"]>
-        >;
+            const sessionId = `acp-no-memory-${randomUUID()}`;
+            const sessionPath = persistedSessionPath(sessionId);
+            await fs.mkdir(path.dirname(sessionPath), { recursive: true });
+            await fs.writeFile(
+                sessionPath,
+                JSON.stringify({
+                    id: sessionId,
+                    cwd: "/workspace",
+                    messages: [
+                        { role: "user", content: "Restored question" },
+                        { role: "assistant", content: "Restored answer" },
+                    ],
+                }),
+            );
+            const runtime: AcpRuntimeAgent = {
+                stream: jest.fn(async () => ({
+                    fullStream: createChunkStream([
+                        { type: "text-delta", payload: { text: "Done" } },
+                    ]),
+                    text: Promise.resolve("Done"),
+                })),
+            };
+            if (memoryAdapter === "undefined") {
+                runtime.getMemory = async () => undefined;
+            }
+            const stream = runtime.stream as jest.MockedFunction<
+                NonNullable<AcpRuntimeAgent["stream"]>
+            >;
 
-        try {
-            await acp
-                .client({ name: "iris-agent-test-client" })
-                .connectWith(
-                    createAcpAgentApp(runtime, undefined, "local/custom-model", {
-                        useMastraObservationalMemory: true,
-                    }),
-                    async (ctx) => {
-                        await ctx.request(acp.methods.agent.session.load, {
-                            sessionId,
-                            cwd: "/workspace",
-                            mcpServers: [],
-                        });
-                        await ctx.request(acp.methods.agent.session.prompt, {
-                            sessionId,
-                            prompt: [{ type: "text", text: "First new prompt" }],
-                        });
-                        await ctx.request(acp.methods.agent.session.prompt, {
-                            sessionId,
-                            prompt: [{ type: "text", text: "Second new prompt" }],
-                        });
-                    },
-                );
+            try {
+                await acp
+                    .client({ name: "iris-agent-test-client" })
+                    .connectWith(
+                        createAcpAgentApp(runtime, undefined, "local/custom-model", {
+                            useMastraObservationalMemory: true,
+                        }),
+                        async (ctx) => {
+                            await ctx.request(acp.methods.agent.session.load, {
+                                sessionId,
+                                cwd: "/workspace",
+                                mcpServers: [],
+                            });
+                            await ctx.request(acp.methods.agent.session.prompt, {
+                                sessionId,
+                                prompt: [{ type: "text", text: "First new prompt" }],
+                            });
+                            await ctx.request(acp.methods.agent.session.prompt, {
+                                sessionId,
+                                prompt: [{ type: "text", text: "Second new prompt" }],
+                            });
+                        },
+                    );
 
-            expect(stream.mock.calls[0]?.[0]).toContain("Restored question");
-            expect(stream.mock.calls[1]?.[0]).toContain("Restored question");
-            expect(stream.mock.calls[1]?.[0]).toContain("First new prompt");
-            expect(stream.mock.calls[1]?.[0]).toContain("Second new prompt");
-        } finally {
-            await fs.unlink(sessionPath);
-        }
+                expect(stream.mock.calls[0]?.[0]).toContain("Restored question");
+                expect(stream.mock.calls[0]?.[1]).not.toHaveProperty("memory");
+                expect(stream.mock.calls[1]?.[0]).toContain("Restored question");
+                expect(stream.mock.calls[1]?.[0]).toContain("First new prompt");
+                expect(stream.mock.calls[1]?.[0]).toContain("Second new prompt");
+                expect(stream.mock.calls[1]?.[1]).not.toHaveProperty("memory");
+            } finally {
+                await fs.unlink(sessionPath);
+            }
         },
     );
 

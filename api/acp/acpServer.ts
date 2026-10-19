@@ -794,11 +794,13 @@ export const createAcpAgentApp = (
         options.useMastraObservationalMemory === true &&
         (typeof runtimeAgent.stream === "function" ||
           typeof runtimeAgent.generate === "function");
-      const memoryScope = runtimeSupportsScopedMemory
-        ? { thread: sessionId, resource: `acp-session:${sessionId}` }
-        : undefined;
       const useMemoryWithoutTranscriptReplay =
-        memoryScope !== undefined && session.memoryHistoryHydrated === true;
+        runtimeSupportsScopedMemory && session.memoryHistoryHydrated === true;
+      const memoryScope =
+        runtimeSupportsScopedMemory &&
+          (useMemoryWithoutTranscriptReplay || conversationHistory.length === 0)
+          ? { thread: sessionId, resource: `acp-session:${sessionId}` }
+          : undefined;
       const promptBuild = await buildConversationTurn({
         currentMessage: promptText,
         history: useMemoryWithoutTranscriptReplay
