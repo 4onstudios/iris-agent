@@ -1,6 +1,7 @@
 import { resolveToolExecutionStatus } from "../agent/utils/toolLifecycle";
 import {
-  normalizeTokenUsage,
+  extractLastStepUsage,
+  extractStepFinishUsage,
   type TokenUsageSummary,
 } from "../../helpers/tokenUsage";
 import type { CliChatUi } from "./cliChatUi";
@@ -13,7 +14,7 @@ export interface CliChatAgent {
   ) => Promise<{
     fullStream: ReadableStream<CliAgentChunk>;
     text?: Promise<string> | string;
-    usage?: Promise<unknown> | unknown;
+    steps?: Promise<unknown> | unknown;
   }>;
   generate?: (
     prompt: string,
@@ -43,7 +44,11 @@ const waitForAbortable = async <T>(
   }
 };
 
-/** Consume the existing agent protocol; the UI never owns agent execution. */
+/**
+ * Consume the existing agent protocol; the UI never owns agent execution.
+ * Resolves with the final model step's usage so callers can report context
+ * occupancy without counting prompt tokens repeated across steps.
+ */
 export const runCliChatTurn = async (
   agent: CliChatAgent,
   prompt: string,
@@ -62,7 +67,7 @@ export const runCliChatTurn = async (
     signal.throwIfAborted();
     const usage =
       result && typeof result === "object"
-        ? normalizeTokenUsage((result as Record<string, unknown>).usage)
+        ? extractLastStepUsage((result as Record<string, unknown>).steps)
         : undefined;
     const text =
       typeof result === "string"
@@ -100,7 +105,9 @@ export const runCliChatTurn = async (
         break;
       }
       const payload = value?.payload || {};
-      if (value?.type === "text-delta") {
+      if (value?.type === "step-finish") {
+        usage = extractStepFinishUsage(value);
+      } else if (value?.type === "text-delta") {
         const text = typeof payload.text === "string" ? payload.text : "";
         if (text) {
           hasOutput = true;
@@ -163,9 +170,10 @@ export const runCliChatTurn = async (
       if (text) ui.appendText(text);
     }
     try {
-      usage = normalizeTokenUsage(
-        await waitForAbortable(streamResult.usage, signal),
-      );
+      usage =
+        extractLastStepUsage(
+          await waitForAbortable(streamResult.steps, signal),
+        ) ?? usage;
     } catch (error) {
       signal.throwIfAborted();
       console.warn(

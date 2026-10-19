@@ -67,6 +67,10 @@ const argv = yargs(hideBin(process.argv))
     type: "string",
     description: "Override the model context window (for example, 100K)",
   })
+  .option("observer-model", {
+    type: "string",
+    description: "Model used for observational memory (also enables observational memory)",
+  })
   .option("mcp-config", {
     type: "string",
     description: "Path to a JSON file containing MCP server configuration (chat mode)",
@@ -80,22 +84,18 @@ async function main() {
   const contextWindow = argv.contextWindow
     ? parseContextWindow(argv.contextWindow)
     : undefined;
+  const observerModelId = argv.observerModel;
+  const observationalMemoryEnabled =
+    contextWindow !== undefined || observerModelId !== undefined;
   const getContextMemoryOptions = (selectedModelId: string) => {
-    if (contextWindow === undefined) return {};
-    const outputTokens = Math.min(
-      65_536,
-      Math.max(512, Math.floor(contextWindow * 0.2)),
-    );
-    const inputTokens = contextWindow - outputTokens;
+    if (!observationalMemoryEnabled) return {};
+    // createCodingAgent derives the observation threshold from the effective
+    // input budget and resolves the observer model through provider setup.
     return {
       useMastraObservationalMemory: true,
       observationalMemorySettings: {
-        model: selectedModelId,
+        model: observerModelId || selectedModelId,
         scope: "thread" as const,
-        observationMessageTokens: Math.max(
-          4_000,
-          Math.min(200_000, Math.floor(inputTokens * 0.75)),
-        ),
       },
     };
   };
@@ -144,7 +144,7 @@ async function main() {
       modelId,
       {
         contextWindowTokens: contextWindow,
-        useMastraObservationalMemory: contextWindow !== undefined,
+        useMastraObservationalMemory: observationalMemoryEnabled,
       },
     );
   } else if (argv.chat) {

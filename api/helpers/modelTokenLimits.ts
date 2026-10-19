@@ -117,11 +117,15 @@ const getKnownModelInputTokenLimit = (
 
   const normalized = stripProviderSuffix(modelId.trim());
   const slug = openRouterSlug(normalized, env);
+  const directProviderModelId = /^(openai|anthropic|google)\//.test(normalized)
+    ? normalized.slice(normalized.indexOf("/") + 1)
+    : undefined;
   const candidates = [
     modelId.trim(),
     normalized,
     slug,
     slug ? `openrouter/${slug}` : undefined,
+    directProviderModelId,
   ];
   return candidates
     .map((candidate) => candidate && MODEL_INPUT_TOKEN_LIMITS[candidate])

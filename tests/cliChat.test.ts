@@ -128,13 +128,16 @@ describe("plain chat input", () => {
 });
 
 describe("CLI agent stream", () => {
-  it("returns provider token usage for context statistics", async () => {
-    const usage = { inputTokens: 42, outputTokens: 8, totalTokens: 50 };
+  it("returns the final model step usage for context statistics", async () => {
+    const finalStepUsage = { inputTokens: 42, outputTokens: 8, totalTokens: 50 };
     const turnUsage = await runCliChatTurn(
       {
         stream: async () => ({
           fullStream: chunks({ type: "text-delta", payload: { text: "ok" } }),
-          usage: Promise.resolve(usage),
+          steps: Promise.resolve([
+            { usage: { inputTokens: 30, outputTokens: 5, totalTokens: 35 } },
+            { usage: finalStepUsage },
+          ]),
         }),
       },
       "hello",
@@ -143,7 +146,32 @@ describe("CLI agent stream", () => {
       new AbortController().signal,
     );
 
-    expect(turnUsage).toEqual(usage);
+    expect(turnUsage).toEqual(finalStepUsage);
+  });
+
+  it("falls back to step-finish chunk usage when steps are unavailable", async () => {
+    const turnUsage = await runCliChatTurn(
+      {
+        stream: async () => ({
+          fullStream: chunks(
+            {
+              type: "step-finish",
+              payload: { output: { usage: { inputTokens: 10, outputTokens: 2 } } },
+            },
+            {
+              type: "step-finish",
+              payload: { output: { usage: { inputTokens: 20, outputTokens: 3 } } },
+            },
+          ),
+        }),
+      },
+      "hello",
+      {},
+      makeUi(),
+      new AbortController().signal,
+    );
+
+    expect(turnUsage).toEqual({ inputTokens: 20, outputTokens: 3, totalTokens: 23 });
   });
 
   it("propagates cancellation while waiting for provider token usage", async () => {
@@ -154,7 +182,7 @@ describe("CLI agent stream", () => {
         {
           stream: async () => ({
             fullStream: chunks(),
-            usage: new Promise(() => undefined),
+            steps: new Promise(() => undefined),
           }),
         },
         "hello",

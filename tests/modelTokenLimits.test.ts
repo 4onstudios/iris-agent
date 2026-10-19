@@ -125,6 +125,16 @@ describe("model input limits", () => {
     });
   });
 
+  it.each(["openai/gpt-5.3-codex", "anthropic/claude-haiku-4-5"])(
+    "applies catalog input caps to direct-provider ID %s",
+    async (modelId) => {
+      const budget = await resolveModelContextBudget(modelId, {}, 400_000);
+      expect(budget.inputTokens).toBe(
+        modelId.startsWith("openai/") ? 272_000 : 200_000,
+      );
+    },
+  );
+
   it("rejects invalid and out-of-range context-window values", () => {
     expect(() => parseContextWindow("100 tokens")).toThrow("--context-window");
     expect(() => parseContextWindow("100")).toThrow("--context-window");

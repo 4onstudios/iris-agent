@@ -283,8 +283,15 @@ const asBoundedInteger = (
 };
 
 const resolveObservationalMemoryOption = (
-  enabledOverride?: boolean,
-  settingsOverride?: AgentFactoryOptions["observationalMemorySettings"],
+  enabledOverride: boolean | undefined,
+  settingsOverride: AgentFactoryOptions["observationalMemorySettings"],
+  {
+    defaultMessageTokens = DEFAULT_OBSERVATION_MESSAGE_TOKENS,
+    resolveModel,
+  }: {
+    defaultMessageTokens?: number;
+    resolveModel: (modelId: string) => unknown;
+  },
 ): boolean | Record<string, unknown> => {
   // Observational-memory mode is controlled by app settings forwarded per request.
   // We intentionally avoid raw env fallback here to keep behavior user-scoped.
@@ -292,14 +299,25 @@ const resolveObservationalMemoryOption = (
   if (!enabled) return false;
 
   const modelRaw = settingsOverride?.model;
-  const model =
+  const modelId =
     typeof modelRaw === "string" && modelRaw.trim().length > 0
       ? modelRaw.trim()
       : DEFAULT_OBSERVATIONAL_MODEL;
+  // Use the app's provider setup so bare and local model IDs resolve the same
+  // way as the chat model instead of through Mastra's string model router.
+  let model: unknown = modelId;
+  try {
+    model = resolveModel(modelId);
+  } catch (error) {
+    console.warn(
+      `[agent] Could not resolve observational memory model '${modelId}' through provider setup:`,
+      error instanceof Error ? error.message : String(error),
+    );
+  }
   const scope = settingsOverride?.scope === "thread" ? "thread" : DEFAULT_OBSERVATIONAL_SCOPE;
   const messageTokens = asBoundedInteger(
     settingsOverride?.observationMessageTokens,
-    DEFAULT_OBSERVATION_MESSAGE_TOKENS,
+    defaultMessageTokens,
     4_000,
     200_000,
   );
@@ -992,6 +1010,18 @@ export const createCodingAgent = async (
   const observationalMemoryOption = resolveObservationalMemoryOption(
     options.useMastraObservationalMemory,
     options.observationalMemorySettings,
+    {
+      // Consolidate before the effective (provider-capped) input limiter trims context.
+      ...(options.contextWindow !== undefined
+        ? {
+            defaultMessageTokens: Math.max(
+              4_000,
+              Math.min(200_000, Math.floor(modelContextBudget.inputTokens * 0.75)),
+            ),
+          }
+        : {}),
+      resolveModel: getModel,
+    },
   );
   const goalJudgeModelId =
     options.goalJudgeModelId || process.env.IRIS_AGENT_GOAL_JUDGE_MODEL || modelId;

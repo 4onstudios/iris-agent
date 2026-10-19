@@ -1,4 +1,7 @@
-import { buildContextWindowStats } from "../api/helpers/tokenUsage";
+import {
+  buildContextWindowStats,
+  extractLastStepUsage,
+} from "../api/helpers/tokenUsage";
 
 describe("context window stats", () => {
   it("reports remaining context based on provider token usage", () => {
@@ -38,5 +41,16 @@ describe("context window stats", () => {
       inputLimitTokens: 80_000,
       outputLimitTokens: 20_000,
     });
+  });
+
+  it("uses only the final model step for context usage", () => {
+    expect(
+      extractLastStepUsage([
+        { usage: { inputTokens: 60_000, outputTokens: 1_000 } },
+        { usage: { inputTokens: 62_000, outputTokens: 500 } },
+      ]),
+    ).toEqual({ inputTokens: 62_000, outputTokens: 500, totalTokens: 62_500 });
+    expect(extractLastStepUsage([{ text: "no usage" }])).toBeUndefined();
+    expect(extractLastStepUsage(undefined)).toBeUndefined();
   });
 });

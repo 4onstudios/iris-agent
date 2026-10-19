@@ -351,7 +351,7 @@ controls.
 ## CLI Usage
 
 ```sh
-iris-agent [--workspace <path>] [--acp | --chat] [--modelId <model>]
+iris-agent [--workspace <path>] [--acp | --chat] [--modelId <model>] [--observer-model <model>]
 ```
 
 ### Homebrew
@@ -412,6 +412,7 @@ the repository's **Actions** tab. It requires a repository secret named
 - `--chat-ui` - Select `auto` (default, prefers OpenTUI), `opentui` (require the TUI), or `plain` (old readline terminal chat, no FFI)
 - `--modelId` - Model identifier used for chat/ACP sessions (default: `openrouter/openai/gpt-5.3-codex` or `MODEL_ID` / `OPENROUTER_MODEL` env vars)
 - `--context-window` - Override the total context window in tokens; accepts plain counts or `K`/`M` values (for example, `100K`)
+- `--observer-model` - Model used by observational memory to summarize and consolidate conversation history; specifying it enables observational memory. Defaults to the chat model when `--context-window` enables memory without this option.
 
 Running the CLI without `--chat` or `--acp` prints help.
 
@@ -426,6 +427,9 @@ npm run cli -- --workspace . --chat --modelId openrouter/anthropic/claude-3.7-so
 
 # Interactive chat with a 100K-token context window
 npm run cli -- --workspace . --chat --modelId openrouter/openai/gpt-4o --context-window 100K
+
+# Interactive chat with a separate model for observational memory
+npm run cli -- --workspace . --chat --context-window 100K --observer-model openrouter/google/gemini-2.5-flash
 
 # ACP server for IDE integration
 npm run cli -- --workspace . --acp

@@ -78,6 +78,8 @@ import {
   normalizeTokenUsage,
   mergeTokenUsage,
   extractTokenUsageFromChunkPayload,
+  extractLastStepUsage,
+  extractStepFinishUsage,
   logTokenUsageSource,
   buildTokenUsageDebug,
   type TokenUsageSummary,
@@ -3351,6 +3353,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
           const streamedAnonymousToolCallArgs: AnonymousToolCallArgs[] = [];
           const emittedPendingCounts = new Map<string, number>();
           let streamTokenUsage: TokenUsageSummary | undefined;
+          let streamContextUsage: TokenUsageSummary | undefined;
           let streamUsageSeenInChunks = false;
 
           const getPendingKey = (call: PendingToolCall): string => {
@@ -3478,6 +3481,9 @@ _You have discovered the following in earlier interactions. Use this to avoid re
                 streamUsageSeenInChunks = true;
               }
               streamTokenUsage = mergeTokenUsage(streamTokenUsage, chunkUsage);
+              if (chunk.type === "step-finish") {
+                streamContextUsage = extractStepFinishUsage(chunk);
+              }
             }
 
             if (chunk.type === "reasoning-delta") {
@@ -3814,6 +3820,10 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             return;
           }
           const streamSteps = streamStepsOrCancellation;
+          if (Array.isArray(streamSteps) && streamSteps.length > 0) {
+            streamContextUsage =
+              extractLastStepUsage(streamSteps) ?? streamContextUsage;
+          }
           const streamStepsUsed = Array.isArray(streamSteps)
             ? streamSteps.length
             : 0;
@@ -4124,6 +4134,10 @@ _You have discovered the following in earlier interactions. Use this to avoid re
               streamTokenUsage,
               normalizeTokenUsage(synthesisResult.usage),
             );
+            // Synthesis runs with maxSteps: 1, so its run usage is one request.
+            streamContextUsage =
+              extractLastStepUsage(synthesisResult.steps) ??
+              normalizeTokenUsage(synthesisResult.usage);
           }
 
           let streamLifecycleState: RunLifecycleState = "succeeded";
@@ -4224,7 +4238,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             usage: streamTokenUsage,
             contextStats: buildContextWindowStats(
               effectiveModelContextBudget,
-              streamTokenUsage,
+              streamContextUsage,
             ),
             ...(buildTokenUsageDebug({
               mode: "stream",
@@ -4341,6 +4355,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
       });
 
       let usageSummary = normalizeTokenUsage(result.usage);
+      let contextUsage = extractLastStepUsage(result.steps);
       let usageSeenFromFinal = Boolean(usageSummary);
 
       console.log("=== AGENT RESULT ===", {
@@ -4872,6 +4887,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
             usageSummary,
             normalizeTokenUsage(autoFixResult.usage),
           );
+          contextUsage = extractLastStepUsage(autoFixResult.steps);
           if (!usageSeenFromFinal && usageSummary) {
             usageSeenFromFinal = true;
           }
@@ -5158,7 +5174,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
           usage: usageSummary,
           contextStats: buildContextWindowStats(
             effectiveModelContextBudget,
-            usageSummary,
+            contextUsage,
           ),
           ...(nonStreamTokenUsageDebug
             ? { tokenUsageDebug: nonStreamTokenUsageDebug }
@@ -5234,7 +5250,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
           usage: usageSummary,
           contextStats: buildContextWindowStats(
             effectiveModelContextBudget,
-            usageSummary,
+            contextUsage,
           ),
           ...(nonStreamTokenUsageDebug
             ? { tokenUsageDebug: nonStreamTokenUsageDebug }
@@ -5311,6 +5327,10 @@ _You have discovered the following in earlier interactions. Use this to avoid re
           usageSummary,
           normalizeTokenUsage(synthesisResult.usage),
         );
+        // Synthesis runs with maxSteps: 1, so its run usage is one request.
+        contextUsage =
+          extractLastStepUsage(synthesisResult.steps) ??
+          normalizeTokenUsage(synthesisResult.usage);
       }
 
       const maxStepsReached =
@@ -5366,7 +5386,7 @@ _You have discovered the following in earlier interactions. Use this to avoid re
         usage: usageSummary,
         contextStats: buildContextWindowStats(
           effectiveModelContextBudget,
-          usageSummary,
+          contextUsage,
         ),
         ...(nonStreamTokenUsageDebug
           ? { tokenUsageDebug: nonStreamTokenUsageDebug }

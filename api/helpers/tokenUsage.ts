@@ -17,6 +17,11 @@ export type ContextWindowStats = {
   utilizationPercent?: number;
 };
 
+/**
+ * `usage` must describe a single model request (normally the final step).
+ * Run-level usage accumulates repeated prompt tokens across steps and would
+ * overstate context occupancy.
+ */
 export const buildContextWindowStats = (
   budget: ModelContextBudget,
   usage: TokenUsageSummary | undefined,
@@ -90,6 +95,35 @@ export const normalizeTokenUsage = (raw: unknown): TokenUsageSummary | undefined
     ...(outputTokens !== undefined ? { outputTokens } : {}),
     ...(totalTokens !== undefined ? { totalTokens } : {}),
   };
+};
+
+/** Usage of the last model step, or undefined when steps lack usage data. */
+export const extractLastStepUsage = (
+  steps: unknown,
+): TokenUsageSummary | undefined => {
+  if (!Array.isArray(steps) || steps.length === 0) {
+    return undefined;
+  }
+
+  const lastStep: unknown = steps[steps.length - 1];
+  return lastStep && typeof lastStep === "object"
+    ? normalizeTokenUsage((lastStep as Record<string, unknown>).usage)
+    : undefined;
+};
+
+/** Per-step usage carried by a Mastra `step-finish` stream chunk. */
+export const extractStepFinishUsage = (chunk: {
+  type?: string;
+  payload?: Record<string, unknown>;
+}): TokenUsageSummary | undefined => {
+  if (chunk.type !== "step-finish") {
+    return undefined;
+  }
+
+  const output = chunk.payload?.output;
+  return output && typeof output === "object"
+    ? normalizeTokenUsage((output as Record<string, unknown>).usage)
+    : undefined;
 };
 
 export const mergeTokenUsage = (
