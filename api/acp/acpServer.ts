@@ -298,6 +298,7 @@ type AcpSessionState = {
   activeTurn?: ActiveTurn;
   history: PersistedChatMessage[];
   memoryHistoryHydrated?: boolean;
+  transcriptPersistence: Promise<void>;
 };
 
 type PendingToolInvocation = {
@@ -615,6 +616,7 @@ export const createAcpAgentApp = (
         modelId: requestedModel,
         history: [],
         memoryHistoryHydrated: false,
+        transcriptPersistence: Promise.resolve(),
       });
       await notifyAvailableCommands(ctx, sessionId);
       return {
@@ -656,6 +658,7 @@ export const createAcpAgentApp = (
         title: getPersistedSessionTitle(persisted),
         history,
         memoryHistoryHydrated: false,
+        transcriptPersistence: Promise.resolve(),
       };
       sessions.set(sessionId, session);
       if (options.useMastraObservationalMemory && history.length > 0) {
@@ -761,6 +764,10 @@ export const createAcpAgentApp = (
       const previousTurn = session.activeTurn;
       session.activeTurn = activeTurn;
       await cancelActiveTurn(previousTurn);
+      // A prior turn may already have committed its transcript and still be
+      // checkpointing it in observational memory. Wait before deciding whether
+      // this turn can rely on memory instead of replaying bounded history.
+      await session.transcriptPersistence;
       if (
         sessions.get(sessionId) !== session ||
         activeTurn.abortController.signal.aborted
@@ -814,58 +821,65 @@ export const createAcpAgentApp = (
       const boundedPromptText = promptBuild.currentMessage;
       const runtimePrompt = promptBuild.prompt;
       const persistTurn = async (assistantText: string): Promise<boolean> => {
-        // Guard the commit itself: even though nothing is written until now,
-        // the turn may have been cancelled (or superseded by a new prompt)
-        // while we were awaiting the final notification/generation above.
-        // Re-check immediately before mutating session.history so a
-        // cancelled turn can never sneak its messages in at the last moment.
-        if (sessions.get(sessionId) !== session || turnSignal.aborted) {
-          return false;
-        }
-        if (promptText && !session.title) {
-          session.title = promptText.replace(/\s+/g, " ").slice(0, 120);
-        }
-        // Commit the user and assistant messages together, atomically, only
-        // once the turn has actually succeeded. Nothing is added to
-        // session.history before this point, so a cancelled/failed turn
-        // never leaks a partial entry for a concurrent turn to observe.
-        if (promptText) {
-          session.history.push({ role: "user", content: promptText });
-        }
-        if (assistantText) {
-          session.history.push({ role: "assistant", content: assistantText });
-        }
-        await savePersistedChatSession(
-          sessionId,
-          session.history,
-          session,
-          await loadPersistedChatSession(sessionId),
-        );
-        if (memoryScope) {
-          session.memoryHistoryHydrated = false;
-          if (
-            (conversationHistory.length === 0 || useMemoryWithoutTranscriptReplay) &&
-            typeof runtimeAgent.getMemory === "function"
-          ) {
-            try {
-              const memory = await runtimeAgent.getMemory();
-              if (memory) {
-                session.memoryHistoryHydrated =
-                  await updateTranscriptCheckpoint(
-                    memory,
-                    sessionId,
-                    session.history.length,
-                  );
+        const persistence = session.transcriptPersistence.then(async () => {
+          // Guard the commit itself: even though nothing is written until now,
+          // the turn may have been cancelled (or superseded by a new prompt)
+          // while we were awaiting the final notification/generation above.
+          // Re-check immediately before mutating session.history so a
+          // cancelled turn can never sneak its messages in at the last moment.
+          if (sessions.get(sessionId) !== session || turnSignal.aborted) {
+            return false;
+          }
+          if (promptText && !session.title) {
+            session.title = promptText.replace(/\s+/g, " ").slice(0, 120);
+          }
+          // Commit the user and assistant messages together, atomically, only
+          // once the turn has actually succeeded. Nothing is added to
+          // session.history before this point, so a cancelled/failed turn
+          // never leaks a partial entry for a concurrent turn to observe.
+          if (promptText) {
+            session.history.push({ role: "user", content: promptText });
+          }
+          if (assistantText) {
+            session.history.push({ role: "assistant", content: assistantText });
+          }
+          await savePersistedChatSession(
+            sessionId,
+            session.history,
+            session,
+            await loadPersistedChatSession(sessionId),
+          );
+          if (memoryScope) {
+            session.memoryHistoryHydrated = false;
+            if (
+              (conversationHistory.length === 0 || useMemoryWithoutTranscriptReplay) &&
+              typeof runtimeAgent.getMemory === "function"
+            ) {
+              try {
+                const memory = await runtimeAgent.getMemory();
+                if (memory) {
+                  session.memoryHistoryHydrated =
+                    await updateTranscriptCheckpoint(
+                      memory,
+                      sessionId,
+                      session.history.length,
+                    );
+                }
+              } catch (error) {
+                console.warn(
+                  `[acp] Could not checkpoint restored transcript for session '${sessionId}':`,
+                  error instanceof Error ? error.message : String(error),
+                );
               }
-            } catch (error) {
-              console.warn(
-                `[acp] Could not checkpoint restored transcript for session '${sessionId}':`,
-                error instanceof Error ? error.message : String(error),
-              );
             }
           }
-        }
-        return true;
+          return true;
+        });
+        session.transcriptPersistence = persistence.then(
+          () => undefined,
+          () => undefined,
+        );
+        return persistence;
       };
       const turnSignal = activeTurn.abortController.signal;
       if (sessions.get(sessionId) !== session || turnSignal.aborted) {

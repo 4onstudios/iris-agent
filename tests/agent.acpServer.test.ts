@@ -146,6 +146,97 @@ describe("ACP server", () => {
             );
     });
 
+    it("waits for an observational-memory checkpoint before starting a replacement prompt", async () => {
+        let releaseCheckpoint!: () => void;
+        let markCheckpointStarted!: () => void;
+        const checkpointGate = new Promise<void>((resolve) => {
+            releaseCheckpoint = resolve;
+        });
+        const checkpointStarted = new Promise<void>((resolve) => {
+            markCheckpointStarted = resolve;
+        });
+        let checkpointCount = 0;
+        const memoryThread = {
+            metadata: {} as Record<string, unknown>,
+        };
+        const memory = {
+            getThreadById: jest.fn(async ({ threadId }: { threadId: string }) => ({
+                resourceId: `acp-session:${threadId}`,
+                metadata: memoryThread.metadata,
+            })),
+            recall: jest.fn(async () => ({ messages: [] })),
+            createThread: jest.fn(async () => ({})),
+            saveMessages: jest.fn(async () => ({})),
+            updateThread: jest.fn(async ({ metadata }: {
+                metadata: Record<string, unknown>;
+            }) => {
+                checkpointCount += 1;
+                if (checkpointCount === 1) {
+                    markCheckpointStarted();
+                    await checkpointGate;
+                }
+                memoryThread.metadata = metadata;
+                return memoryThread;
+            }),
+        };
+        const runtime: AcpRuntimeAgent = {
+            getMemory: async () => memory,
+            stream: jest.fn(async () => ({
+                fullStream: createChunkStream([
+                    { type: "text-delta", payload: { text: "Done" } },
+                ]),
+                text: Promise.resolve("Done"),
+            })),
+        };
+        const stream = runtime.stream as jest.MockedFunction<
+            NonNullable<AcpRuntimeAgent["stream"]>
+        >;
+
+        await acp
+            .client({ name: "iris-agent-test-client" })
+            .connectWith(
+                createAcpAgentApp(runtime, undefined, "local/custom-model", {
+                    useMastraObservationalMemory: true,
+                }),
+                async (ctx) => {
+                    const session = await ctx.request(acp.methods.agent.session.new, {
+                        cwd: "/workspace",
+                        mcpServers: [],
+                    });
+                    const firstPrompt = ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId: session.sessionId,
+                        prompt: [{ type: "text", text: "First prompt" }],
+                    });
+                    await checkpointStarted;
+
+                    const replacementPrompt = ctx.request(
+                        acp.methods.agent.session.prompt,
+                        {
+                            sessionId: session.sessionId,
+                            prompt: [{ type: "text", text: "Replacement prompt" }],
+                        },
+                    );
+                    await new Promise((resolve) => setTimeout(resolve, 0));
+                    expect(stream).toHaveBeenCalledTimes(1);
+
+                    releaseCheckpoint();
+                    await firstPrompt;
+                    await replacementPrompt;
+                    expect(stream).toHaveBeenCalledTimes(2);
+                    expect(stream.mock.calls[1]?.[0]).toBe("Replacement prompt");
+                    expect(stream.mock.calls[1]?.[1]).toMatchObject({
+                        memory: {
+                            thread: session.sessionId,
+                            resource: `acp-session:${session.sessionId}`,
+                        },
+                    });
+                    expect(memoryThread.metadata).toMatchObject({
+                        irisAgentAcpTranscriptMessageCount: 4,
+                    });
+                },
+            );
+    });
+
     it("hydrates a restored transcript before relying on ACP observational memory", async () => {
         const sessionId = `acp-memory-${randomUUID()}`;
         const sessionPath = persistedSessionPath(sessionId);

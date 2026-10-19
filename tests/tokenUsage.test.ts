@@ -43,6 +43,23 @@ describe("context window stats", () => {
     });
   });
 
+  it("bases remaining context on the provider-capped window", () => {
+    expect(
+      buildContextWindowStats(
+        {
+          contextWindowTokens: 4_096,
+          inputTokens: 3_277,
+          maxOutputTokens: 819,
+        },
+        { inputTokens: 2_500, outputTokens: 500, totalTokens: 3_000 },
+      ),
+    ).toMatchObject({
+      contextWindowTokens: 4_096,
+      usedTokens: 3_000,
+      remainingTokens: 1_096,
+    });
+  });
+
   it("uses only the final model step for context usage", () => {
     expect(
       extractLastStepUsage([

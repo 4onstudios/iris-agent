@@ -302,8 +302,12 @@ export const resolveModelContextBudget = async (
       providerBudget?.maxOutputTokens ?? requestedOutputTokens,
     );
     const requestedInputTokens = contextWindowTokens - outputTokens;
-    return {
+    const effectiveContextWindowTokens = Math.min(
       contextWindowTokens,
+      providerBudget?.contextWindowTokens ?? contextWindowTokens,
+    );
+    return {
+      contextWindowTokens: effectiveContextWindowTokens,
       inputTokens: Math.min(
         requestedInputTokens,
         providerBudget?.inputTokens ??

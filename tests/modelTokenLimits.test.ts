@@ -113,6 +113,30 @@ describe("model input limits", () => {
     });
   });
 
+  it("caps the reported context window when an override exceeds provider capacity", async () => {
+    jest.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: {
+          context_length: 4_096,
+          top_provider: { context_length: 4_096, max_completion_tokens: 2_048 },
+        },
+      }),
+    } as Response);
+
+    await expect(
+      resolveModelContextBudget(
+        "openrouter/example/4k-model-with-override",
+        { OPENROUTER_API_KEY: "test-key" },
+        100_000,
+      ),
+    ).resolves.toEqual({
+      contextWindowTokens: 4_096,
+      inputTokens: 3_277,
+      maxOutputTokens: 819,
+    });
+  });
+
   it("preserves known catalog input caps when provider metadata is unavailable", async () => {
     expect(await resolveModelContextBudget(
       "gpt-5.3-codex",
