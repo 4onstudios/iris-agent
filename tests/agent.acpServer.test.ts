@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import * as acp from "@agentclientprotocol/sdk";
+import type { MastraDBMessage } from "@mastra/core/agent/message-list";
 import {
     createAcpAgentApp,
     type AcpRuntimeAgent,
@@ -521,7 +522,121 @@ describe("ACP server", () => {
         }
     });
 
-    it("does not duplicate restored transcript messages when checkpointing fails", async () => {
+    it("retains observational memory when reloading a checkpointed truncated prompt", async () => {
+        let sessionId = "";
+        let sessionPath = "";
+        let resourceId = "";
+        const originalPrompt = `Original request: ${"x".repeat(20_000)}`;
+        const storedMessages: MastraDBMessage[] = [];
+        const memoryThread = {
+            resourceId,
+            metadata: {} as Record<string, unknown>,
+        };
+        const memory = {
+            getThreadById: jest.fn(async () => memoryThread),
+            recall: jest.fn(async () => ({ messages: storedMessages.slice() })),
+            createThread: jest.fn(async () => memoryThread),
+            saveMessages: jest.fn(async ({ messages }: { messages: MastraDBMessage[] }) => {
+                storedMessages.push(...messages);
+                return { messages };
+            }),
+            updateThread: jest.fn(async ({ metadata }: { metadata: Record<string, unknown> }) => {
+                memoryThread.metadata = metadata;
+                return memoryThread;
+            }),
+        };
+        const runtime: AcpRuntimeAgent = {
+            getMemory: async () => memory,
+            stream: jest.fn(async (input: string) => {
+                storedMessages.push(...[
+                    { role: "user" as const, text: input },
+                    { role: "assistant" as const, text: "Done" },
+                ].map(({ role, text }): MastraDBMessage => ({
+                    id: randomUUID(),
+                    role,
+                    createdAt: new Date(),
+                    threadId: sessionId,
+                    resourceId,
+                    content: {
+                        format: 2,
+                        parts: [{ type: "text", text }],
+                        content: text,
+                    },
+                })));
+                return {
+                    fullStream: createChunkStream([
+                        { type: "text-delta", payload: { text: "Done" } },
+                    ]),
+                    text: Promise.resolve("Done"),
+                };
+            }),
+        };
+        const stream = runtime.stream as jest.MockedFunction<
+            NonNullable<AcpRuntimeAgent["stream"]>
+        >;
+        const createApp = () => createAcpAgentApp(runtime, undefined, "local/custom-model", {
+            contextWindowTokens: 8_192,
+            useMastraObservationalMemory: true,
+        });
+
+        try {
+            await acp.client({ name: "iris-agent-test-client" }).connectWith(
+                createApp(),
+                async (ctx) => {
+                    const session = await ctx.request(acp.methods.agent.session.new, {
+                        cwd: "/workspace",
+                        mcpServers: [],
+                    });
+                    sessionId = session.sessionId;
+                    sessionPath = persistedSessionPath(sessionId);
+                    resourceId = `acp-session:${sessionId}`;
+                    memoryThread.resourceId = resourceId;
+                    await ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId,
+                        prompt: [{ type: "text", text: originalPrompt }],
+                    });
+                },
+            );
+            expect(stream.mock.calls[0]?.[0]).toContain("[truncated: prompt budget exceeded]");
+            expect(stream.mock.calls[0]?.[0].length).toBeLessThan(originalPrompt.length);
+            expect(JSON.parse(await fs.readFile(sessionPath, "utf8")).messages).toEqual([
+                { role: "user", content: originalPrompt },
+                { role: "assistant", content: "Done" },
+            ]);
+            expect(memoryThread.metadata).toMatchObject({
+                irisAgentAcpTranscriptMessageCount: 2,
+            });
+
+            await acp.client({ name: "iris-agent-test-client" }).connectWith(
+                createApp(),
+                async (ctx) => {
+                    await ctx.request(acp.methods.agent.session.load, {
+                        sessionId,
+                        cwd: "/workspace",
+                        mcpServers: [],
+                    });
+                    await ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId,
+                        prompt: [{ type: "text", text: "Use the existing observations" }],
+                    });
+                },
+            );
+
+            expect(stream.mock.calls[1]?.[0]).toBe("Use the existing observations");
+            expect(stream.mock.calls[1]?.[1]).toMatchObject({
+                memory: { thread: sessionId, resource: resourceId },
+            });
+            expect(memory.saveMessages).not.toHaveBeenCalled();
+            expect(storedMessages).toHaveLength(4);
+            expect(memoryThread.metadata).toMatchObject({
+                irisAgentAcpTranscriptMessageCount: 4,
+            });
+        } finally {
+            if (sessionPath) await fs.rm(sessionPath, { force: true });
+        }
+    });
+
+    it.each([false, true])("does not duplicate restored transcript messages when checkpointing fails (truncated prefix: %s)", async (truncatedPrefix) => {
         const sessionId = `acp-checkpoint-retry-${randomUUID()}`;
         const sessionPath = persistedSessionPath(sessionId);
         const resourceId = `acp-session:${sessionId}`;
@@ -544,7 +659,13 @@ describe("ACP server", () => {
             resourceId,
             metadata: { irisAgentAcpTranscriptMessageCount: 2 } as Record<string, unknown>,
         };
-        const storedMessages = history.slice(0, 2);
+        const checkpointedPrefix = history.slice(0, 2).map((message) => ({
+            ...message,
+            content: truncatedPrefix && message.role === "user"
+                ? "Question 1 [truncated: prompt budget exceeded]"
+                : message.content,
+        }));
+        const storedMessages = checkpointedPrefix.slice();
         const saveMessages = jest.fn(async ({ messages }: {
             messages: Array<{ role: string; content: { content?: string } }>;
         }) => {
@@ -620,7 +741,7 @@ describe("ACP server", () => {
 
             expect(memory.recall).toHaveBeenCalledTimes(2);
             expect(saveMessages).toHaveBeenCalledTimes(1);
-            expect(storedMessages).toEqual(history);
+            expect(storedMessages).toEqual([...checkpointedPrefix, ...history.slice(2)]);
             expect(memoryThread.metadata).toMatchObject({
                 irisAgentAcpTranscriptMessageCount: history.length,
             });

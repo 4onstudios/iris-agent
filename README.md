@@ -348,6 +348,10 @@ and restore persisted conversations for the current workspace. It also returns
 the per-session model configuration option required by the extension's composer
 controls.
 
+With observational memory enabled, reloading trusts the checkpointed transcript
+prefix even when runtime prompts were truncated. Only the uncheckpointed tail
+is reconciled, avoiding duplicate imports when checkpoint updates are retried.
+
 ## CLI Usage
 
 ```sh

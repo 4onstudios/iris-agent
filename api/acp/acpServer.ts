@@ -496,12 +496,14 @@ const hydrateAcpMemoryHistory = async (
         role: "user" | "assistant";
       } => message.role === "user" || message.role === "assistant",
     );
+    // Checkpointed turns may store bounded runtime prompts rather than the
+    // original transcript text. Only reconcile messages beyond that prefix.
     if (
       transcriptMessages.length > history.length ||
-      transcriptMessages.some(
+      transcriptMessages.slice(existingMessageCount).some(
         (message, index) =>
-          history[index] === undefined ||
-          !transcriptMessageMatches(message, history[index]),
+          history[existingMessageCount + index] === undefined ||
+          !transcriptMessageMatches(message, history[existingMessageCount + index]),
       )
     ) {
       return false;
