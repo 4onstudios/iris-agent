@@ -34,6 +34,8 @@ const MAX_CONCURRENT_SESSION_LOADS = 16;
 
 const CHAT_SESSIONS_DIR = path.join(os.homedir(), ".iris", "chat-sessions");
 const ACP_TRANSCRIPT_CHECKPOINT = "irisAgentAcpTranscriptMessageCount";
+const ACP_MEMORY_CHECKPOINT_MESSAGE_COUNT = "irisAgentAcpMemoryCheckpointMessageCount";
+const ACP_MEMORY_INVALIDATED = "irisAgentAcpMemoryInvalidated";
 
 type PersistedChatMessage = {
   role: "user" | "assistant";
@@ -288,6 +290,7 @@ export type AcpAgentAppOptions = {
 
 type ActiveTurn = {
   abortController: AbortController;
+  completion?: Promise<void>;
   cancelStream?: () => Promise<void>;
 };
 
@@ -298,6 +301,7 @@ type AcpSessionState = {
   activeTurn?: ActiveTurn;
   history: PersistedChatMessage[];
   memoryHistoryHydrated?: boolean;
+  memoryHistoryInvalidated?: boolean;
   transcriptPersistence: Promise<void>;
 };
 
@@ -409,6 +413,12 @@ const updateTranscriptCheckpoint = async (
   sessionId: string,
   messageCount: number,
 ): Promise<boolean> => {
+  const checkpointMemoryMessageCount = (await memory.recall({
+    threadId: sessionId,
+    resourceId: `acp-session:${sessionId}`,
+    page: 0,
+    perPage: false,
+  })).messages.length;
   const thread = await memory.getThreadById({ threadId: sessionId });
   if (!thread) return false;
   await memory.updateThread({
@@ -416,9 +426,36 @@ const updateTranscriptCheckpoint = async (
     metadata: {
       ...thread.metadata,
       [ACP_TRANSCRIPT_CHECKPOINT]: messageCount,
+      [ACP_MEMORY_CHECKPOINT_MESSAGE_COUNT]: checkpointMemoryMessageCount,
+      [ACP_MEMORY_INVALIDATED]: false,
     },
   });
   return true;
+};
+
+const invalidateAcpMemoryHistory = async (
+  memory: AcpMemoryAdapter,
+  sessionId: string,
+  resourceId: string,
+): Promise<void> => {
+  let thread = await memory.getThreadById({ threadId: sessionId });
+  if (thread && thread.resourceId !== resourceId) {
+    throw new Error(`ACP memory thread '${sessionId}' belongs to a different resource`);
+  }
+  if (!thread) {
+    await memory.createThread({ threadId: sessionId, resourceId });
+    thread = await memory.getThreadById({ threadId: sessionId });
+  }
+  if (!thread) {
+    throw new Error(`Could not invalidate missing ACP memory thread '${sessionId}'`);
+  }
+  await memory.updateThread({
+    id: sessionId,
+    metadata: {
+      ...thread.metadata,
+      [ACP_MEMORY_INVALIDATED]: true,
+    },
+  });
 };
 
 const waitForPersistenceOrAbort = (
@@ -480,6 +517,7 @@ const hydrateAcpMemoryHistory = async (
     if (existingThread.resourceId !== resourceId) {
       throw new Error(`ACP memory thread '${sessionId}' belongs to a different resource`);
     }
+    if (existingThread.metadata?.[ACP_MEMORY_INVALIDATED] === true) return false;
     const checkpoint = existingThread.metadata?.[ACP_TRANSCRIPT_CHECKPOINT];
     if (typeof checkpoint === "number" && Number.isSafeInteger(checkpoint)) {
       if (checkpoint < 0 || checkpoint > history.length) return false;
@@ -491,16 +529,33 @@ const hydrateAcpMemoryHistory = async (
       page: 0,
       perPage: false,
     });
-    const transcriptMessages = existingMessages.messages.filter(
-      (message): message is MastraDBMessage & {
-        role: "user" | "assistant";
-      } => message.role === "user" || message.role === "assistant",
-    );
-    // Checkpointed turns may store bounded runtime prompts rather than the
-    // original transcript text. Only reconcile messages beyond that prefix.
+    const memoryCheckpoint = existingThread.metadata?.[
+      ACP_MEMORY_CHECKPOINT_MESSAGE_COUNT
+    ];
+    const memoryMessageBoundary =
+      typeof memoryCheckpoint === "number" && Number.isSafeInteger(memoryCheckpoint)
+        ? memoryCheckpoint
+        : existingMessageCount === history.length
+          ? existingMessages.messages.length
+          : Math.min(existingMessageCount, existingMessages.messages.length);
     if (
-      transcriptMessages.length > history.length ||
-      transcriptMessages.slice(existingMessageCount).some(
+      memoryMessageBoundary < 0 ||
+      memoryMessageBoundary > existingMessages.messages.length
+    ) {
+      return false;
+    }
+    const uncheckpointedTranscriptMessages = existingMessages.messages
+      .slice(memoryMessageBoundary)
+      .filter(
+        (message): message is MastraDBMessage & {
+          role: "user" | "assistant";
+        } => message.role === "user" || message.role === "assistant",
+      );
+    // ACP transcript checkpoints count user/assistant transcript entries, while
+    // the memory boundary counts every runtime entry (including tool-only turns).
+    if (
+      uncheckpointedTranscriptMessages.length > history.length - existingMessageCount ||
+      uncheckpointedTranscriptMessages.some(
         (message, index) =>
           history[existingMessageCount + index] === undefined ||
           !transcriptMessageMatches(message, history[existingMessageCount + index]),
@@ -508,7 +563,7 @@ const hydrateAcpMemoryHistory = async (
     ) {
       return false;
     }
-    existingMessageCount = Math.max(existingMessageCount, transcriptMessages.length);
+    existingMessageCount += uncheckpointedTranscriptMessages.length;
   } else {
     await memory.createThread({
       threadId: sessionId,
@@ -794,10 +849,19 @@ export const createAcpAgentApp = (
         throw new Error(`Unknown ACP session '${sessionId}'`);
       }
 
-      const activeTurn: ActiveTurn = { abortController: new AbortController() };
       const previousTurn = session.activeTurn;
+      const activeTurn: ActiveTurn = {
+        abortController: new AbortController(),
+      };
       session.activeTurn = activeTurn;
       await cancelActiveTurn(previousTurn);
+      const previousTurnCompleted = await waitForPersistenceOrAbort(
+        previousTurn?.completion ?? Promise.resolve(),
+        activeTurn.abortController.signal,
+      );
+      if (!previousTurnCompleted) {
+        return { stopReason: "cancelled" as const };
+      }
       // A prior turn may already have committed its transcript and still be
       // checkpointing it in observational memory. Wait before deciding whether
       // this turn can rely on memory instead of replaying bounded history.
@@ -843,6 +907,7 @@ export const createAcpAgentApp = (
         runtimeSupportsScopedMemory && session.memoryHistoryHydrated === true;
       const memoryScope =
         runtimeSupportsScopedMemory &&
+          session.memoryHistoryInvalidated !== true &&
           (useMemoryWithoutTranscriptReplay || conversationHistory.length === 0)
           ? { thread: sessionId, resource: `acp-session:${sessionId}` }
           : undefined;
@@ -858,6 +923,7 @@ export const createAcpAgentApp = (
       const compactedConversationHistory = promptBuild.budgetedConversationHistory;
       const boundedPromptText = promptBuild.currentMessage;
       const runtimePrompt = promptBuild.prompt;
+      let turnCommitted = false;
       const persistTurn = async (assistantText: string): Promise<boolean> => {
         const persistence = session.transcriptPersistence.then(async () => {
           // Guard the commit itself: even though nothing is written until now,
@@ -911,6 +977,7 @@ export const createAcpAgentApp = (
               }
             }
           }
+          turnCommitted = true;
           return true;
         });
         session.transcriptPersistence = persistence.then(
@@ -923,6 +990,10 @@ export const createAcpAgentApp = (
       if (sessions.get(sessionId) !== session || turnSignal.aborted) {
         return { stopReason: "cancelled" as const };
       }
+      let completeTurn!: () => void;
+      activeTurn.completion = new Promise<void>((resolve) => {
+        completeTurn = resolve;
+      });
       const abortedMarker = Symbol("aborted");
       const raceWithAbort = async <T>(
         startWork: () => Promise<T>,
@@ -1554,9 +1625,36 @@ export const createAcpAgentApp = (
         }
         throw error;
       } finally {
+        if (memoryScope && !turnCommitted) {
+          session.memoryHistoryHydrated = false;
+          session.memoryHistoryInvalidated = true;
+          const invalidation = session.transcriptPersistence.then(async () => {
+            const memory = await runtimeAgent.getMemory?.();
+            if (memory) {
+              await invalidateAcpMemoryHistory(
+                memory,
+                sessionId,
+                `acp-session:${sessionId}`,
+              );
+            }
+          });
+          session.transcriptPersistence = invalidation.then(
+            () => undefined,
+            () => undefined,
+          );
+          try {
+            await invalidation;
+          } catch (error) {
+            console.warn(
+              `[acp] Could not invalidate observational memory after an unsuccessful turn for session '${sessionId}':`,
+              error instanceof Error ? error.message : String(error),
+            );
+          }
+        }
         if (session.activeTurn === activeTurn) {
           session.activeTurn = undefined;
         }
+        completeTurn();
       }
     })
     .onRequest(acp.methods.agent.session.close, async (ctx) => {

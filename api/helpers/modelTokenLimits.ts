@@ -320,10 +320,12 @@ export const resolveModelContextBudget = async (
       contextWindowTokens,
       providerBudget?.contextWindowTokens ?? contextWindowTokens,
     );
+    const envInputTokenLimit = getEnvTokenLimitOverride(env);
     return {
       contextWindowTokens: effectiveContextWindowTokens,
       inputTokens: Math.min(
         requestedInputTokens,
+        envInputTokenLimit ?? requestedInputTokens,
         providerBudget?.inputTokens ??
           getKnownModelInputTokenLimit(modelId, env) ??
           requestedInputTokens,

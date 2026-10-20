@@ -126,6 +126,36 @@ describe("model input limits", () => {
     });
   });
 
+  it("applies the configured input-token cap even when provider metadata is available", async () => {
+    jest.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: {
+          context_length: 128_000,
+          top_provider: {
+            context_length: 128_000,
+            max_completion_tokens: 32_000,
+          },
+        },
+      }),
+    } as Response);
+
+    await expect(
+      resolveModelContextBudget(
+        "openrouter/example/model-with-explicit-input-cap",
+        {
+          OPENROUTER_API_KEY: "test-key",
+          IRIS_AGENT_INPUT_TOKEN_LIMIT: "6000",
+        },
+        100_000,
+      ),
+    ).resolves.toEqual({
+      contextWindowTokens: 100_000,
+      inputTokens: 6_000,
+      maxOutputTokens: 20_000,
+    });
+  });
+
   it("caps the reported context window when an override exceeds provider capacity", async () => {
     jest.spyOn(globalThis, "fetch").mockResolvedValue({
       ok: true,

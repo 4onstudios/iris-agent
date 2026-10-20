@@ -442,6 +442,222 @@ describe("ACP server", () => {
         }
     });
 
+    it("uses the memory boundary for checkpointed tool-only turns", async () => {
+        const sessionId = `acp-tool-only-${randomUUID()}`;
+        const sessionPath = persistedSessionPath(sessionId);
+        const resourceId = `acp-session:${sessionId}`;
+        await fs.mkdir(path.dirname(sessionPath), { recursive: true });
+        await fs.writeFile(
+            sessionPath,
+            JSON.stringify({
+                id: sessionId,
+                cwd: "/workspace",
+                messages: [{ role: "user", content: "Run the requested tool" }],
+            }),
+        );
+        const memoryThread = {
+            resourceId,
+            metadata: {
+                irisAgentAcpTranscriptMessageCount: 1,
+                irisAgentAcpMemoryCheckpointMessageCount: 3,
+            } as Record<string, unknown>,
+        };
+        const storedMessages: MastraDBMessage[] = [
+            "Run the requested tool",
+            "Calling tool: inspect",
+            "Tool result: complete",
+        ].map((text, index) => ({
+            id: `tool-only-${index}`,
+            role: index === 0 ? "user" : "assistant",
+            createdAt: new Date(),
+            threadId: sessionId,
+            resourceId,
+            content: {
+                format: 2,
+                parts: [{ type: "text", text }],
+                content: text,
+            },
+        }));
+        const memory = {
+            getThreadById: jest.fn(async () => memoryThread),
+            recall: jest.fn(async () => ({ messages: storedMessages })),
+            createThread: jest.fn(async () => memoryThread),
+            saveMessages: jest.fn(async ({ messages }: { messages: MastraDBMessage[] }) => {
+                storedMessages.push(...messages);
+                return { messages };
+            }),
+            updateThread: jest.fn(async ({ metadata }: { metadata: Record<string, unknown> }) => {
+                memoryThread.metadata = metadata;
+                return memoryThread;
+            }),
+        };
+        const runtime: AcpRuntimeAgent = {
+            getMemory: async () => memory,
+            stream: jest.fn(async () => ({
+                fullStream: createChunkStream([
+                    { type: "text-delta", payload: { text: "Done" } },
+                ]),
+                text: Promise.resolve("Done"),
+            })),
+        };
+        const stream = runtime.stream as jest.MockedFunction<
+            NonNullable<AcpRuntimeAgent["stream"]>
+        >;
+
+        try {
+            await acp.client({ name: "iris-agent-test-client" }).connectWith(
+                createAcpAgentApp(runtime, undefined, "local/custom-model", {
+                    useMastraObservationalMemory: true,
+                }),
+                async (ctx) => {
+                    await ctx.request(acp.methods.agent.session.load, {
+                        sessionId,
+                        cwd: "/workspace",
+                        mcpServers: [],
+                    });
+                    await ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId,
+                        prompt: [{ type: "text", text: "Continue after the tool" }],
+                    });
+                },
+            );
+
+            expect(stream.mock.calls[0]?.[0]).toBe("Continue after the tool");
+            expect(stream.mock.calls[0]?.[1]).toMatchObject({
+                memory: { thread: sessionId, resource: resourceId },
+            });
+            expect(memory.saveMessages).not.toHaveBeenCalled();
+        } finally {
+            await fs.unlink(sessionPath);
+        }
+    });
+
+    it("invalidates scoped memory after an unsuccessful turn", async () => {
+        let sessionId = "";
+        let resourceId = "";
+        const storedMessages: MastraDBMessage[] = [];
+        const memoryThread = {
+            resourceId: "",
+            metadata: {} as Record<string, unknown>,
+        };
+        const memory = {
+            getThreadById: jest.fn(async () => memoryThread),
+            recall: jest.fn(async () => ({ messages: storedMessages.slice() })),
+            createThread: jest.fn(async () => memoryThread),
+            saveMessages: jest.fn(async ({ messages }: { messages: MastraDBMessage[] }) => {
+                storedMessages.push(...messages);
+                return { messages };
+            }),
+            updateThread: jest.fn(async ({ metadata }: { metadata: Record<string, unknown> }) => {
+                memoryThread.metadata = metadata;
+                return memoryThread;
+            }),
+        };
+        const appendMemoryMessage = (role: "user" | "assistant", content: string) => {
+            storedMessages.push({
+                id: randomUUID(),
+                role,
+                createdAt: new Date(),
+                threadId: sessionId,
+                resourceId,
+                content: {
+                    format: 2,
+                    parts: [{ type: "text", text: content }],
+                    content,
+                },
+            });
+        };
+        let callCount = 0;
+        const runtime: AcpRuntimeAgent = {
+            getMemory: async () => memory,
+            stream: jest.fn(async () => {
+                callCount += 1;
+                if (callCount === 2) {
+                    appendMemoryMessage("user", "Uncommitted request");
+                    appendMemoryMessage("assistant", "Partial failed response");
+                    throw new Error("Generation failed");
+                }
+                return {
+                    fullStream: createChunkStream([
+                        { type: "text-delta", payload: { text: "Committed answer" } },
+                    ]),
+                    text: Promise.resolve("Committed answer"),
+                };
+            }),
+        };
+        const stream = runtime.stream as jest.MockedFunction<
+            NonNullable<AcpRuntimeAgent["stream"]>
+        >;
+
+        try {
+            await acp.client({ name: "iris-agent-test-client" }).connectWith(
+                createAcpAgentApp(runtime, undefined, "local/custom-model", {
+                    useMastraObservationalMemory: true,
+                }),
+                async (ctx) => {
+                    const session = await ctx.request(acp.methods.agent.session.new, {
+                        cwd: "/workspace",
+                        mcpServers: [],
+                    });
+                    sessionId = session.sessionId;
+                    resourceId = `acp-session:${sessionId}`;
+                    memoryThread.resourceId = resourceId;
+                    await ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId,
+                        prompt: [{ type: "text", text: "Committed request" }],
+                    });
+                    await expect(
+                        ctx.request(acp.methods.agent.session.prompt, {
+                            sessionId,
+                            prompt: [{ type: "text", text: "Uncommitted request" }],
+                        }),
+                    ).rejects.toThrow("Internal error");
+                    await ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId,
+                        prompt: [{ type: "text", text: "Continue without stale memory" }],
+                    });
+                },
+            );
+
+            expect(memoryThread.metadata).toMatchObject({
+                irisAgentAcpMemoryInvalidated: true,
+            });
+            expect(stream.mock.calls[1]?.[1]).toMatchObject({
+                memory: { thread: sessionId, resource: resourceId },
+            });
+            expect(stream.mock.calls[2]?.[0]).toContain("Committed request");
+            expect(stream.mock.calls[2]?.[0]).toContain("Continue without stale memory");
+            expect(stream.mock.calls[2]?.[0]).not.toContain("Uncommitted request");
+            expect(stream.mock.calls[2]?.[1]).not.toHaveProperty("memory");
+
+            await acp.client({ name: "iris-agent-test-client" }).connectWith(
+                createAcpAgentApp(runtime, undefined, "local/custom-model", {
+                    useMastraObservationalMemory: true,
+                }),
+                async (ctx) => {
+                    await ctx.request(acp.methods.agent.session.load, {
+                        sessionId,
+                        cwd: "/workspace",
+                        mcpServers: [],
+                    });
+                    await ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId,
+                        prompt: [{ type: "text", text: "Continue after reload" }],
+                    });
+                },
+            );
+
+            expect(stream.mock.calls[3]?.[0]).toContain("Committed request");
+            expect(stream.mock.calls[3]?.[0]).toContain("Continue without stale memory");
+            expect(stream.mock.calls[3]?.[0]).not.toContain("Uncommitted request");
+            expect(stream.mock.calls[3]?.[1]).not.toHaveProperty("memory");
+        } finally {
+            if (sessionId) {
+                await fs.rm(persistedSessionPath(sessionId), { force: true });
+            }
+        }
+    });
+
     it("uses transcript checkpoints to hydrate turns added while memory was disabled", async () => {
         const sessionId = `acp-checkpoint-${randomUUID()}`;
         const sessionPath = persistedSessionPath(sessionId);
@@ -739,7 +955,7 @@ describe("ACP server", () => {
                     },
                 );
 
-            expect(memory.recall).toHaveBeenCalledTimes(2);
+            expect(memory.recall).toHaveBeenCalledTimes(4);
             expect(saveMessages).toHaveBeenCalledTimes(1);
             expect(storedMessages).toEqual([...checkpointedPrefix, ...history.slice(2)]);
             expect(memoryThread.metadata).toMatchObject({

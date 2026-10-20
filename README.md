@@ -350,7 +350,10 @@ controls.
 
 With observational memory enabled, reloading trusts the checkpointed transcript
 prefix even when runtime prompts were truncated. Only the uncheckpointed tail
-is reconciled, avoiding duplicate imports when checkpoint updates are retried.
+is reconciled using a separate memory-entry boundary, avoiding duplicate imports
+when checkpoint updates are retried or a turn contains tool-only memory entries.
+Memory from a failed or cancelled scoped turn is invalidated; subsequent prompts
+fall back to the committed transcript rather than reusing partial observations.
 
 ## CLI Usage
 
@@ -493,7 +496,7 @@ Provider-specific configuration:
 | `IRIS_AGENT_AUTO_LINT` / `IRIS_AGENT_AUTO_TEST` | Enable automatic lint/test validation. |
 | `IRIS_AGENT_LINT_CMD` / `IRIS_AGENT_TEST_CMD` | Override validation commands. |
 | `IRIS_AGENT_AUTO_FIX_VALIDATION` | Enable automatic validation fixes. |
-| `IRIS_AGENT_INPUT_TOKEN_LIMIT` / `IRIS_AGENT_MAX_OUTPUT_TOKENS` | Token-budget controls. The input limit overrides discovered model limits; configure it carefully to avoid provider context errors. |
+| `IRIS_AGENT_INPUT_TOKEN_LIMIT` / `IRIS_AGENT_MAX_OUTPUT_TOKENS` | Token-budget controls. The input limit caps discovered provider limits, including when `--context-window` is set; configure it carefully to avoid provider context errors. |
 | `IRIS_AGENT_PROMPT_TOKEN_BUDGET_RATIO` | Prompt budget ratio. |
 | `IRIS_AGENT_MODEL_RETRY_ATTEMPTS` | Model request retry count. |
 | `IRIS_AGENT_REFLECTION_MAX` / `IRIS_AGENT_REFLECTION_MAX_STEPS` | Reflection-loop limits. |
