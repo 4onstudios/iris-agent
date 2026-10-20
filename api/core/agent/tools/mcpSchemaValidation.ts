@@ -2,7 +2,11 @@ import Ajv, { type ValidateFunction } from "ajv";
 import Ajv2019 from "ajv/dist/2019.js";
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
-import type { jsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/types.js";
+import type {
+  JsonSchemaType,
+  JsonSchemaValidator,
+  jsonSchemaValidator,
+} from "@modelcontextprotocol/sdk/validation/types.js";
 
 const options = { allErrors: true, strict: false, addUsedSchema: false };
 const validators = {
@@ -25,7 +29,7 @@ export const compileMcpSchema = <T = unknown>(
 };
 
 export const mcpJsonSchemaValidator: jsonSchemaValidator = {
-  getValidator<T>(schema) {
+  getValidator<T>(schema: JsonSchemaType): JsonSchemaValidator<T> {
     const validate = compileMcpSchema<T>(schema);
     return (input) =>
       validate(input)
