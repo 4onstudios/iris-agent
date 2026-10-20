@@ -534,6 +534,11 @@ payloads. Use `POST /api/agent/mcp/inspect` to discover tools before calling
 [Desktop authentication](#desktop-authentication)). MCP tool names are
 generated as `mcp_<server name>_<tool name>` and must start with `mcp_`.
 
+MCP input and structured-output validation supports JSON Schema draft-07,
+2019-09, and 2020-12 (including REA's tool schemas). Schemas without `$schema`
+use draft-07. Invalid arguments are rejected before invoking the server;
+invalid or unsupported input schemas are reported as tool errors.
+
 #### Server configuration
 
 Each server config has an `id`, `name`, `enabled` flag, and either a local
