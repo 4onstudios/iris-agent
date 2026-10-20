@@ -25,7 +25,12 @@ export const compileMcpSchema = <T = unknown>(
       : dialect === "https://json-schema.org/draft/2019-09/schema"
         ? validators.draft2019
         : validators.draft7;
-  return validator.compile<T>(schema);
+  try {
+    return validator.compile<T>(schema);
+  } finally {
+    // Ajv retains schemas by identity even with addUsedSchema disabled.
+    validator.removeSchema(schema);
+  }
 };
 
 export const mcpJsonSchemaValidator: jsonSchemaValidator = {

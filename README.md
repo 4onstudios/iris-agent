@@ -541,7 +541,9 @@ generated as `mcp_<server name>_<tool name>` and must start with `mcp_`.
 MCP input and structured-output validation supports JSON Schema draft-07,
 2019-09, and 2020-12 (including REA's tool schemas). Schemas without `$schema`
 use draft-07. Invalid arguments are rejected before invoking the server;
-invalid or unsupported input schemas are reported as tool errors.
+invalid or unsupported input schemas are reported as tool errors. Compiled schemas
+are released from Ajv's cache so repeated tool discovery does not retain them
+for the lifetime of the process.
 
 #### Server configuration
 

@@ -1,5 +1,8 @@
 import { buildAugmentedPath, validateMcpToolInput } from "../api/core/agent/tools/mcpTools";
-import { mcpJsonSchemaValidator } from "../api/core/agent/tools/mcpSchemaValidation";
+import Ajv from "ajv";
+import Ajv2019 from "ajv/dist/2019.js";
+import Ajv2020 from "ajv/dist/2020.js";
+import { compileMcpSchema, mcpJsonSchemaValidator } from "../api/core/agent/tools/mcpSchemaValidation";
 import { delimiter as pathDelimiter } from "node:path";
 
 describe("MCP tool environment", () => {
@@ -105,6 +108,54 @@ describe("MCP tool environment", () => {
     it("accepts empty or omitted schemas", () => {
       expect(validateMcpToolInput("empty", {}, {})).toBeNull();
       expect(validateMcpToolInput("empty", undefined, {})).toBeNull();
+    });
+
+    it.each([
+      undefined,
+      "http://json-schema.org/draft-07/schema#",
+      "https://json-schema.org/draft/2019-09/schema",
+      "https://json-schema.org/draft/2020-12/schema",
+    ])("releases compiled schemas for dialect %s without invalidating validators", ($schema) => {
+      const schema = {
+        ...($schema ? { $schema } : {}),
+        type: "object",
+        definitions: { value: { type: "integer" } },
+        properties: { value: { $ref: "#/definitions/value" } },
+        required: ["value"],
+      };
+      const first = compileMcpSchema(schema);
+      const second = compileMcpSchema(schema);
+
+      expect(second).not.toBe(first);
+      for (const validate of [first, second]) {
+        expect(validate({ value: 1 })).toBe(true);
+        expect(validate({ value: "invalid" })).toBe(false);
+        expect(validate.errors).not.toBeNull();
+      }
+    });
+
+    it.each([
+      undefined,
+      "https://json-schema.org/draft/2019-09/schema",
+      "https://json-schema.org/draft/2020-12/schema",
+    ])("releases schemas when compilation fails for dialect %s", ($schema) => {
+      const schema = {
+        ...($schema ? { $schema } : {}),
+        type: "not-a-type",
+      };
+      const validatorClass =
+        $schema === "https://json-schema.org/draft/2020-12/schema"
+          ? Ajv2020
+          : $schema === "https://json-schema.org/draft/2019-09/schema"
+            ? Ajv2019
+            : Ajv;
+      const removeSchema = jest.spyOn(validatorClass.prototype, "removeSchema");
+      try {
+        expect(() => compileMcpSchema(schema)).toThrow();
+        expect(removeSchema).toHaveBeenCalledWith(schema);
+      } finally {
+        removeSchema.mockRestore();
+      }
     });
 
     it("validates structured output using 2020-12 keywords", () => {
