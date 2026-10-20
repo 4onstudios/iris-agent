@@ -3,7 +3,20 @@ import {
   resolveModelContextBudget,
   resolveModelInputTokenLimit,
   resolveModelInputTokenLimitAsync,
+  resolveObservationThresholdTokens,
 } from "../api/helpers/modelTokenLimits";
+
+describe("observation threshold", () => {
+  it("stays below the input allowance of small-window models", () => {
+    expect(resolveObservationThresholdTokens(3_277)).toBe(2_457);
+    expect(resolveObservationThresholdTokens(3_277)).toBeLessThan(3_277);
+  });
+
+  it("uses 75% of the input allowance and caps large windows", () => {
+    expect(resolveObservationThresholdTokens(80_000)).toBe(60_000);
+    expect(resolveObservationThresholdTokens(1_000_000)).toBe(200_000);
+  });
+});
 
 describe("model input limits", () => {
   afterEach(() => jest.restoreAllMocks());

@@ -77,7 +77,11 @@ import {
   loadSkillsFromDirectories,
   type SkillEntry,
 } from "./utils/skillsDiscovery";
-import { resolveModelContextBudget, resolveModelSupportsVision } from "../../helpers/promptBudget";
+import {
+  resolveModelContextBudget,
+  resolveModelSupportsVision,
+  resolveObservationThresholdTokens,
+} from "../../helpers/promptBudget";
 // Browser-backed fallback for providers without native web search.
 import { webSearchTool as browserWebSearchTool } from "./tools/webSearch";
 //for skills to be called by the workspace
@@ -1014,9 +1018,8 @@ export const createCodingAgent = async (
       // Consolidate before the effective (provider-capped) input limiter trims context.
       ...(options.contextWindow !== undefined
         ? {
-            defaultMessageTokens: Math.max(
-              4_000,
-              Math.min(200_000, Math.floor(modelContextBudget.inputTokens * 0.75)),
+            defaultMessageTokens: resolveObservationThresholdTokens(
+              modelContextBudget.inputTokens,
             ),
           }
         : {}),

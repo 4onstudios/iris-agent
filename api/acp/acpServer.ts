@@ -421,6 +421,32 @@ const updateTranscriptCheckpoint = async (
   return true;
 };
 
+const waitForPersistenceOrAbort = (
+  persistence: Promise<void>,
+  signal: AbortSignal,
+): Promise<boolean> => {
+  if (signal.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (completed: boolean) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      resolve(completed);
+    };
+    const onAbort = () => finish(false);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) {
+      finish(false);
+      return;
+    }
+    void persistence.then(
+      () => finish(true),
+      () => finish(true),
+    );
+  });
+};
+
 const transcriptMessageMatches = (
   memoryMessage: MastraDBMessage,
   transcriptMessage: PersistedChatMessage,
@@ -458,30 +484,29 @@ const hydrateAcpMemoryHistory = async (
     if (typeof checkpoint === "number" && Number.isSafeInteger(checkpoint)) {
       if (checkpoint < 0 || checkpoint > history.length) return false;
       existingMessageCount = checkpoint;
-    } else {
-      const existingMessages = await memory.recall({
-        threadId: sessionId,
-        resourceId,
-        page: 0,
-        perPage: false,
-      });
-      const transcriptMessages = existingMessages.messages.filter(
-        (message): message is MastraDBMessage & {
-          role: "user" | "assistant";
-        } => message.role === "user" || message.role === "assistant",
-      );
-      if (
-        transcriptMessages.length > history.length ||
-        transcriptMessages.some(
-          (message, index) =>
-            history[index] === undefined ||
-            !transcriptMessageMatches(message, history[index]),
-        )
-      ) {
-        return false;
-      }
-      existingMessageCount = transcriptMessages.length;
     }
+    const existingMessages = await memory.recall({
+      threadId: sessionId,
+      resourceId,
+      page: 0,
+      perPage: false,
+    });
+    const transcriptMessages = existingMessages.messages.filter(
+      (message): message is MastraDBMessage & {
+        role: "user" | "assistant";
+      } => message.role === "user" || message.role === "assistant",
+    );
+    if (
+      transcriptMessages.length > history.length ||
+      transcriptMessages.some(
+        (message, index) =>
+          history[index] === undefined ||
+          !transcriptMessageMatches(message, history[index]),
+      )
+    ) {
+      return false;
+    }
+    existingMessageCount = Math.max(existingMessageCount, transcriptMessages.length);
   } else {
     await memory.createThread({
       threadId: sessionId,
@@ -662,22 +687,29 @@ export const createAcpAgentApp = (
       };
       sessions.set(sessionId, session);
       if (options.useMastraObservationalMemory && history.length > 0) {
-        const runtimeAgent = await resolveAgent(requestedModel, sessionWorkspace);
-        try {
-          session.memoryHistoryHydrated = await hydrateAcpMemoryHistory(
-            runtimeAgent,
-            sessionId,
-            `acp-session:${sessionId}`,
-            session.title,
-            history,
-          );
-        } catch (error) {
-          session.memoryHistoryHydrated = false;
-          console.warn(
-            `[acp] Could not hydrate transcript for session '${sessionId}'; retaining bounded transcript replay:`,
-            error instanceof Error ? error.message : String(error),
-          );
-        }
+        // Register hydration as the persistence barrier so a concurrent prompt
+        // waits for it, and checkpoint only the snapshot actually saved.
+        const hydratedHistory = history.slice();
+        const hydration = (async () => {
+          const runtimeAgent = await resolveAgent(requestedModel, sessionWorkspace);
+          try {
+            session.memoryHistoryHydrated = await hydrateAcpMemoryHistory(
+              runtimeAgent,
+              sessionId,
+              `acp-session:${sessionId}`,
+              session.title,
+              hydratedHistory,
+            );
+          } catch (error) {
+            session.memoryHistoryHydrated = false;
+            console.warn(
+              `[acp] Could not hydrate transcript for session '${sessionId}'; retaining bounded transcript replay:`,
+              error instanceof Error ? error.message : String(error),
+            );
+          }
+        })();
+        session.transcriptPersistence = hydration.catch(() => undefined);
+        await hydration;
       }
       for (const message of history) {
         await ctx.client.notify(acp.methods.client.session.update, {
@@ -767,8 +799,12 @@ export const createAcpAgentApp = (
       // A prior turn may already have committed its transcript and still be
       // checkpointing it in observational memory. Wait before deciding whether
       // this turn can rely on memory instead of replaying bounded history.
-      await session.transcriptPersistence;
+      const persistenceCompleted = await waitForPersistenceOrAbort(
+        session.transcriptPersistence,
+        activeTurn.abortController.signal,
+      );
       if (
+        !persistenceCompleted ||
         sessions.get(sessionId) !== session ||
         activeTurn.abortController.signal.aborted
       ) {

@@ -17,6 +17,7 @@ export {
   resolveModelInputTokenLimit,
   resolveModelInputTokenLimitAsync,
   resolveModelSupportsVision,
+  resolveObservationThresholdTokens,
 } from "./modelTokenLimits";
 
 type PromptBudgetBuildOptions<T extends ConversationMessageLike> = {

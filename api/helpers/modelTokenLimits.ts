@@ -98,6 +98,20 @@ export type ModelContextBudget = {
   inputTokens: number;
   maxOutputTokens: number;
 };
+const OBSERVATION_THRESHOLD_RATIO = 0.75;
+const MAX_OBSERVATION_THRESHOLD_TOKENS = 200_000;
+
+// Consolidate before the input limiter trims history. No lower floor: a fixed
+// minimum would exceed the input allowance of small-window models.
+export const resolveObservationThresholdTokens = (inputTokens: number): number =>
+  Math.max(
+    1,
+    Math.min(
+      MAX_OBSERVATION_THRESHOLD_TOKENS,
+      Math.floor(inputTokens * OBSERVATION_THRESHOLD_RATIO),
+    ),
+  );
+
 const modelLimits = new Map<string, { budget: ModelContextBudget; expiresAt: number }>();
 const providerModelLimits = new Map<string, { budget: ModelContextBudget; expiresAt: number }>();
 const pendingModelLimits = new Map<string, Promise<ModelContextBudget>>();

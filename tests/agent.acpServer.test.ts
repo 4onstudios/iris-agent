@@ -237,6 +237,100 @@ describe("ACP server", () => {
             );
     });
 
+    it("cancels a replacement prompt while it waits for transcript persistence", async () => {
+        let releaseCheckpoint!: () => void;
+        let markCheckpointStarted!: () => void;
+        const checkpointGate = new Promise<void>((resolve) => {
+            releaseCheckpoint = resolve;
+        });
+        const checkpointStarted = new Promise<void>((resolve) => {
+            markCheckpointStarted = resolve;
+        });
+        let checkpointCount = 0;
+        const memoryThread = {
+            metadata: {} as Record<string, unknown>,
+        };
+        const memory = {
+            getThreadById: jest.fn(async ({ threadId }: { threadId: string }) => ({
+                resourceId: `acp-session:${threadId}`,
+                metadata: memoryThread.metadata,
+            })),
+            recall: jest.fn(async () => ({ messages: [] })),
+            createThread: jest.fn(async () => ({})),
+            saveMessages: jest.fn(async () => ({})),
+            updateThread: jest.fn(async ({ metadata }: {
+                metadata: Record<string, unknown>;
+            }) => {
+                checkpointCount += 1;
+                if (checkpointCount === 1) {
+                    markCheckpointStarted();
+                    await checkpointGate;
+                }
+                memoryThread.metadata = metadata;
+                return memoryThread;
+            }),
+        };
+        const runtime: AcpRuntimeAgent = {
+            getMemory: async () => memory,
+            stream: jest.fn(async () => ({
+                fullStream: createChunkStream([
+                    { type: "text-delta", payload: { text: "Done" } },
+                ]),
+                text: Promise.resolve("Done"),
+            })),
+        };
+
+        await acp
+            .client({ name: "iris-agent-test-client" })
+            .connectWith(
+                createAcpAgentApp(runtime, undefined, "local/custom-model", {
+                    useMastraObservationalMemory: true,
+                }),
+                async (ctx) => {
+                    const session = await ctx.request(acp.methods.agent.session.new, {
+                        cwd: "/workspace",
+                        mcpServers: [],
+                    });
+                    const firstPrompt = ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId: session.sessionId,
+                        prompt: [{ type: "text", text: "First prompt" }],
+                    });
+                    await checkpointStarted;
+
+                    const replacementPrompt = ctx.request(
+                        acp.methods.agent.session.prompt,
+                        {
+                            sessionId: session.sessionId,
+                            prompt: [{ type: "text", text: "Replacement prompt" }],
+                        },
+                    );
+                    let timeout: ReturnType<typeof setTimeout> | undefined;
+                    try {
+                        await new Promise((resolve) => setTimeout(resolve, 0));
+                        await ctx.notify(acp.methods.agent.session.cancel, {
+                            sessionId: session.sessionId,
+                        });
+                        const response = await Promise.race([
+                            replacementPrompt,
+                            new Promise<never>((_, reject) => {
+                                timeout = setTimeout(
+                                    () => reject(new Error("Prompt did not cancel in time")),
+                                    200,
+                                );
+                            }),
+                        ]);
+                        expect(response).toEqual({ stopReason: "cancelled" });
+                    } finally {
+                        if (timeout) clearTimeout(timeout);
+                        releaseCheckpoint();
+                    }
+
+                    await firstPrompt;
+                    expect(runtime.stream).toHaveBeenCalledTimes(1);
+                },
+            );
+    });
+
     it("hydrates a restored transcript before relying on ACP observational memory", async () => {
         const sessionId = `acp-memory-${randomUUID()}`;
         const sessionPath = persistedSessionPath(sessionId);
@@ -409,11 +503,231 @@ describe("ACP server", () => {
                     },
                 );
 
-            expect(memory.recall).not.toHaveBeenCalled();
+            expect(memory.recall).toHaveBeenCalledWith({
+                threadId: sessionId,
+                resourceId: `acp-session:${sessionId}`,
+                page: 0,
+                perPage: false,
+            });
             expect(savedMessages.map((message) => message.content.content)).toEqual([
                 "Question 2",
                 "Answer 2",
             ]);
+            expect(memoryThread.metadata).toMatchObject({
+                irisAgentAcpTranscriptMessageCount: 4,
+            });
+        } finally {
+            await fs.unlink(sessionPath);
+        }
+    });
+
+    it("does not duplicate restored transcript messages when checkpointing fails", async () => {
+        const sessionId = `acp-checkpoint-retry-${randomUUID()}`;
+        const sessionPath = persistedSessionPath(sessionId);
+        const resourceId = `acp-session:${sessionId}`;
+        const history = [
+            { role: "user" as const, content: "Question 1" },
+            { role: "assistant" as const, content: "Answer 1" },
+            { role: "user" as const, content: "Question 2" },
+            { role: "assistant" as const, content: "Answer 2" },
+        ];
+        await fs.mkdir(path.dirname(sessionPath), { recursive: true });
+        await fs.writeFile(
+            sessionPath,
+            JSON.stringify({
+                id: sessionId,
+                cwd: "/workspace",
+                messages: history,
+            }),
+        );
+        const memoryThread = {
+            resourceId,
+            metadata: { irisAgentAcpTranscriptMessageCount: 2 } as Record<string, unknown>,
+        };
+        const storedMessages = history.slice(0, 2);
+        const saveMessages = jest.fn(async ({ messages }: {
+            messages: Array<{ role: string; content: { content?: string } }>;
+        }) => {
+            for (const message of messages) {
+                if (
+                    (message.role === "user" || message.role === "assistant") &&
+                    typeof message.content.content === "string"
+                ) {
+                    storedMessages.push({
+                        role: message.role,
+                        content: message.content.content,
+                    });
+                }
+            }
+            return { messages };
+        });
+        let failCheckpoint = true;
+        const memory = {
+            getThreadById: jest.fn(async () => memoryThread),
+            recall: jest.fn(async () => ({
+                messages: storedMessages.map((message, index) => ({
+                    id: `stored-${index}`,
+                    role: message.role,
+                    createdAt: new Date(),
+                    threadId: sessionId,
+                    resourceId,
+                    content: {
+                        format: 2 as const,
+                        parts: [{ type: "text" as const, text: message.content }],
+                        content: message.content,
+                    },
+                })),
+            })),
+            createThread: jest.fn(async () => memoryThread),
+            saveMessages,
+            updateThread: jest.fn(async ({ metadata }: {
+                metadata: Record<string, unknown>;
+            }) => {
+                if (failCheckpoint) {
+                    failCheckpoint = false;
+                    throw new Error("Temporary checkpoint failure");
+                }
+                memoryThread.metadata = metadata;
+                return memoryThread;
+            }),
+        };
+        const warn = jest.spyOn(console, "warn").mockImplementation(() => {});
+
+        try {
+            await acp
+                .client({ name: "iris-agent-test-client" })
+                .connectWith(
+                    createAcpAgentApp(
+                        { getMemory: async () => memory },
+                        undefined,
+                        undefined,
+                        { useMastraObservationalMemory: true },
+                    ),
+                    async (ctx) => {
+                        await ctx.request(acp.methods.agent.session.load, {
+                            sessionId,
+                            cwd: "/workspace",
+                            mcpServers: [],
+                        });
+                        await ctx.request(acp.methods.agent.session.close, { sessionId });
+                        await ctx.request(acp.methods.agent.session.load, {
+                            sessionId,
+                            cwd: "/workspace",
+                            mcpServers: [],
+                        });
+                    },
+                );
+
+            expect(memory.recall).toHaveBeenCalledTimes(2);
+            expect(saveMessages).toHaveBeenCalledTimes(1);
+            expect(storedMessages).toEqual(history);
+            expect(memoryThread.metadata).toMatchObject({
+                irisAgentAcpTranscriptMessageCount: history.length,
+            });
+        } finally {
+            warn.mockRestore();
+            await fs.unlink(sessionPath);
+        }
+    });
+
+    it("waits for initial hydration before running a concurrent prompt", async () => {
+        const sessionId = `acp-hydration-race-${randomUUID()}`;
+        const sessionPath = persistedSessionPath(sessionId);
+        const resourceId = `acp-session:${sessionId}`;
+        await fs.mkdir(path.dirname(sessionPath), { recursive: true });
+        await fs.writeFile(
+            sessionPath,
+            JSON.stringify({
+                id: sessionId,
+                cwd: "/workspace",
+                messages: [
+                    { role: "user", content: "Restored question" },
+                    { role: "assistant", content: "Restored answer" },
+                ],
+            }),
+        );
+        let releaseHydration!: () => void;
+        let markHydrationStarted!: () => void;
+        const hydrationGate = new Promise<void>((resolve) => {
+            releaseHydration = resolve;
+        });
+        const hydrationStarted = new Promise<void>((resolve) => {
+            markHydrationStarted = resolve;
+        });
+        const memoryThread = {
+            resourceId,
+            metadata: {} as Record<string, unknown>,
+        };
+        let threadExists = false;
+        const savedMessages: unknown[] = [];
+        const memory = {
+            getThreadById: jest.fn(async () => (threadExists ? memoryThread : null)),
+            recall: jest.fn(async () => ({ messages: [] })),
+            createThread: jest.fn(async () => {
+                threadExists = true;
+                return memoryThread;
+            }),
+            saveMessages: jest.fn(async ({ messages }: { messages: unknown[] }) => {
+                if (savedMessages.length === 0) {
+                    markHydrationStarted();
+                    await hydrationGate;
+                }
+                savedMessages.push(...messages);
+                return { messages };
+            }),
+            updateThread: jest.fn(async ({ metadata }: {
+                metadata: Record<string, unknown>;
+            }) => {
+                memoryThread.metadata = metadata;
+                return memoryThread;
+            }),
+        };
+        const runtime: AcpRuntimeAgent = {
+            getMemory: async () => memory,
+            stream: jest.fn(async () => ({
+                fullStream: createChunkStream([
+                    { type: "text-delta", payload: { text: "Done" } },
+                ]),
+                text: Promise.resolve("Done"),
+            })),
+        };
+        const stream = runtime.stream as jest.MockedFunction<
+            NonNullable<AcpRuntimeAgent["stream"]>
+        >;
+
+        try {
+            await acp
+                .client({ name: "iris-agent-test-client" })
+                .connectWith(
+                    createAcpAgentApp(runtime, undefined, "local/custom-model", {
+                        useMastraObservationalMemory: true,
+                    }),
+                    async (ctx) => {
+                        const load = ctx.request(acp.methods.agent.session.load, {
+                            sessionId,
+                            cwd: "/workspace",
+                            mcpServers: [],
+                        });
+                        await hydrationStarted;
+                        const prompt = ctx.request(acp.methods.agent.session.prompt, {
+                            sessionId,
+                            prompt: [{ type: "text", text: "Concurrent prompt" }],
+                        });
+                        await new Promise((resolve) => setTimeout(resolve, 0));
+                        expect(stream).not.toHaveBeenCalled();
+
+                        releaseHydration();
+                        await load;
+                        await expect(prompt).resolves.toEqual({ stopReason: "end_turn" });
+                    },
+                );
+
+            expect(stream).toHaveBeenCalledTimes(1);
+            expect(stream.mock.calls[0]?.[0]).toBe("Concurrent prompt");
+            expect(stream.mock.calls[0]?.[1]).toMatchObject({
+                memory: { thread: sessionId, resource: resourceId },
+            });
+            expect(savedMessages).toHaveLength(2);
             expect(memoryThread.metadata).toMatchObject({
                 irisAgentAcpTranscriptMessageCount: 4,
             });
