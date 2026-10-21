@@ -1,6 +1,5 @@
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
-import Ajv from "ajv";
 import type { JSONSchema7 } from "json-schema";
 import os from "os";
 import { delimiter as pathDelimiter } from "node:path";
@@ -19,6 +18,7 @@ import {
   createMcpRemoteTransport,
   type McpRemoteClientTransport,
 } from "./mcpTransport";
+import { compileMcpSchema, mcpJsonSchemaValidator } from "./mcpSchemaValidation";
 
 const MCP_TIMEOUT_MS = 20000;
 
@@ -33,7 +33,11 @@ export type McpToolSummary = {
   description?: string;
 };
 
-const ajv = new Ajv({ allErrors: true });
+const createMcpClient = () =>
+  new Client(
+    { name: "iris-mcp", version: "1.0.0" },
+    { jsonSchemaValidator: mcpJsonSchemaValidator },
+  );
 
 const safeToolToken = (value: string): string =>
   value.replace(/[^a-zA-Z0-9_]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 80);
@@ -103,7 +107,12 @@ export const validateMcpToolInput = (
     return null;
   }
 
-  const validate = ajv.compile(inputSchema);
+  let validate: ReturnType<typeof compileMcpSchema>;
+  try {
+    validate = compileMcpSchema(inputSchema);
+  } catch (error) {
+    return `Invalid input schema for MCP tool '${toolName}'. ${error instanceof Error ? error.message : String(error)}`;
+  }
   const valid = validate(params);
 
   if (valid) {
@@ -117,7 +126,7 @@ export const validateMcpToolInput = (
         typeof (error.params as { missingProperty?: unknown })?.missingProperty === "string"
           ? ((error.params as { missingProperty?: string }).missingProperty || undefined)
           : undefined;
-      const path = formatAjvErrorPath((error as { dataPath?: string }).dataPath || "", missingProperty);
+      const path = formatAjvErrorPath(error.instancePath, missingProperty);
       return `${path}: ${error.message || "invalid value"}`;
     })
     .join("; ");
@@ -229,7 +238,7 @@ const connectRemoteClient = async (
   server: McpServerConfig,
 ): Promise<{ client: Client; transport: McpTransport }> => {
   const authenticatedServer = await resolveMcpOAuthServer(server);
-  const client = new Client({ name: "iris-mcp", version: "1.0.0" });
+  const client = createMcpClient();
   const transport = createMcpRemoteTransport(
     authenticatedServer,
     getMcpOAuthProvider(server),
@@ -263,7 +272,7 @@ const connectClient = async (
   let lastError: Error | null = null;
 
   for (const candidate of commandCandidates) {
-    const client = new Client({ name: "iris-mcp", version: "1.0.0" });
+    const client = createMcpClient();
     const transport = new StdioClientTransport({
       ...createTransportParams(server, workspacePath),
       command: candidate.command,
@@ -303,7 +312,7 @@ const connectClient = async (
     const shellCandidates = ["/bin/zsh", "/bin/bash"];
 
     for (const shellPath of shellCandidates) {
-      const client = new Client({ name: "iris-mcp", version: "1.0.0" });
+      const client = createMcpClient();
       const transport = new StdioClientTransport({
         ...createTransportParams(server, workspacePath),
         command: shellPath,
@@ -378,6 +387,8 @@ const callServerTool = async (
     );
     transport = activeTransport;
 
+    // The SDK caches output-schema validators when listing tools on this client.
+    await client.listTools(undefined, { timeout: MCP_TIMEOUT_MS });
     const result = await client.callTool(
       {
         name: toolName,

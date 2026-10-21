@@ -1,4 +1,9 @@
 import { resolveToolExecutionStatus } from "../agent/utils/toolLifecycle";
+import {
+  extractLastStepUsage,
+  extractStepFinishUsage,
+  type TokenUsageSummary,
+} from "../../helpers/tokenUsage";
 import type { CliChatUi } from "./cliChatUi";
 
 type CliAgentChunk = { type: string; payload?: Record<string, unknown> };
@@ -9,6 +14,7 @@ export interface CliChatAgent {
   ) => Promise<{
     fullStream: ReadableStream<CliAgentChunk>;
     text?: Promise<string> | string;
+    steps?: Promise<unknown> | unknown;
   }>;
   generate?: (
     prompt: string,
@@ -16,14 +22,40 @@ export interface CliChatAgent {
   ) => Promise<unknown>;
 }
 
-/** Consume the existing agent protocol; the UI never owns agent execution. */
+const waitForAbortable = async <T>(
+  value: PromiseLike<T> | T,
+  signal: AbortSignal,
+): Promise<T> => {
+  signal.throwIfAborted();
+  let onAbort: (() => void) | undefined;
+  const abort = new Promise<never>((_, reject) => {
+    onAbort = () =>
+      reject(
+        signal.reason ??
+          new DOMException("The operation was aborted", "AbortError"),
+      );
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+  try {
+    return await Promise.race([Promise.resolve(value), abort]);
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+  }
+};
+
+/**
+ * Consume the existing agent protocol; the UI never owns agent execution.
+ * Resolves with the final model step's usage so callers can report context
+ * occupancy without counting prompt tokens repeated across steps.
+ */
 export const runCliChatTurn = async (
   agent: CliChatAgent,
   prompt: string,
   options: Record<string, unknown>,
   ui: CliChatUi,
   signal: AbortSignal,
-): Promise<void> => {
+): Promise<TokenUsageSummary | undefined> => {
   signal.throwIfAborted();
   ui.setStatus("Thinking...");
   const turnOptions = { ...options, abortSignal: signal };
@@ -33,6 +65,10 @@ export const runCliChatTurn = async (
     }
     const result = await agent.generate(prompt, turnOptions);
     signal.throwIfAborted();
+    const usage =
+      result && typeof result === "object"
+        ? extractLastStepUsage((result as Record<string, unknown>).steps)
+        : undefined;
     const text =
       typeof result === "string"
         ? result
@@ -40,7 +76,7 @@ export const runCliChatTurn = async (
           ? String(result.text || "")
           : JSON.stringify(result, null, 2) || "";
     ui.appendText(text);
-    return;
+    return usage;
   }
 
   const streamResult = await agent.stream(prompt, turnOptions);
@@ -51,6 +87,7 @@ export const runCliChatTurn = async (
   signal.addEventListener("abort", cancelReader, { once: true });
   let drained = false;
   let hasOutput = false;
+  let usage: TokenUsageSummary | undefined;
   const pendingIds = new Map<string, number>();
   let anonymousCalls = 0;
   const pendingCount = () =>
@@ -68,7 +105,9 @@ export const runCliChatTurn = async (
         break;
       }
       const payload = value?.payload || {};
-      if (value?.type === "text-delta") {
+      if (value?.type === "step-finish") {
+        usage = extractStepFinishUsage(value);
+      } else if (value?.type === "text-delta") {
         const text = typeof payload.text === "string" ? payload.text : "";
         if (text) {
           hasOutput = true;
@@ -130,9 +169,22 @@ export const runCliChatTurn = async (
       signal.throwIfAborted();
       if (text) ui.appendText(text);
     }
+    try {
+      usage =
+        extractLastStepUsage(
+          await waitForAbortable(streamResult.steps, signal),
+        ) ?? usage;
+    } catch (error) {
+      signal.throwIfAborted();
+      console.warn(
+        "[cli] Could not read provider token usage for context stats:",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
   } finally {
     signal.removeEventListener("abort", cancelReader);
     if (!drained) await reader.cancel().catch(() => {});
     reader.releaseLock();
   }
+  return usage;
 };

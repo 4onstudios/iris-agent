@@ -1,9 +1,17 @@
+import { randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import * as acp from "@agentclientprotocol/sdk";
+import type { MastraDBMessage } from "@mastra/core/agent/message-list";
 import {
     createAcpAgentApp,
     type AcpRuntimeAgent,
 } from "../api/acp/acpServer";
 import { resolvePromptTokenBudget } from "../api/helpers/promptBudget";
+
+const persistedSessionPath = (sessionId: string): string =>
+    path.join(os.homedir(), ".iris", "chat-sessions", `${sessionId}.json`);
 
 const createChunkStream = (
     chunks: Array<{ type: string; payload?: Record<string, unknown> }>,
@@ -74,6 +82,1120 @@ describe("ACP server", () => {
         } finally {
             metadata.mockRestore();
         }
+    });
+
+    it("uses the configured ACP context window and isolated observational memory", async () => {
+        const runtime: AcpRuntimeAgent = {
+            getMemory: async () => ({
+                getThreadById: async ({ threadId }) => ({
+                    resourceId: `acp-session:${threadId}`,
+                    metadata: {},
+                }),
+                recall: async () => ({ messages: [], total: 0 }),
+                createThread: async () => ({}),
+                saveMessages: async () => ({}),
+                updateThread: async () => ({}),
+            }),
+            stream: jest.fn(async () => ({
+                fullStream: createChunkStream([
+                    { type: "text-delta", payload: { text: "Done" } },
+                ]),
+                text: Promise.resolve("Done"),
+            })),
+        };
+        const stream = runtime.stream as jest.MockedFunction<
+            NonNullable<AcpRuntimeAgent["stream"]>
+        >;
+        const previousRequest = `Previous request ${"x".repeat(20_000)}`;
+
+        await acp
+            .client({ name: "iris-agent-test-client" })
+            .connectWith(
+                createAcpAgentApp(runtime, undefined, "local/custom-model", {
+                    contextWindowTokens: 100_000,
+                    useMastraObservationalMemory: true,
+                }),
+                async (ctx) => {
+                    const session = await ctx.request(acp.methods.agent.session.new, {
+                        cwd: "/workspace",
+                        mcpServers: [],
+                    });
+                    await ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId: session.sessionId,
+                        prompt: [{ type: "text", text: previousRequest }],
+                    });
+                    await ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId: session.sessionId,
+                        prompt: [{ type: "text", text: "Follow-up request" }],
+                    });
+
+                    expect(stream.mock.calls[0]?.[0]).toContain(previousRequest);
+                    expect(stream.mock.calls[0]?.[1]).toMatchObject({
+                        memory: {
+                            thread: session.sessionId,
+                            resource: `acp-session:${session.sessionId}`,
+                        },
+                    });
+                    expect(stream.mock.calls[1]?.[0]).toBe("Follow-up request");
+                    expect(stream.mock.calls[1]?.[1]).toMatchObject({
+                        memory: {
+                            thread: session.sessionId,
+                            resource: `acp-session:${session.sessionId}`,
+                        },
+                    });
+                },
+            );
+    });
+
+    it("waits for an observational-memory checkpoint before starting a replacement prompt", async () => {
+        let releaseCheckpoint!: () => void;
+        let markCheckpointStarted!: () => void;
+        const checkpointGate = new Promise<void>((resolve) => {
+            releaseCheckpoint = resolve;
+        });
+        const checkpointStarted = new Promise<void>((resolve) => {
+            markCheckpointStarted = resolve;
+        });
+        let checkpointCount = 0;
+        const memoryThread = {
+            metadata: {} as Record<string, unknown>,
+        };
+        const memory = {
+            getThreadById: jest.fn(async ({ threadId }: { threadId: string }) => ({
+                resourceId: `acp-session:${threadId}`,
+                metadata: memoryThread.metadata,
+            })),
+            recall: jest.fn(async () => ({
+                messages: [],
+                total: checkpointCount * 2,
+            })),
+            createThread: jest.fn(async () => ({})),
+            saveMessages: jest.fn(async () => ({})),
+            updateThread: jest.fn(async ({ metadata }: {
+                metadata: Record<string, unknown>;
+            }) => {
+                checkpointCount += 1;
+                if (checkpointCount === 1) {
+                    markCheckpointStarted();
+                    await checkpointGate;
+                }
+                memoryThread.metadata = metadata;
+                return memoryThread;
+            }),
+        };
+        const runtime: AcpRuntimeAgent = {
+            getMemory: async () => memory,
+            stream: jest.fn(async () => ({
+                fullStream: createChunkStream([
+                    { type: "text-delta", payload: { text: "Done" } },
+                ]),
+                text: Promise.resolve("Done"),
+            })),
+        };
+        const stream = runtime.stream as jest.MockedFunction<
+            NonNullable<AcpRuntimeAgent["stream"]>
+        >;
+
+        await acp
+            .client({ name: "iris-agent-test-client" })
+            .connectWith(
+                createAcpAgentApp(runtime, undefined, "local/custom-model", {
+                    useMastraObservationalMemory: true,
+                }),
+                async (ctx) => {
+                    const session = await ctx.request(acp.methods.agent.session.new, {
+                        cwd: "/workspace",
+                        mcpServers: [],
+                    });
+                    const firstPrompt = ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId: session.sessionId,
+                        prompt: [{ type: "text", text: "First prompt" }],
+                    });
+                    await checkpointStarted;
+
+                    const replacementPrompt = ctx.request(
+                        acp.methods.agent.session.prompt,
+                        {
+                            sessionId: session.sessionId,
+                            prompt: [{ type: "text", text: "Replacement prompt" }],
+                        },
+                    );
+                    await new Promise((resolve) => setTimeout(resolve, 0));
+                    expect(stream).toHaveBeenCalledTimes(1);
+
+                    releaseCheckpoint();
+                    await firstPrompt;
+                    await replacementPrompt;
+                    expect(stream).toHaveBeenCalledTimes(2);
+                    expect(stream.mock.calls[1]?.[0]).toBe("Replacement prompt");
+                    expect(stream.mock.calls[1]?.[1]).toMatchObject({
+                        memory: {
+                            thread: session.sessionId,
+                            resource: `acp-session:${session.sessionId}`,
+                        },
+                    });
+                    expect(memoryThread.metadata).toMatchObject({
+                        irisAgentAcpTranscriptMessageCount: 4,
+                    });
+                    expect(memory.recall).toHaveBeenCalledTimes(2);
+                    expect(memory.recall).toHaveBeenCalledWith({
+                        threadId: session.sessionId,
+                        resourceId: `acp-session:${session.sessionId}`,
+                        page: 0,
+                        perPage: 1,
+                    });
+                },
+            );
+    });
+
+    it("cancels a replacement prompt while it waits for transcript persistence", async () => {
+        let releaseCheckpoint!: () => void;
+        let markCheckpointStarted!: () => void;
+        const checkpointGate = new Promise<void>((resolve) => {
+            releaseCheckpoint = resolve;
+        });
+        const checkpointStarted = new Promise<void>((resolve) => {
+            markCheckpointStarted = resolve;
+        });
+        let checkpointCount = 0;
+        const memoryThread = {
+            metadata: {} as Record<string, unknown>,
+        };
+        const memory = {
+            getThreadById: jest.fn(async ({ threadId }: { threadId: string }) => ({
+                resourceId: `acp-session:${threadId}`,
+                metadata: memoryThread.metadata,
+            })),
+            recall: jest.fn(async () => ({ messages: [], total: 0 })),
+            createThread: jest.fn(async () => ({})),
+            saveMessages: jest.fn(async () => ({})),
+            updateThread: jest.fn(async ({ metadata }: {
+                metadata: Record<string, unknown>;
+            }) => {
+                checkpointCount += 1;
+                if (checkpointCount === 1) {
+                    markCheckpointStarted();
+                    await checkpointGate;
+                }
+                memoryThread.metadata = metadata;
+                return memoryThread;
+            }),
+        };
+        const runtime: AcpRuntimeAgent = {
+            getMemory: async () => memory,
+            stream: jest.fn(async () => ({
+                fullStream: createChunkStream([
+                    { type: "text-delta", payload: { text: "Done" } },
+                ]),
+                text: Promise.resolve("Done"),
+            })),
+        };
+
+        await acp
+            .client({ name: "iris-agent-test-client" })
+            .connectWith(
+                createAcpAgentApp(runtime, undefined, "local/custom-model", {
+                    useMastraObservationalMemory: true,
+                }),
+                async (ctx) => {
+                    const session = await ctx.request(acp.methods.agent.session.new, {
+                        cwd: "/workspace",
+                        mcpServers: [],
+                    });
+                    const firstPrompt = ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId: session.sessionId,
+                        prompt: [{ type: "text", text: "First prompt" }],
+                    });
+                    await checkpointStarted;
+
+                    const replacementPrompt = ctx.request(
+                        acp.methods.agent.session.prompt,
+                        {
+                            sessionId: session.sessionId,
+                            prompt: [{ type: "text", text: "Replacement prompt" }],
+                        },
+                    );
+                    let timeout: ReturnType<typeof setTimeout> | undefined;
+                    try {
+                        await new Promise((resolve) => setTimeout(resolve, 0));
+                        await ctx.notify(acp.methods.agent.session.cancel, {
+                            sessionId: session.sessionId,
+                        });
+                        const response = await Promise.race([
+                            replacementPrompt,
+                            new Promise<never>((_, reject) => {
+                                timeout = setTimeout(
+                                    () => reject(new Error("Prompt did not cancel in time")),
+                                    200,
+                                );
+                            }),
+                        ]);
+                        expect(response).toEqual({ stopReason: "cancelled" });
+                    } finally {
+                        if (timeout) clearTimeout(timeout);
+                        releaseCheckpoint();
+                    }
+
+                    await firstPrompt;
+                    expect(runtime.stream).toHaveBeenCalledTimes(1);
+                },
+            );
+    });
+
+    it("hydrates a restored transcript before relying on ACP observational memory", async () => {
+        const sessionId = `acp-memory-${randomUUID()}`;
+        const sessionPath = persistedSessionPath(sessionId);
+        await fs.mkdir(path.dirname(sessionPath), { recursive: true });
+        await fs.writeFile(
+            sessionPath,
+            JSON.stringify({
+                id: sessionId,
+                cwd: "/workspace",
+                messages: [
+                    { role: "user", content: "Restored question" },
+                    { role: "assistant", content: "Restored answer" },
+                ],
+            }),
+        );
+        const savedMessages: unknown[] = [];
+        const memoryThread: {
+            resourceId?: string;
+            metadata: Record<string, unknown>;
+        } = {
+            resourceId: `acp-session:${sessionId}`,
+            metadata: {},
+        };
+        const existingTranscriptMessage = {
+            id: "existing-user",
+            role: "user" as const,
+            createdAt: new Date(),
+            threadId: sessionId,
+            resourceId: `acp-session:${sessionId}`,
+            content: {
+                format: 2 as const,
+                parts: [{ type: "text" as const, text: "Restored question" }],
+                content: "Restored question",
+            },
+        };
+        const memory = {
+            getThreadById: jest.fn(async () => memoryThread),
+            createThread: jest.fn(async () => memoryThread),
+            saveMessages: jest.fn(async ({ messages }: { messages: unknown[] }) => {
+                savedMessages.push(...messages);
+                return { messages };
+            }),
+            updateThread: jest.fn(async ({ metadata }: { metadata: Record<string, unknown> }) => {
+                memoryThread.metadata = metadata;
+                return memoryThread;
+            }),
+            recall: jest.fn(async () => ({
+                messages: [existingTranscriptMessage],
+                total: 0,
+                page: 0,
+                perPage: false,
+                hasMore: false,
+            })),
+        };
+        const runtime: AcpRuntimeAgent = {
+            getMemory: async () => memory,
+            stream: jest.fn(async () => ({
+                fullStream: createChunkStream([
+                    { type: "text-delta", payload: { text: "Done" } },
+                ]),
+                text: Promise.resolve("Done"),
+            })),
+        };
+        const stream = runtime.stream as jest.MockedFunction<
+            NonNullable<AcpRuntimeAgent["stream"]>
+        >;
+
+        try {
+            await acp
+                .client({ name: "iris-agent-test-client" })
+                .connectWith(
+                    createAcpAgentApp(runtime, undefined, "local/custom-model", {
+                        useMastraObservationalMemory: true,
+                    }),
+                    async (ctx) => {
+                        await ctx.request(acp.methods.agent.session.load, {
+                            sessionId,
+                            cwd: "/workspace",
+                            mcpServers: [],
+                        });
+                        await ctx.request(acp.methods.agent.session.prompt, {
+                            sessionId,
+                            prompt: [{ type: "text", text: "New prompt" }],
+                        });
+                    },
+                );
+
+            expect(memory.createThread).not.toHaveBeenCalled();
+            expect(memory.recall).toHaveBeenCalledWith({
+                threadId: sessionId,
+                resourceId: `acp-session:${sessionId}`,
+                page: 0,
+                perPage: false,
+            });
+            expect(savedMessages).toHaveLength(1);
+            expect(memoryThread.metadata).toMatchObject({
+                irisAgentAcpTranscriptMessageCount: 4,
+            });
+            expect(stream.mock.calls[0]?.[0]).toBe("New prompt");
+            expect(stream.mock.calls[0]?.[1]).toMatchObject({
+                memory: {
+                    thread: sessionId,
+                    resource: `acp-session:${sessionId}`,
+                },
+            });
+        } finally {
+            await fs.unlink(sessionPath);
+        }
+    });
+
+    it("uses the memory boundary for checkpointed tool-only turns", async () => {
+        const sessionId = `acp-tool-only-${randomUUID()}`;
+        const sessionPath = persistedSessionPath(sessionId);
+        const resourceId = `acp-session:${sessionId}`;
+        await fs.mkdir(path.dirname(sessionPath), { recursive: true });
+        await fs.writeFile(
+            sessionPath,
+            JSON.stringify({
+                id: sessionId,
+                cwd: "/workspace",
+                messages: [{ role: "user", content: "Run the requested tool" }],
+            }),
+        );
+        const memoryThread = {
+            resourceId,
+            metadata: {
+                irisAgentAcpTranscriptMessageCount: 1,
+                irisAgentAcpMemoryCheckpointMessageCount: 3,
+            } as Record<string, unknown>,
+        };
+        const storedMessages: MastraDBMessage[] = [
+            "Run the requested tool",
+            "Calling tool: inspect",
+            "Tool result: complete",
+        ].map((text, index) => ({
+            id: `tool-only-${index}`,
+            role: index === 0 ? "user" : "assistant",
+            createdAt: new Date(),
+            threadId: sessionId,
+            resourceId,
+            content: {
+                format: 2,
+                parts: [{ type: "text", text }],
+                content: text,
+            },
+        }));
+        const memory = {
+            getThreadById: jest.fn(async () => memoryThread),
+            recall: jest.fn(async () => ({
+                messages: storedMessages,
+                total: storedMessages.length,
+            })),
+            createThread: jest.fn(async () => memoryThread),
+            saveMessages: jest.fn(async ({ messages }: { messages: MastraDBMessage[] }) => {
+                storedMessages.push(...messages);
+                return { messages };
+            }),
+            updateThread: jest.fn(async ({ metadata }: { metadata: Record<string, unknown> }) => {
+                memoryThread.metadata = metadata;
+                return memoryThread;
+            }),
+        };
+        const runtime: AcpRuntimeAgent = {
+            getMemory: async () => memory,
+            stream: jest.fn(async () => ({
+                fullStream: createChunkStream([
+                    { type: "text-delta", payload: { text: "Done" } },
+                ]),
+                text: Promise.resolve("Done"),
+            })),
+        };
+        const stream = runtime.stream as jest.MockedFunction<
+            NonNullable<AcpRuntimeAgent["stream"]>
+        >;
+
+        try {
+            await acp.client({ name: "iris-agent-test-client" }).connectWith(
+                createAcpAgentApp(runtime, undefined, "local/custom-model", {
+                    useMastraObservationalMemory: true,
+                }),
+                async (ctx) => {
+                    await ctx.request(acp.methods.agent.session.load, {
+                        sessionId,
+                        cwd: "/workspace",
+                        mcpServers: [],
+                    });
+                    await ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId,
+                        prompt: [{ type: "text", text: "Continue after the tool" }],
+                    });
+                },
+            );
+
+            expect(stream.mock.calls[0]?.[0]).toBe("Continue after the tool");
+            expect(stream.mock.calls[0]?.[1]).toMatchObject({
+                memory: { thread: sessionId, resource: resourceId },
+            });
+            expect(memory.saveMessages).not.toHaveBeenCalled();
+        } finally {
+            await fs.unlink(sessionPath);
+        }
+    });
+
+    it("invalidates scoped memory after an unsuccessful turn", async () => {
+        let sessionId = "";
+        let resourceId = "";
+        const storedMessages: MastraDBMessage[] = [];
+        const memoryThread = {
+            resourceId: "",
+            metadata: {} as Record<string, unknown>,
+        };
+        const memory = {
+            getThreadById: jest.fn(async () => memoryThread),
+            recall: jest.fn(async () => ({
+                messages: storedMessages.slice(),
+                total: storedMessages.length,
+            })),
+            createThread: jest.fn(async () => memoryThread),
+            saveMessages: jest.fn(async ({ messages }: { messages: MastraDBMessage[] }) => {
+                storedMessages.push(...messages);
+                return { messages };
+            }),
+            updateThread: jest.fn(async ({ metadata }: { metadata: Record<string, unknown> }) => {
+                memoryThread.metadata = metadata;
+                return memoryThread;
+            }),
+        };
+        const appendMemoryMessage = (role: "user" | "assistant", content: string) => {
+            storedMessages.push({
+                id: randomUUID(),
+                role,
+                createdAt: new Date(),
+                threadId: sessionId,
+                resourceId,
+                content: {
+                    format: 2,
+                    parts: [{ type: "text", text: content }],
+                    content,
+                },
+            });
+        };
+        let callCount = 0;
+        const runtime: AcpRuntimeAgent = {
+            getMemory: async () => memory,
+            stream: jest.fn(async () => {
+                callCount += 1;
+                if (callCount === 2) {
+                    appendMemoryMessage("user", "Uncommitted request");
+                    appendMemoryMessage("assistant", "Partial failed response");
+                    throw new Error("Generation failed");
+                }
+                return {
+                    fullStream: createChunkStream([
+                        { type: "text-delta", payload: { text: "Committed answer" } },
+                    ]),
+                    text: Promise.resolve("Committed answer"),
+                };
+            }),
+        };
+        const stream = runtime.stream as jest.MockedFunction<
+            NonNullable<AcpRuntimeAgent["stream"]>
+        >;
+
+        try {
+            await acp.client({ name: "iris-agent-test-client" }).connectWith(
+                createAcpAgentApp(runtime, undefined, "local/custom-model", {
+                    useMastraObservationalMemory: true,
+                }),
+                async (ctx) => {
+                    const session = await ctx.request(acp.methods.agent.session.new, {
+                        cwd: "/workspace",
+                        mcpServers: [],
+                    });
+                    sessionId = session.sessionId;
+                    resourceId = `acp-session:${sessionId}`;
+                    memoryThread.resourceId = resourceId;
+                    await ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId,
+                        prompt: [{ type: "text", text: "Committed request" }],
+                    });
+                    await expect(
+                        ctx.request(acp.methods.agent.session.prompt, {
+                            sessionId,
+                            prompt: [{ type: "text", text: "Uncommitted request" }],
+                        }),
+                    ).rejects.toThrow("Internal error");
+                    await ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId,
+                        prompt: [{ type: "text", text: "Continue without stale memory" }],
+                    });
+                },
+            );
+
+            expect(memoryThread.metadata).toMatchObject({
+                irisAgentAcpMemoryInvalidated: true,
+            });
+            expect(stream.mock.calls[1]?.[1]).toMatchObject({
+                memory: { thread: sessionId, resource: resourceId },
+            });
+            expect(stream.mock.calls[2]?.[0]).toContain("Committed request");
+            expect(stream.mock.calls[2]?.[0]).toContain("Continue without stale memory");
+            expect(stream.mock.calls[2]?.[0]).not.toContain("Uncommitted request");
+            expect(stream.mock.calls[2]?.[1]).not.toHaveProperty("memory");
+
+            await acp.client({ name: "iris-agent-test-client" }).connectWith(
+                createAcpAgentApp(runtime, undefined, "local/custom-model", {
+                    useMastraObservationalMemory: true,
+                }),
+                async (ctx) => {
+                    await ctx.request(acp.methods.agent.session.load, {
+                        sessionId,
+                        cwd: "/workspace",
+                        mcpServers: [],
+                    });
+                    await ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId,
+                        prompt: [{ type: "text", text: "Continue after reload" }],
+                    });
+                },
+            );
+
+            expect(stream.mock.calls[3]?.[0]).toContain("Committed request");
+            expect(stream.mock.calls[3]?.[0]).toContain("Continue without stale memory");
+            expect(stream.mock.calls[3]?.[0]).not.toContain("Uncommitted request");
+            expect(stream.mock.calls[3]?.[1]).not.toHaveProperty("memory");
+        } finally {
+            if (sessionId) {
+                await fs.rm(persistedSessionPath(sessionId), { force: true });
+            }
+        }
+    });
+
+    it("uses transcript checkpoints to hydrate turns added while memory was disabled", async () => {
+        const sessionId = `acp-checkpoint-${randomUUID()}`;
+        const sessionPath = persistedSessionPath(sessionId);
+        await fs.mkdir(path.dirname(sessionPath), { recursive: true });
+        await fs.writeFile(
+            sessionPath,
+            JSON.stringify({
+                id: sessionId,
+                cwd: "/workspace",
+                messages: [
+                    { role: "user", content: "Question 1" },
+                    { role: "assistant", content: "Answer 1" },
+                    { role: "user", content: "Question 2" },
+                    { role: "assistant", content: "Answer 2" },
+                ],
+            }),
+        );
+        const memoryThread: {
+            resourceId: string;
+            metadata: Record<string, unknown>;
+        } = {
+            resourceId: `acp-session:${sessionId}`,
+            metadata: { irisAgentAcpTranscriptMessageCount: 2 },
+        };
+        const savedMessages: Array<{ content: { content?: string } }> = [];
+        const memory = {
+            getThreadById: jest.fn(async () => memoryThread),
+            recall: jest.fn(async () => ({ messages: [], total: 0 })),
+            createThread: jest.fn(async () => memoryThread),
+            saveMessages: jest.fn(async ({ messages }: {
+                messages: Array<{ content: { content?: string } }>;
+            }) => {
+                savedMessages.push(...messages);
+                return { messages };
+            }),
+            updateThread: jest.fn(async ({ metadata }: {
+                metadata: Record<string, unknown>;
+            }) => {
+                memoryThread.metadata = metadata;
+                return memoryThread;
+            }),
+        };
+
+        try {
+            await acp
+                .client({ name: "iris-agent-test-client" })
+                .connectWith(
+                    createAcpAgentApp(
+                        { getMemory: async () => memory },
+                        undefined,
+                        undefined,
+                        { useMastraObservationalMemory: true },
+                    ),
+                    async (ctx) => {
+                        await ctx.request(acp.methods.agent.session.load, {
+                            sessionId,
+                            cwd: "/workspace",
+                            mcpServers: [],
+                        });
+                    },
+                );
+
+            expect(memory.recall).toHaveBeenCalledWith({
+                threadId: sessionId,
+                resourceId: `acp-session:${sessionId}`,
+                page: 0,
+                perPage: false,
+            });
+            expect(savedMessages.map((message) => message.content.content)).toEqual([
+                "Question 2",
+                "Answer 2",
+            ]);
+            expect(memoryThread.metadata).toMatchObject({
+                irisAgentAcpTranscriptMessageCount: 4,
+            });
+        } finally {
+            await fs.unlink(sessionPath);
+        }
+    });
+
+    it("retains observational memory when reloading a checkpointed truncated prompt", async () => {
+        let sessionId = "";
+        let sessionPath = "";
+        let resourceId = "";
+        const originalPrompt = `Original request: ${"x".repeat(20_000)}`;
+        const storedMessages: MastraDBMessage[] = [];
+        const memoryThread = {
+            resourceId,
+            metadata: {} as Record<string, unknown>,
+        };
+        const memory = {
+            getThreadById: jest.fn(async () => memoryThread),
+            recall: jest.fn(async () => ({
+                messages: storedMessages.slice(),
+                total: storedMessages.length,
+            })),
+            createThread: jest.fn(async () => memoryThread),
+            saveMessages: jest.fn(async ({ messages }: { messages: MastraDBMessage[] }) => {
+                storedMessages.push(...messages);
+                return { messages };
+            }),
+            updateThread: jest.fn(async ({ metadata }: { metadata: Record<string, unknown> }) => {
+                memoryThread.metadata = metadata;
+                return memoryThread;
+            }),
+        };
+        const runtime: AcpRuntimeAgent = {
+            getMemory: async () => memory,
+            stream: jest.fn(async (input: string) => {
+                storedMessages.push(...[
+                    { role: "user" as const, text: input },
+                    { role: "assistant" as const, text: "Done" },
+                ].map(({ role, text }): MastraDBMessage => ({
+                    id: randomUUID(),
+                    role,
+                    createdAt: new Date(),
+                    threadId: sessionId,
+                    resourceId,
+                    content: {
+                        format: 2,
+                        parts: [{ type: "text", text }],
+                        content: text,
+                    },
+                })));
+                return {
+                    fullStream: createChunkStream([
+                        { type: "text-delta", payload: { text: "Done" } },
+                    ]),
+                    text: Promise.resolve("Done"),
+                };
+            }),
+        };
+        const stream = runtime.stream as jest.MockedFunction<
+            NonNullable<AcpRuntimeAgent["stream"]>
+        >;
+        const createApp = () => createAcpAgentApp(runtime, undefined, "local/custom-model", {
+            contextWindowTokens: 8_192,
+            useMastraObservationalMemory: true,
+        });
+
+        try {
+            await acp.client({ name: "iris-agent-test-client" }).connectWith(
+                createApp(),
+                async (ctx) => {
+                    const session = await ctx.request(acp.methods.agent.session.new, {
+                        cwd: "/workspace",
+                        mcpServers: [],
+                    });
+                    sessionId = session.sessionId;
+                    sessionPath = persistedSessionPath(sessionId);
+                    resourceId = `acp-session:${sessionId}`;
+                    memoryThread.resourceId = resourceId;
+                    await ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId,
+                        prompt: [{ type: "text", text: originalPrompt }],
+                    });
+                },
+            );
+            expect(stream.mock.calls[0]?.[0]).toContain("[truncated: prompt budget exceeded]");
+            expect(stream.mock.calls[0]?.[0].length).toBeLessThan(originalPrompt.length);
+            expect(JSON.parse(await fs.readFile(sessionPath, "utf8")).messages).toEqual([
+                { role: "user", content: originalPrompt },
+                { role: "assistant", content: "Done" },
+            ]);
+            expect(memoryThread.metadata).toMatchObject({
+                irisAgentAcpTranscriptMessageCount: 2,
+            });
+
+            await acp.client({ name: "iris-agent-test-client" }).connectWith(
+                createApp(),
+                async (ctx) => {
+                    await ctx.request(acp.methods.agent.session.load, {
+                        sessionId,
+                        cwd: "/workspace",
+                        mcpServers: [],
+                    });
+                    await ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId,
+                        prompt: [{ type: "text", text: "Use the existing observations" }],
+                    });
+                },
+            );
+
+            expect(stream.mock.calls[1]?.[0]).toBe("Use the existing observations");
+            expect(stream.mock.calls[1]?.[1]).toMatchObject({
+                memory: { thread: sessionId, resource: resourceId },
+            });
+            expect(memory.saveMessages).not.toHaveBeenCalled();
+            expect(storedMessages).toHaveLength(4);
+            expect(memoryThread.metadata).toMatchObject({
+                irisAgentAcpTranscriptMessageCount: 4,
+            });
+        } finally {
+            if (sessionPath) await fs.rm(sessionPath, { force: true });
+        }
+    });
+
+    it.each([false, true])("does not duplicate restored transcript messages when checkpointing fails (truncated prefix: %s)", async (truncatedPrefix) => {
+        const sessionId = `acp-checkpoint-retry-${randomUUID()}`;
+        const sessionPath = persistedSessionPath(sessionId);
+        const resourceId = `acp-session:${sessionId}`;
+        const history = [
+            { role: "user" as const, content: "Question 1" },
+            { role: "assistant" as const, content: "Answer 1" },
+            { role: "user" as const, content: "Question 2" },
+            { role: "assistant" as const, content: "Answer 2" },
+        ];
+        await fs.mkdir(path.dirname(sessionPath), { recursive: true });
+        await fs.writeFile(
+            sessionPath,
+            JSON.stringify({
+                id: sessionId,
+                cwd: "/workspace",
+                messages: history,
+            }),
+        );
+        const memoryThread = {
+            resourceId,
+            metadata: { irisAgentAcpTranscriptMessageCount: 2 } as Record<string, unknown>,
+        };
+        const checkpointedPrefix = history.slice(0, 2).map((message) => ({
+            ...message,
+            content: truncatedPrefix && message.role === "user"
+                ? "Question 1 [truncated: prompt budget exceeded]"
+                : message.content,
+        }));
+        const storedMessages = checkpointedPrefix.slice();
+        const saveMessages = jest.fn(async ({ messages }: {
+            messages: Array<{ role: string; content: { content?: string } }>;
+        }) => {
+            for (const message of messages) {
+                if (
+                    (message.role === "user" || message.role === "assistant") &&
+                    typeof message.content.content === "string"
+                ) {
+                    storedMessages.push({
+                        role: message.role,
+                        content: message.content.content,
+                    });
+                }
+            }
+            return { messages };
+        });
+        let failCheckpoint = true;
+        const memory = {
+            getThreadById: jest.fn(async () => memoryThread),
+            recall: jest.fn(async () => ({
+                messages: storedMessages.map((message, index) => ({
+                    id: `stored-${index}`,
+                    role: message.role,
+                    createdAt: new Date(),
+                    threadId: sessionId,
+                    resourceId,
+                    content: {
+                        format: 2 as const,
+                        parts: [{ type: "text" as const, text: message.content }],
+                        content: message.content,
+                    },
+                })),
+                total: storedMessages.length,
+            })),
+            createThread: jest.fn(async () => memoryThread),
+            saveMessages,
+            updateThread: jest.fn(async ({ metadata }: {
+                metadata: Record<string, unknown>;
+            }) => {
+                if (failCheckpoint) {
+                    failCheckpoint = false;
+                    throw new Error("Temporary checkpoint failure");
+                }
+                memoryThread.metadata = metadata;
+                return memoryThread;
+            }),
+        };
+        const warn = jest.spyOn(console, "warn").mockImplementation(() => {});
+
+        try {
+            await acp
+                .client({ name: "iris-agent-test-client" })
+                .connectWith(
+                    createAcpAgentApp(
+                        { getMemory: async () => memory },
+                        undefined,
+                        undefined,
+                        { useMastraObservationalMemory: true },
+                    ),
+                    async (ctx) => {
+                        await ctx.request(acp.methods.agent.session.load, {
+                            sessionId,
+                            cwd: "/workspace",
+                            mcpServers: [],
+                        });
+                        await ctx.request(acp.methods.agent.session.close, { sessionId });
+                        await ctx.request(acp.methods.agent.session.load, {
+                            sessionId,
+                            cwd: "/workspace",
+                            mcpServers: [],
+                        });
+                    },
+                );
+
+            expect(memory.recall).toHaveBeenCalledTimes(4);
+            expect(saveMessages).toHaveBeenCalledTimes(1);
+            expect(storedMessages).toEqual([...checkpointedPrefix, ...history.slice(2)]);
+            expect(memoryThread.metadata).toMatchObject({
+                irisAgentAcpTranscriptMessageCount: history.length,
+            });
+        } finally {
+            warn.mockRestore();
+            await fs.unlink(sessionPath);
+        }
+    });
+
+    it("waits for initial hydration before running a concurrent prompt", async () => {
+        const sessionId = `acp-hydration-race-${randomUUID()}`;
+        const sessionPath = persistedSessionPath(sessionId);
+        const resourceId = `acp-session:${sessionId}`;
+        await fs.mkdir(path.dirname(sessionPath), { recursive: true });
+        await fs.writeFile(
+            sessionPath,
+            JSON.stringify({
+                id: sessionId,
+                cwd: "/workspace",
+                messages: [
+                    { role: "user", content: "Restored question" },
+                    { role: "assistant", content: "Restored answer" },
+                ],
+            }),
+        );
+        let releaseHydration!: () => void;
+        let markHydrationStarted!: () => void;
+        const hydrationGate = new Promise<void>((resolve) => {
+            releaseHydration = resolve;
+        });
+        const hydrationStarted = new Promise<void>((resolve) => {
+            markHydrationStarted = resolve;
+        });
+        const memoryThread = {
+            resourceId,
+            metadata: {} as Record<string, unknown>,
+        };
+        let threadExists = false;
+        const savedMessages: unknown[] = [];
+        const memory = {
+            getThreadById: jest.fn(async () => (threadExists ? memoryThread : null)),
+            recall: jest.fn(async () => ({ messages: [], total: 0 })),
+            createThread: jest.fn(async () => {
+                threadExists = true;
+                return memoryThread;
+            }),
+            saveMessages: jest.fn(async ({ messages }: { messages: unknown[] }) => {
+                if (savedMessages.length === 0) {
+                    markHydrationStarted();
+                    await hydrationGate;
+                }
+                savedMessages.push(...messages);
+                return { messages };
+            }),
+            updateThread: jest.fn(async ({ metadata }: {
+                metadata: Record<string, unknown>;
+            }) => {
+                memoryThread.metadata = metadata;
+                return memoryThread;
+            }),
+        };
+        const runtime: AcpRuntimeAgent = {
+            getMemory: async () => memory,
+            stream: jest.fn(async () => ({
+                fullStream: createChunkStream([
+                    { type: "text-delta", payload: { text: "Done" } },
+                ]),
+                text: Promise.resolve("Done"),
+            })),
+        };
+        const stream = runtime.stream as jest.MockedFunction<
+            NonNullable<AcpRuntimeAgent["stream"]>
+        >;
+
+        try {
+            await acp
+                .client({ name: "iris-agent-test-client" })
+                .connectWith(
+                    createAcpAgentApp(runtime, undefined, "local/custom-model", {
+                        useMastraObservationalMemory: true,
+                    }),
+                    async (ctx) => {
+                        const load = ctx.request(acp.methods.agent.session.load, {
+                            sessionId,
+                            cwd: "/workspace",
+                            mcpServers: [],
+                        });
+                        await hydrationStarted;
+                        const prompt = ctx.request(acp.methods.agent.session.prompt, {
+                            sessionId,
+                            prompt: [{ type: "text", text: "Concurrent prompt" }],
+                        });
+                        await new Promise((resolve) => setTimeout(resolve, 0));
+                        expect(stream).not.toHaveBeenCalled();
+
+                        releaseHydration();
+                        await load;
+                        await expect(prompt).resolves.toEqual({ stopReason: "end_turn" });
+                    },
+                );
+
+            expect(stream).toHaveBeenCalledTimes(1);
+            expect(stream.mock.calls[0]?.[0]).toBe("Concurrent prompt");
+            expect(stream.mock.calls[0]?.[1]).toMatchObject({
+                memory: { thread: sessionId, resource: resourceId },
+            });
+            expect(savedMessages).toHaveLength(2);
+            expect(memoryThread.metadata).toMatchObject({
+                irisAgentAcpTranscriptMessageCount: 4,
+            });
+        } finally {
+            await fs.unlink(sessionPath);
+        }
+    });
+
+    it.each(["missing", "undefined"] as const)(
+        "keeps replaying restored history when the runtime memory adapter is %s",
+        async (memoryAdapter) => {
+            const sessionId = `acp-no-memory-${randomUUID()}`;
+            const sessionPath = persistedSessionPath(sessionId);
+            await fs.mkdir(path.dirname(sessionPath), { recursive: true });
+            await fs.writeFile(
+                sessionPath,
+                JSON.stringify({
+                    id: sessionId,
+                    cwd: "/workspace",
+                    messages: [
+                        { role: "user", content: "Restored question" },
+                        { role: "assistant", content: "Restored answer" },
+                    ],
+                }),
+            );
+            const runtime: AcpRuntimeAgent = {
+                stream: jest.fn(async () => ({
+                    fullStream: createChunkStream([
+                        { type: "text-delta", payload: { text: "Done" } },
+                    ]),
+                    text: Promise.resolve("Done"),
+                })),
+            };
+            if (memoryAdapter === "undefined") {
+                runtime.getMemory = async () => undefined;
+            }
+            const stream = runtime.stream as jest.MockedFunction<
+                NonNullable<AcpRuntimeAgent["stream"]>
+            >;
+
+            try {
+                await acp
+                    .client({ name: "iris-agent-test-client" })
+                    .connectWith(
+                        createAcpAgentApp(runtime, undefined, "local/custom-model", {
+                            useMastraObservationalMemory: true,
+                        }),
+                        async (ctx) => {
+                            await ctx.request(acp.methods.agent.session.load, {
+                                sessionId,
+                                cwd: "/workspace",
+                                mcpServers: [],
+                            });
+                            await ctx.request(acp.methods.agent.session.prompt, {
+                                sessionId,
+                                prompt: [{ type: "text", text: "First new prompt" }],
+                            });
+                            await ctx.request(acp.methods.agent.session.prompt, {
+                                sessionId,
+                                prompt: [{ type: "text", text: "Second new prompt" }],
+                            });
+                        },
+                    );
+
+                expect(stream.mock.calls[0]?.[0]).toContain("Restored question");
+                expect(stream.mock.calls[0]?.[1]).not.toHaveProperty("memory");
+                expect(stream.mock.calls[1]?.[0]).toContain("Restored question");
+                expect(stream.mock.calls[1]?.[0]).toContain("First new prompt");
+                expect(stream.mock.calls[1]?.[0]).toContain("Second new prompt");
+                expect(stream.mock.calls[1]?.[1]).not.toHaveProperty("memory");
+            } finally {
+                await fs.unlink(sessionPath);
+            }
+        },
+    );
+
+    it("keeps bounded prior turns for chat-only ACP runtimes with observational memory enabled", async () => {
+        const runtime: AcpRuntimeAgent = {
+            chat: jest.fn(async () => ({ text: "Done" })),
+        };
+        const chat = runtime.chat as jest.MockedFunction<
+            NonNullable<AcpRuntimeAgent["chat"]>
+        >;
+
+        await acp
+            .client({ name: "iris-agent-test-client" })
+            .connectWith(
+                createAcpAgentApp(runtime, undefined, undefined, {
+                    useMastraObservationalMemory: true,
+                }),
+                async (ctx) => {
+                    const session = await ctx.request(acp.methods.agent.session.new, {
+                        cwd: "/workspace",
+                        mcpServers: [],
+                    });
+                    await ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId: session.sessionId,
+                        prompt: [{ type: "text", text: "Earlier question" }],
+                    });
+                    await ctx.request(acp.methods.agent.session.prompt, {
+                        sessionId: session.sessionId,
+                        prompt: [{ type: "text", text: "Current question" }],
+                    });
+                },
+            );
+
+        expect(chat.mock.calls[1]?.[0].messages).toEqual([
+            { role: "user", content: "Earlier question" },
+            { role: "assistant", content: "Done" },
+            { role: "user", content: "Current question" },
+        ]);
     });
 
     it("passes bounded prior turns to the runtime on subsequent prompts", async () => {

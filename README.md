@@ -101,6 +101,22 @@ The service also exposes file, chat-session, semantic-search, and LSP routes und
 implemented in [`api/`](./api/); use `GET /api/agent/tools` and
 `GET /api/agent/skills` for runtime discovery.
 
+Chat responses and streamed `done` events include `contextStats` with the
+effective context/input/output limits and, when the provider reports token
+usage, used and remaining context. CLI chat displays used and remaining tokens
+when the provider reports usage. Model context limits may be estimates when
+provider metadata is unavailable. Without `--context-window`, an explicit
+`IRIS_AGENT_INPUT_TOKEN_LIMIT` is applied directly without provider-metadata
+discovery; otherwise, OpenRouter metadata is used when available, with catalog
+limits or a conservative fallback for other models. `--context-window` sets
+the requested total window and discovers OpenRouter caps when available; known
+provider input/completion caps and `IRIS_AGENT_INPUT_TOKEN_LIMIT` still bound
+the budget, and a known provider context window caps the reported total. Iris
+Agent reserves up to 20% for output, enables
+Observational Memory consolidation at 75% of the input allowance (capped at
+200K tokens), and retains the token limiter as a final guard. Remaining context
+is omitted when the provider does not report token usage.
+
 Example chat request:
 
 ```sh
@@ -338,10 +354,17 @@ and restore persisted conversations for the current workspace. It also returns
 the per-session model configuration option required by the extension's composer
 controls.
 
+With observational memory enabled, reloading trusts the checkpointed transcript
+prefix even when runtime prompts were truncated. Only the uncheckpointed tail
+is reconciled using a separate memory-entry boundary, avoiding duplicate imports
+when checkpoint updates are retried or a turn contains tool-only memory entries.
+Memory from a failed or cancelled scoped turn is invalidated; subsequent prompts
+fall back to the committed transcript rather than reusing partial observations.
+
 ## CLI Usage
 
 ```sh
-iris-agent [--workspace <path>] [--acp | --chat] [--modelId <model>]
+iris-agent [--workspace <path>] [--acp | --chat] [--modelId <model>] [--observer-model <model>]
 ```
 
 ### Homebrew
@@ -401,6 +424,8 @@ the repository's **Actions** tab. It requires a repository secret named
 - `--chat` (`-c`) - Start interactive chat mode
 - `--chat-ui` - Select `auto` (default, prefers OpenTUI), `opentui` (require the TUI), or `plain` (old readline terminal chat, no FFI)
 - `--modelId` - Model identifier used for chat/ACP sessions (default: `openrouter/openai/gpt-5.3-codex` or `MODEL_ID` / `OPENROUTER_MODEL` env vars)
+- `--context-window` - Override the total context window in tokens; accepts plain counts or `K`/`M` values (for example, `100K`)
+- `--observer-model` - Model used by observational memory to summarize and consolidate conversation history; specifying it enables observational memory. Defaults to the chat model when `--context-window` enables memory without this option.
 
 Running the CLI without `--chat` or `--acp` prints help.
 
@@ -412,6 +437,12 @@ npm run cli -- --workspace . --chat
 
 # Interactive chat with custom model
 npm run cli -- --workspace . --chat --modelId openrouter/anthropic/claude-3.7-sonnet
+
+# Interactive chat with a 100K-token context window
+npm run cli -- --workspace . --chat --modelId openrouter/openai/gpt-4o --context-window 100K
+
+# Interactive chat with a separate model for observational memory
+npm run cli -- --workspace . --chat --context-window 100K --observer-model openrouter/google/gemini-2.5-flash
 
 # ACP server for IDE integration
 npm run cli -- --workspace . --acp
@@ -471,7 +502,7 @@ Provider-specific configuration:
 | `IRIS_AGENT_AUTO_LINT` / `IRIS_AGENT_AUTO_TEST` | Enable automatic lint/test validation. |
 | `IRIS_AGENT_LINT_CMD` / `IRIS_AGENT_TEST_CMD` | Override validation commands. |
 | `IRIS_AGENT_AUTO_FIX_VALIDATION` | Enable automatic validation fixes. |
-| `IRIS_AGENT_INPUT_TOKEN_LIMIT` / `IRIS_AGENT_MAX_OUTPUT_TOKENS` | Token-budget controls. The input limit overrides discovered model limits; configure it carefully to avoid provider context errors. |
+| `IRIS_AGENT_INPUT_TOKEN_LIMIT` / `IRIS_AGENT_MAX_OUTPUT_TOKENS` | Token-budget controls. The input limit caps discovered provider limits, including when `--context-window` is set; configure it carefully to avoid provider context errors. |
 | `IRIS_AGENT_PROMPT_TOKEN_BUDGET_RATIO` | Prompt budget ratio. |
 | `IRIS_AGENT_MODEL_RETRY_ATTEMPTS` | Model request retry count. |
 | `IRIS_AGENT_REFLECTION_MAX` / `IRIS_AGENT_REFLECTION_MAX_STEPS` | Reflection-loop limits. |
@@ -515,6 +546,13 @@ payloads. Use `POST /api/agent/mcp/inspect` to discover tools before calling
 `POST /api/agent/mcp/call`. Both routes require desktop authentication (see
 [Desktop authentication](#desktop-authentication)). MCP tool names are
 generated as `mcp_<server name>_<tool name>` and must start with `mcp_`.
+
+MCP input and structured-output validation supports JSON Schema draft-07,
+2019-09, and 2020-12 (including REA's tool schemas). Schemas without `$schema`
+use draft-07. Invalid arguments are rejected before invoking the server;
+invalid or unsupported input schemas are reported as tool errors. Compiled schemas
+are released from Ajv's cache so repeated tool discovery does not retain them
+for the lifetime of the process.
 
 #### Server configuration
 

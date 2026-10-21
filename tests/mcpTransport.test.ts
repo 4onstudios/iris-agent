@@ -1,13 +1,13 @@
 import { createServer, type Server as HttpServer } from "node:http";
 import { Server as LegacyMcpServer } from "@modelcontextprotocol/sdk-legacy/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk-legacy/server/sse.js";
-import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk-legacy/types.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk-legacy/types.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk-legacy/client/sse.js";
 import type { McpServerConfig } from "../api/core/library/mcpSettings";
-import { listMcpServerTools } from "../api/core/agent/tools/mcpTools";
+import { buildMcpTools, executeMcpToolByKey, listMcpServerTools } from "../api/core/agent/tools/mcpTools";
 import {
   createMcpRemoteTransport,
   LegacySseTransportAdapter,
@@ -45,14 +45,40 @@ describe("MCP remote transport selection", () => {
     ).toThrow("MCP server 'Remote MCP' has no remote URL");
   });
 
-  it("discovers tools from a legacy SSE endpoint and sends configured headers", async () => {
-    const legacyServer = new LegacyMcpServer(
-      { name: "legacy-test", version: "1.0.0" },
-      { capabilities: { tools: {} } },
-    );
-    legacyServer.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: [{ name: "hello", description: "Test tool", inputSchema: { type: "object" } }],
-    }));
+  it("discovers and invokes 2020-12 tools over legacy SSE with configured headers", async () => {
+    const inputSchema = {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object" as const,
+      properties: { name: { type: "string" } },
+      required: ["name"],
+      unevaluatedProperties: false,
+    };
+    const outputSchema = {
+      ...inputSchema,
+      properties: { greeting: { type: "string" } },
+      required: ["greeting"],
+    };
+    let callCount = 0;
+    let invalidOutput = false;
+    const legacyServers = new Set<LegacyMcpServer>();
+    const createLegacyServer = () => {
+      const legacyServer = new LegacyMcpServer(
+        { name: "legacy-test", version: "1.0.0" },
+        { capabilities: { tools: {} } },
+      );
+      legacyServer.setRequestHandler(ListToolsRequestSchema, async () => ({
+        tools: [{ name: "hello", description: "Test tool", inputSchema, outputSchema }],
+      }));
+      legacyServer.setRequestHandler(CallToolRequestSchema, async (request) => {
+        callCount += 1;
+        const structuredContent = invalidOutput
+          ? { greeting: 42 }
+          : { greeting: `Hello ${request.params.arguments?.name}` };
+        return { content: [{ type: "text", text: "hello" }], structuredContent };
+      });
+      legacyServers.add(legacyServer);
+      return legacyServer;
+    };
 
     const transports = new Map<string, SSEServerTransport>();
     let httpServer: HttpServer | undefined;
@@ -67,7 +93,7 @@ describe("MCP remote transport selection", () => {
         if (request.method === "GET" && url.pathname === "/sse") {
           const transport = new SSEServerTransport("/messages", response);
           transports.set(transport.sessionId, transport);
-          await legacyServer.connect(transport);
+          await createLegacyServer().connect(transport);
           return;
         }
 
@@ -94,20 +120,43 @@ describe("MCP remote transport selection", () => {
         throw new Error("Failed to start test SSE server");
       }
 
-      const tools = await listMcpServerTools(
-        {
-          ...server,
-          url: `http://127.0.0.1:${address.port}/sse`,
-          transport: "sse",
-        },
-        process.cwd(),
-      );
+      const config: McpServerConfig = {
+        ...server,
+        url: `http://127.0.0.1:${address.port}/sse`,
+        transport: "sse",
+      };
+      const tools = await listMcpServerTools(config, process.cwd());
 
       expect(tools).toEqual([
-        { name: "hello", description: "Test tool", inputSchema: { type: "object" } },
+        { name: "hello", description: "Test tool", inputSchema },
       ]);
+      const key = "mcp_Remote_MCP_hello";
+      await expect(executeMcpToolByKey([config], process.cwd(), key, { name: "REA" }))
+        .resolves.toMatchObject({ success: true, structuredContent: { greeting: "Hello REA" } });
+      await expect(executeMcpToolByKey([config], process.cwd(), key, { name: 42 }))
+        .resolves.toMatchObject({ success: false, error: expect.stringContaining("/name") });
+      expect(callCount).toBe(1);
+
+      const registered = await buildMcpTools([config], process.cwd());
+      const tool = registered[key];
+      if (!tool || typeof tool !== "object" || !("execute" in tool) || typeof tool.execute !== "function") {
+        throw new Error("Expected an executable MCP tool");
+      }
+      await expect(tool.execute({ name: "agent" })).resolves.toMatchObject({
+        success: true,
+        structuredContent: { greeting: "Hello agent" },
+      });
+      await expect(tool.execute({ name: 42 })).resolves.toMatchObject({
+        error: true,
+        message: expect.stringContaining("name: must be string"),
+      });
+      expect(callCount).toBe(2);
+
+      invalidOutput = true;
+      await expect(executeMcpToolByKey([config], process.cwd(), key, { name: "REA" }))
+        .resolves.toMatchObject({ success: false, error: expect.stringContaining("greeting") });
     } finally {
-      await legacyServer.close();
+      await Promise.all(Array.from(legacyServers, (server) => server.close()));
       if (httpServer?.listening) {
         await new Promise<void>((resolve, reject) => {
           httpServer!.close((error) => (error ? reject(error) : resolve()));

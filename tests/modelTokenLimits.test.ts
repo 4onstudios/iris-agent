@@ -1,8 +1,22 @@
 import {
+  parseContextWindow,
   resolveModelContextBudget,
   resolveModelInputTokenLimit,
   resolveModelInputTokenLimitAsync,
+  resolveObservationThresholdTokens,
 } from "../api/helpers/modelTokenLimits";
+
+describe("observation threshold", () => {
+  it("stays below the input allowance of small-window models", () => {
+    expect(resolveObservationThresholdTokens(3_277)).toBe(2_457);
+    expect(resolveObservationThresholdTokens(3_277)).toBeLessThan(3_277);
+  });
+
+  it("uses 75% of the input allowance and caps large windows", () => {
+    expect(resolveObservationThresholdTokens(80_000)).toBe(60_000);
+    expect(resolveObservationThresholdTokens(1_000_000)).toBe(200_000);
+  });
+});
 
 describe("model input limits", () => {
   afterEach(() => jest.restoreAllMocks());
@@ -25,6 +39,7 @@ describe("model input limits", () => {
     expect(first).toBe(3_277);
     expect(second).toBe(first);
     expect(await resolveModelContextBudget("openrouter/example/small-model", env)).toEqual({
+      contextWindowTokens: 4_096,
       inputTokens: 3_277,
       maxOutputTokens: 819,
     });
@@ -64,7 +79,133 @@ describe("model input limits", () => {
     expect(await resolveModelContextBudget(
       "openrouter/z-ai/glm-5.2",
       {},
-    )).toEqual({ inputTokens: 224_000, maxOutputTokens: 32_000 });
+    )).toEqual({
+      contextWindowTokens: 256_000,
+      inputTokens: 224_000,
+      maxOutputTokens: 32_000,
+    });
+  });
+
+  it("parses human-readable context-window values and applies an explicit total window", async () => {
+    expect(parseContextWindow("100K")).toBe(100_000);
+    expect(parseContextWindow("1M")).toBe(1_000_000);
+
+    await expect(
+      resolveModelContextBudget("custom/model", {}, parseContextWindow("100K")),
+    ).resolves.toEqual({
+      contextWindowTokens: 100_000,
+      inputTokens: 80_000,
+      maxOutputTokens: 20_000,
+    });
+  });
+
+  it("preserves provider input and completion caps with an explicit total window", async () => {
+    jest.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: {
+          context_length: 400_000,
+          top_provider: {
+            context_length: 400_000,
+            max_completion_tokens: 16_000,
+          },
+        },
+      }),
+    } as Response);
+
+    await expect(
+      resolveModelContextBudget(
+        "openrouter/example/model-with-provider-caps",
+        { OPENROUTER_API_KEY: "test-key" },
+        400_000,
+      ),
+    ).resolves.toEqual({
+      contextWindowTokens: 400_000,
+      inputTokens: 384_000,
+      maxOutputTokens: 16_000,
+    });
+  });
+
+  it("applies the configured input-token cap even when provider metadata is available", async () => {
+    jest.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: {
+          context_length: 128_000,
+          top_provider: {
+            context_length: 128_000,
+            max_completion_tokens: 32_000,
+          },
+        },
+      }),
+    } as Response);
+
+    await expect(
+      resolveModelContextBudget(
+        "openrouter/example/model-with-explicit-input-cap",
+        {
+          OPENROUTER_API_KEY: "test-key",
+          IRIS_AGENT_INPUT_TOKEN_LIMIT: "6000",
+        },
+        100_000,
+      ),
+    ).resolves.toEqual({
+      contextWindowTokens: 100_000,
+      inputTokens: 6_000,
+      maxOutputTokens: 20_000,
+    });
+  });
+
+  it("caps the reported context window when an override exceeds provider capacity", async () => {
+    jest.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: {
+          context_length: 4_096,
+          top_provider: { context_length: 4_096, max_completion_tokens: 2_048 },
+        },
+      }),
+    } as Response);
+
+    await expect(
+      resolveModelContextBudget(
+        "openrouter/example/4k-model-with-override",
+        { OPENROUTER_API_KEY: "test-key" },
+        100_000,
+      ),
+    ).resolves.toEqual({
+      contextWindowTokens: 4_096,
+      inputTokens: 3_277,
+      maxOutputTokens: 819,
+    });
+  });
+
+  it("preserves known catalog input caps when provider metadata is unavailable", async () => {
+    expect(await resolveModelContextBudget(
+      "gpt-5.3-codex",
+      {},
+      400_000,
+    )).toEqual({
+      contextWindowTokens: 400_000,
+      inputTokens: 272_000,
+      maxOutputTokens: 65_536,
+    });
+  });
+
+  it.each(["openai/gpt-5.3-codex", "anthropic/claude-haiku-4-5"])(
+    "applies catalog input caps to direct-provider ID %s",
+    async (modelId) => {
+      const budget = await resolveModelContextBudget(modelId, {}, 400_000);
+      expect(budget.inputTokens).toBe(
+        modelId.startsWith("openai/") ? 272_000 : 200_000,
+      );
+    },
+  );
+
+  it("rejects invalid and out-of-range context-window values", () => {
+    expect(() => parseContextWindow("100 tokens")).toThrow("--context-window");
+    expect(() => parseContextWindow("100")).toThrow("--context-window");
+    expect(() => parseContextWindow("2M")).toThrow("--context-window");
   });
 
   it("discovers Google models through OpenRouter when only its key is configured", async () => {

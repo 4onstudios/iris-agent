@@ -4,6 +4,7 @@ import { Readable, Writable } from "node:stream";
 import os from "node:os";
 import fs from "node:fs/promises";
 import * as acp from "@agentclientprotocol/sdk";
+import type { MastraDBMessage } from "@mastra/core/agent/message-list";
 import path from "path";
 import {
   getToolCallSignature,
@@ -21,10 +22,10 @@ import {
 } from "../helpers/tokenUsage";
 import {
   buildConversationTurn,
-  resolveModelInputTokenLimitAsync,
   resolvePromptTokenBudget,
   type ConversationMessageLike,
 } from "../helpers/promptBudget";
+import { resolveModelContextBudget } from "../helpers/modelTokenLimits";
 
 const DEFAULT_MAX_STEPS = 50;
 const ACP_MAX_CONVERSATION_MESSAGES = 12;
@@ -32,6 +33,9 @@ const ACP_MAX_CONVERSATION_MESSAGE_TOKENS = 1_200;
 const MAX_CONCURRENT_SESSION_LOADS = 16;
 
 const CHAT_SESSIONS_DIR = path.join(os.homedir(), ".iris", "chat-sessions");
+const ACP_TRANSCRIPT_CHECKPOINT = "irisAgentAcpTranscriptMessageCount";
+const ACP_MEMORY_CHECKPOINT_MESSAGE_COUNT = "irisAgentAcpMemoryCheckpointMessageCount";
+const ACP_MEMORY_INVALIDATED = "irisAgentAcpMemoryInvalidated";
 
 type PersistedChatMessage = {
   role: "user" | "assistant";
@@ -244,6 +248,32 @@ export type AcpRuntimeAgent = {
     signal?: AbortSignal;
     abortSignal?: AbortSignal;
   }) => Promise<unknown>;
+  getMemory?: () => Promise<AcpMemoryAdapter | undefined>;
+};
+
+export type AcpMemoryAdapter = {
+  getThreadById(args: {
+    threadId: string;
+  }): Promise<{
+    resourceId?: string;
+    metadata?: Record<string, unknown>;
+  } | null>;
+  recall(args: {
+    threadId: string;
+    resourceId: string;
+    page: number;
+    perPage: number | false;
+  }): Promise<{ messages: MastraDBMessage[]; total: number }>;
+  createThread(args: {
+    threadId: string;
+    resourceId: string;
+    title?: string;
+  }): Promise<unknown>;
+  saveMessages(args: { messages: MastraDBMessage[] }): Promise<unknown>;
+  updateThread(args: {
+    id: string;
+    metadata: Record<string, unknown>;
+  }): Promise<unknown>;
 };
 
 export type AcpAgentFactory = (
@@ -253,8 +283,14 @@ export type AcpAgentFactory = (
 
 export type AcpAgentProvider = AcpRuntimeAgent | AcpAgentFactory;
 
+export type AcpAgentAppOptions = {
+  contextWindowTokens?: number;
+  useMastraObservationalMemory?: boolean;
+};
+
 type ActiveTurn = {
   abortController: AbortController;
+  completion?: Promise<void>;
   cancelStream?: () => Promise<void>;
 };
 
@@ -264,6 +300,9 @@ type AcpSessionState = {
   title?: string;
   activeTurn?: ActiveTurn;
   history: PersistedChatMessage[];
+  memoryHistoryHydrated?: boolean;
+  memoryHistoryInvalidated?: boolean;
+  transcriptPersistence: Promise<void>;
 };
 
 type PendingToolInvocation = {
@@ -347,10 +386,209 @@ const extractText = (value: unknown): string => {
   return value === undefined ? "" : JSON.stringify(value);
 };
 
+const saveTranscriptMessages = async (
+  memory: AcpMemoryAdapter,
+  sessionId: string,
+  resourceId: string,
+  history: PersistedChatMessage[],
+): Promise<void> => {
+  if (history.length === 0) return;
+  const messages: MastraDBMessage[] = history.map((message) => ({
+    id: randomUUID(),
+    role: message.role,
+    createdAt: new Date(),
+    threadId: sessionId,
+    resourceId,
+    content: {
+      format: 2,
+      parts: [{ type: "text", text: message.content }],
+      content: message.content,
+    },
+  }));
+  await memory.saveMessages({ messages });
+};
+
+const updateTranscriptCheckpoint = async (
+  memory: AcpMemoryAdapter,
+  sessionId: string,
+  messageCount: number,
+): Promise<boolean> => {
+  const checkpointMemoryMessageCount = (await memory.recall({
+    threadId: sessionId,
+    resourceId: `acp-session:${sessionId}`,
+    page: 0,
+    perPage: 1,
+  })).total;
+  const thread = await memory.getThreadById({ threadId: sessionId });
+  if (!thread) return false;
+  await memory.updateThread({
+    id: sessionId,
+    metadata: {
+      ...thread.metadata,
+      [ACP_TRANSCRIPT_CHECKPOINT]: messageCount,
+      [ACP_MEMORY_CHECKPOINT_MESSAGE_COUNT]: checkpointMemoryMessageCount,
+      [ACP_MEMORY_INVALIDATED]: false,
+    },
+  });
+  return true;
+};
+
+const invalidateAcpMemoryHistory = async (
+  memory: AcpMemoryAdapter,
+  sessionId: string,
+  resourceId: string,
+): Promise<void> => {
+  let thread = await memory.getThreadById({ threadId: sessionId });
+  if (thread && thread.resourceId !== resourceId) {
+    throw new Error(`ACP memory thread '${sessionId}' belongs to a different resource`);
+  }
+  if (!thread) {
+    await memory.createThread({ threadId: sessionId, resourceId });
+    thread = await memory.getThreadById({ threadId: sessionId });
+  }
+  if (!thread) {
+    throw new Error(`Could not invalidate missing ACP memory thread '${sessionId}'`);
+  }
+  await memory.updateThread({
+    id: sessionId,
+    metadata: {
+      ...thread.metadata,
+      [ACP_MEMORY_INVALIDATED]: true,
+    },
+  });
+};
+
+const waitForPersistenceOrAbort = (
+  persistence: Promise<void>,
+  signal: AbortSignal,
+): Promise<boolean> => {
+  if (signal.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (completed: boolean) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      resolve(completed);
+    };
+    const onAbort = () => finish(false);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) {
+      finish(false);
+      return;
+    }
+    void persistence.then(
+      () => finish(true),
+      () => finish(true),
+    );
+  });
+};
+
+const transcriptMessageMatches = (
+  memoryMessage: MastraDBMessage,
+  transcriptMessage: PersistedChatMessage,
+): boolean => {
+  if (memoryMessage.role !== transcriptMessage.role) return false;
+  const content = memoryMessage.content;
+  const text = typeof content === "string"
+    ? content
+    : content.parts
+      .filter((part) => part.type === "text" && "text" in part)
+      .map((part) => "text" in part && typeof part.text === "string" ? part.text : "")
+      .join("");
+  return text === transcriptMessage.content;
+};
+
+const hydrateAcpMemoryHistory = async (
+  runtimeAgent: AcpRuntimeAgent,
+  sessionId: string,
+  resourceId: string,
+  title: string | undefined,
+  history: PersistedChatMessage[],
+): Promise<boolean> => {
+  if (history.length === 0) return false;
+  if (typeof runtimeAgent.getMemory !== "function") return false;
+  const memory = await runtimeAgent.getMemory();
+  if (!memory) return false;
+
+  const existingThread = await memory.getThreadById({ threadId: sessionId });
+  let existingMessageCount = 0;
+  if (existingThread) {
+    if (existingThread.resourceId !== resourceId) {
+      throw new Error(`ACP memory thread '${sessionId}' belongs to a different resource`);
+    }
+    if (existingThread.metadata?.[ACP_MEMORY_INVALIDATED] === true) return false;
+    const checkpoint = existingThread.metadata?.[ACP_TRANSCRIPT_CHECKPOINT];
+    if (typeof checkpoint === "number" && Number.isSafeInteger(checkpoint)) {
+      if (checkpoint < 0 || checkpoint > history.length) return false;
+      existingMessageCount = checkpoint;
+    }
+    const existingMessages = await memory.recall({
+      threadId: sessionId,
+      resourceId,
+      page: 0,
+      perPage: false,
+    });
+    const memoryCheckpoint = existingThread.metadata?.[
+      ACP_MEMORY_CHECKPOINT_MESSAGE_COUNT
+    ];
+    const memoryMessageBoundary =
+      typeof memoryCheckpoint === "number" && Number.isSafeInteger(memoryCheckpoint)
+        ? memoryCheckpoint
+        : existingMessageCount === history.length
+          ? existingMessages.messages.length
+          : Math.min(existingMessageCount, existingMessages.messages.length);
+    if (
+      memoryMessageBoundary < 0 ||
+      memoryMessageBoundary > existingMessages.messages.length
+    ) {
+      return false;
+    }
+    const uncheckpointedTranscriptMessages = existingMessages.messages
+      .slice(memoryMessageBoundary)
+      .filter(
+        (message): message is MastraDBMessage & {
+          role: "user" | "assistant";
+        } => message.role === "user" || message.role === "assistant",
+      );
+    // ACP transcript checkpoints count user/assistant transcript entries, while
+    // the memory boundary counts every runtime entry (including tool-only turns).
+    if (
+      uncheckpointedTranscriptMessages.length > history.length - existingMessageCount ||
+      uncheckpointedTranscriptMessages.some(
+        (message, index) =>
+          history[existingMessageCount + index] === undefined ||
+          !transcriptMessageMatches(message, history[existingMessageCount + index]),
+      )
+    ) {
+      return false;
+    }
+    existingMessageCount += uncheckpointedTranscriptMessages.length;
+  } else {
+    await memory.createThread({
+      threadId: sessionId,
+      resourceId,
+      ...(title ? { title } : {}),
+    });
+  }
+
+  await saveTranscriptMessages(
+    memory,
+    sessionId,
+    resourceId,
+    history.slice(existingMessageCount),
+  );
+  if (!(await updateTranscriptCheckpoint(memory, sessionId, history.length))) {
+    return false;
+  }
+  return true;
+};
+
 export const createAcpAgentApp = (
   agentProvider: AcpAgentProvider,
   workspaceRoot?: string,
   defaultModelId?: string,
+  options: AcpAgentAppOptions = {},
 ): acp.AgentApp => {
   const boundWorkspaceRoot = workspaceRoot
     ? path.resolve(workspaceRoot)
@@ -459,6 +697,8 @@ export const createAcpAgentApp = (
         cwd: sessionWorkspace,
         modelId: requestedModel,
         history: [],
+        memoryHistoryHydrated: false,
+        transcriptPersistence: Promise.resolve(),
       });
       await notifyAvailableCommands(ctx, sessionId);
       return {
@@ -494,12 +734,40 @@ export const createAcpAgentApp = (
         );
       }
       const history = persisted.messages.slice();
-      sessions.set(sessionId, {
+      const session: AcpSessionState = {
         cwd: sessionWorkspace,
         modelId: requestedModel,
         title: getPersistedSessionTitle(persisted),
         history,
-      });
+        memoryHistoryHydrated: false,
+        transcriptPersistence: Promise.resolve(),
+      };
+      sessions.set(sessionId, session);
+      if (options.useMastraObservationalMemory && history.length > 0) {
+        // Register hydration as the persistence barrier so a concurrent prompt
+        // waits for it, and checkpoint only the snapshot actually saved.
+        const hydratedHistory = history.slice();
+        const hydration = (async () => {
+          const runtimeAgent = await resolveAgent(requestedModel, sessionWorkspace);
+          try {
+            session.memoryHistoryHydrated = await hydrateAcpMemoryHistory(
+              runtimeAgent,
+              sessionId,
+              `acp-session:${sessionId}`,
+              session.title,
+              hydratedHistory,
+            );
+          } catch (error) {
+            session.memoryHistoryHydrated = false;
+            console.warn(
+              `[acp] Could not hydrate transcript for session '${sessionId}'; retaining bounded transcript replay:`,
+              error instanceof Error ? error.message : String(error),
+            );
+          }
+        })();
+        session.transcriptPersistence = hydration.catch(() => undefined);
+        await hydration;
+      }
       for (const message of history) {
         await ctx.client.notify(acp.methods.client.session.update, {
           sessionId,
@@ -581,11 +849,29 @@ export const createAcpAgentApp = (
         throw new Error(`Unknown ACP session '${sessionId}'`);
       }
 
-      const activeTurn: ActiveTurn = { abortController: new AbortController() };
       const previousTurn = session.activeTurn;
+      const activeTurn: ActiveTurn = {
+        abortController: new AbortController(),
+        completion: previousTurn?.completion,
+      };
       session.activeTurn = activeTurn;
       await cancelActiveTurn(previousTurn);
+      const previousTurnCompleted = await waitForPersistenceOrAbort(
+        previousTurn?.completion ?? Promise.resolve(),
+        activeTurn.abortController.signal,
+      );
+      if (!previousTurnCompleted) {
+        return { stopReason: "cancelled" as const };
+      }
+      // A prior turn may already have committed its transcript and still be
+      // checkpointing it in observational memory. Wait before deciding whether
+      // this turn can rely on memory instead of replaying bounded history.
+      const persistenceCompleted = await waitForPersistenceOrAbort(
+        session.transcriptPersistence,
+        activeTurn.abortController.signal,
+      );
       if (
+        !persistenceCompleted ||
         sessions.get(sessionId) !== session ||
         activeTurn.abortController.signal.aborted
       ) {
@@ -608,12 +894,29 @@ export const createAcpAgentApp = (
       // This avoids exposing an in-flight, possibly-cancelled turn to any
       // other request that reads session.history concurrently.
       const conversationHistory = session.history.slice();
-      const modelInputTokenLimit = await resolveModelInputTokenLimitAsync(
+      const modelContextBudget = await resolveModelContextBudget(
         turnModelId ?? defaultModelId ?? "",
+        process.env,
+        options.contextWindowTokens,
       );
+      const modelInputTokenLimit = modelContextBudget.inputTokens;
+      const runtimeSupportsScopedMemory =
+        options.useMastraObservationalMemory === true &&
+        (typeof runtimeAgent.stream === "function" ||
+          typeof runtimeAgent.generate === "function");
+      const useMemoryWithoutTranscriptReplay =
+        runtimeSupportsScopedMemory && session.memoryHistoryHydrated === true;
+      const memoryScope =
+        runtimeSupportsScopedMemory &&
+          session.memoryHistoryInvalidated !== true &&
+          (useMemoryWithoutTranscriptReplay || conversationHistory.length === 0)
+          ? { thread: sessionId, resource: `acp-session:${sessionId}` }
+          : undefined;
       const promptBuild = await buildConversationTurn({
         currentMessage: promptText,
-        history: conversationHistory satisfies RuntimeConversationMessage[],
+        history: useMemoryWithoutTranscriptReplay
+          ? undefined
+          : conversationHistory satisfies RuntimeConversationMessage[],
         maxPromptTokens: resolvePromptTokenBudget(modelInputTokenLimit),
         maxConversationMessages: ACP_MAX_CONVERSATION_MESSAGES,
         maxConversationMessageTokens: ACP_MAX_CONVERSATION_MESSAGE_TOKENS,
@@ -621,40 +924,77 @@ export const createAcpAgentApp = (
       const compactedConversationHistory = promptBuild.budgetedConversationHistory;
       const boundedPromptText = promptBuild.currentMessage;
       const runtimePrompt = promptBuild.prompt;
+      let turnCommitted = false;
       const persistTurn = async (assistantText: string): Promise<boolean> => {
-        // Guard the commit itself: even though nothing is written until now,
-        // the turn may have been cancelled (or superseded by a new prompt)
-        // while we were awaiting the final notification/generation above.
-        // Re-check immediately before mutating session.history so a
-        // cancelled turn can never sneak its messages in at the last moment.
-        if (sessions.get(sessionId) !== session || turnSignal.aborted) {
-          return false;
-        }
-        if (promptText && !session.title) {
-          session.title = promptText.replace(/\s+/g, " ").slice(0, 120);
-        }
-        // Commit the user and assistant messages together, atomically, only
-        // once the turn has actually succeeded. Nothing is added to
-        // session.history before this point, so a cancelled/failed turn
-        // never leaks a partial entry for a concurrent turn to observe.
-        if (promptText) {
-          session.history.push({ role: "user", content: promptText });
-        }
-        if (assistantText) {
-          session.history.push({ role: "assistant", content: assistantText });
-        }
-        await savePersistedChatSession(
-          sessionId,
-          session.history,
-          session,
-          await loadPersistedChatSession(sessionId),
+        const persistence = session.transcriptPersistence.then(async () => {
+          // Guard the commit itself: even though nothing is written until now,
+          // the turn may have been cancelled (or superseded by a new prompt)
+          // while we were awaiting the final notification/generation above.
+          // Re-check immediately before mutating session.history so a
+          // cancelled turn can never sneak its messages in at the last moment.
+          if (sessions.get(sessionId) !== session || turnSignal.aborted) {
+            return false;
+          }
+          if (promptText && !session.title) {
+            session.title = promptText.replace(/\s+/g, " ").slice(0, 120);
+          }
+          // Commit the user and assistant messages together, atomically, only
+          // once the turn has actually succeeded. Nothing is added to
+          // session.history before this point, so a cancelled/failed turn
+          // never leaks a partial entry for a concurrent turn to observe.
+          if (promptText) {
+            session.history.push({ role: "user", content: promptText });
+          }
+          if (assistantText) {
+            session.history.push({ role: "assistant", content: assistantText });
+          }
+          await savePersistedChatSession(
+            sessionId,
+            session.history,
+            session,
+            await loadPersistedChatSession(sessionId),
+          );
+          if (memoryScope) {
+            session.memoryHistoryHydrated = false;
+            if (
+              (conversationHistory.length === 0 || useMemoryWithoutTranscriptReplay) &&
+              typeof runtimeAgent.getMemory === "function"
+            ) {
+              try {
+                const memory = await runtimeAgent.getMemory();
+                if (memory) {
+                  session.memoryHistoryHydrated =
+                    await updateTranscriptCheckpoint(
+                      memory,
+                      sessionId,
+                      session.history.length,
+                    );
+                }
+              } catch (error) {
+                console.warn(
+                  `[acp] Could not checkpoint restored transcript for session '${sessionId}':`,
+                  error instanceof Error ? error.message : String(error),
+                );
+              }
+            }
+          }
+          turnCommitted = true;
+          return true;
+        });
+        session.transcriptPersistence = persistence.then(
+          () => undefined,
+          () => undefined,
         );
-        return true;
+        return persistence;
       };
       const turnSignal = activeTurn.abortController.signal;
       if (sessions.get(sessionId) !== session || turnSignal.aborted) {
         return { stopReason: "cancelled" as const };
       }
+      let completeTurn!: () => void;
+      activeTurn.completion = new Promise<void>((resolve) => {
+        completeTurn = resolve;
+      });
       const abortedMarker = Symbol("aborted");
       const raceWithAbort = async <T>(
         startWork: () => Promise<T>,
@@ -699,6 +1039,7 @@ export const createAcpAgentApp = (
                   abortSignal: turnSignal,
                   maxSteps: effectiveMaxSteps,
                   modelId: turnModelId,
+                  ...(memoryScope ? { memory: memoryScope } : {}),
                 },
               ) as Promise<AgentStreamResult>,
           );
@@ -1237,6 +1578,13 @@ export const createAcpAgentApp = (
           };
         }
 
+        const chatMessages = [
+            ...compactedConversationHistory.map((message) => ({
+              role: message.role === "assistant" ? "assistant" as const : "user" as const,
+              content: message.content,
+            })),
+            { role: "user" as const, content: boundedPromptText },
+          ];
         const generated = await raceWithAbort(async () =>
           runtimeAgent.generate
             ? runtimeAgent.generate(runtimePrompt, {
@@ -1244,16 +1592,11 @@ export const createAcpAgentApp = (
               abortSignal: turnSignal,
               maxSteps: effectiveMaxSteps,
               modelId: turnModelId,
+              ...(memoryScope ? { memory: memoryScope } : {}),
             })
             : runtimeAgent.chat
               ? runtimeAgent.chat({
-                messages: [
-                  ...compactedConversationHistory.map((message) => ({
-                    role: message.role,
-                    content: message.content,
-                  })),
-                  { role: "user" as const, content: boundedPromptText },
-                ],
+                messages: chatMessages,
                 signal: turnSignal,
                 abortSignal: turnSignal,
               })
@@ -1283,9 +1626,36 @@ export const createAcpAgentApp = (
         }
         throw error;
       } finally {
+        if (memoryScope && !turnCommitted) {
+          session.memoryHistoryHydrated = false;
+          session.memoryHistoryInvalidated = true;
+          const invalidation = session.transcriptPersistence.then(async () => {
+            const memory = await runtimeAgent.getMemory?.();
+            if (memory) {
+              await invalidateAcpMemoryHistory(
+                memory,
+                sessionId,
+                `acp-session:${sessionId}`,
+              );
+            }
+          });
+          session.transcriptPersistence = invalidation.then(
+            () => undefined,
+            () => undefined,
+          );
+          try {
+            await invalidation;
+          } catch (error) {
+            console.warn(
+              `[acp] Could not invalidate observational memory after an unsuccessful turn for session '${sessionId}':`,
+              error instanceof Error ? error.message : String(error),
+            );
+          }
+        }
         if (session.activeTurn === activeTurn) {
           session.activeTurn = undefined;
         }
+        completeTurn();
       }
     })
     .onRequest(acp.methods.agent.session.close, async (ctx) => {
@@ -1302,6 +1672,7 @@ export async function startAcpServer(
   runtimeAgentOrFactory: AcpAgentProvider,
   workspaceRoot?: string,
   defaultModelId?: string,
+  options: AcpAgentAppOptions = {},
 ): Promise<void> {
   const output = Writable.toWeb(process.stdout) as WritableStream<Uint8Array>;
   const input = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
@@ -1309,6 +1680,7 @@ export async function startAcpServer(
     runtimeAgentOrFactory,
     workspaceRoot,
     defaultModelId,
+    options,
   ).connect(acp.ndJsonStream(output, input));
 
   console.error("ACP agent ready: iris-agent (stdio)");
