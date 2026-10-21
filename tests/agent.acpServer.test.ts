@@ -91,7 +91,7 @@ describe("ACP server", () => {
                     resourceId: `acp-session:${threadId}`,
                     metadata: {},
                 }),
-                recall: async () => ({ messages: [] }),
+                recall: async () => ({ messages: [], total: 0 }),
                 createThread: async () => ({}),
                 saveMessages: async () => ({}),
                 updateThread: async () => ({}),
@@ -165,7 +165,10 @@ describe("ACP server", () => {
                 resourceId: `acp-session:${threadId}`,
                 metadata: memoryThread.metadata,
             })),
-            recall: jest.fn(async () => ({ messages: [] })),
+            recall: jest.fn(async () => ({
+                messages: [],
+                total: checkpointCount * 2,
+            })),
             createThread: jest.fn(async () => ({})),
             saveMessages: jest.fn(async () => ({})),
             updateThread: jest.fn(async ({ metadata }: {
@@ -234,6 +237,13 @@ describe("ACP server", () => {
                     expect(memoryThread.metadata).toMatchObject({
                         irisAgentAcpTranscriptMessageCount: 4,
                     });
+                    expect(memory.recall).toHaveBeenCalledTimes(2);
+                    expect(memory.recall).toHaveBeenCalledWith({
+                        threadId: session.sessionId,
+                        resourceId: `acp-session:${session.sessionId}`,
+                        page: 0,
+                        perPage: 1,
+                    });
                 },
             );
     });
@@ -256,7 +266,7 @@ describe("ACP server", () => {
                 resourceId: `acp-session:${threadId}`,
                 metadata: memoryThread.metadata,
             })),
-            recall: jest.fn(async () => ({ messages: [] })),
+            recall: jest.fn(async () => ({ messages: [], total: 0 })),
             createThread: jest.fn(async () => ({})),
             saveMessages: jest.fn(async () => ({})),
             updateThread: jest.fn(async ({ metadata }: {
@@ -480,7 +490,10 @@ describe("ACP server", () => {
         }));
         const memory = {
             getThreadById: jest.fn(async () => memoryThread),
-            recall: jest.fn(async () => ({ messages: storedMessages })),
+            recall: jest.fn(async () => ({
+                messages: storedMessages,
+                total: storedMessages.length,
+            })),
             createThread: jest.fn(async () => memoryThread),
             saveMessages: jest.fn(async ({ messages }: { messages: MastraDBMessage[] }) => {
                 storedMessages.push(...messages);
@@ -542,7 +555,10 @@ describe("ACP server", () => {
         };
         const memory = {
             getThreadById: jest.fn(async () => memoryThread),
-            recall: jest.fn(async () => ({ messages: storedMessages.slice() })),
+            recall: jest.fn(async () => ({
+                messages: storedMessages.slice(),
+                total: storedMessages.length,
+            })),
             createThread: jest.fn(async () => memoryThread),
             saveMessages: jest.fn(async ({ messages }: { messages: MastraDBMessage[] }) => {
                 storedMessages.push(...messages);
@@ -685,7 +701,7 @@ describe("ACP server", () => {
         const savedMessages: Array<{ content: { content?: string } }> = [];
         const memory = {
             getThreadById: jest.fn(async () => memoryThread),
-            recall: jest.fn(async () => ({ messages: [] })),
+            recall: jest.fn(async () => ({ messages: [], total: 0 })),
             createThread: jest.fn(async () => memoryThread),
             saveMessages: jest.fn(async ({ messages }: {
                 messages: Array<{ content: { content?: string } }>;
@@ -750,7 +766,10 @@ describe("ACP server", () => {
         };
         const memory = {
             getThreadById: jest.fn(async () => memoryThread),
-            recall: jest.fn(async () => ({ messages: storedMessages.slice() })),
+            recall: jest.fn(async () => ({
+                messages: storedMessages.slice(),
+                total: storedMessages.length,
+            })),
             createThread: jest.fn(async () => memoryThread),
             saveMessages: jest.fn(async ({ messages }: { messages: MastraDBMessage[] }) => {
                 storedMessages.push(...messages);
@@ -914,6 +933,7 @@ describe("ACP server", () => {
                         content: message.content,
                     },
                 })),
+                total: storedMessages.length,
             })),
             createThread: jest.fn(async () => memoryThread),
             saveMessages,
@@ -999,7 +1019,7 @@ describe("ACP server", () => {
         const savedMessages: unknown[] = [];
         const memory = {
             getThreadById: jest.fn(async () => (threadExists ? memoryThread : null)),
-            recall: jest.fn(async () => ({ messages: [] })),
+            recall: jest.fn(async () => ({ messages: [], total: 0 })),
             createThread: jest.fn(async () => {
                 threadExists = true;
                 return memoryThread;

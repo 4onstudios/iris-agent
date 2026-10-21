@@ -105,8 +105,14 @@ Chat responses and streamed `done` events include `contextStats` with the
 effective context/input/output limits and, when the provider reports token
 usage, used and remaining context. CLI chat displays used and remaining tokens
 when the provider reports usage. Model context limits may be estimates when
-provider metadata is unavailable. `--context-window` overrides the model's
-total context window; Iris Agent reserves up to 20% for output, enables
+provider metadata is unavailable. Without `--context-window`, an explicit
+`IRIS_AGENT_INPUT_TOKEN_LIMIT` is applied directly without provider-metadata
+discovery; otherwise, OpenRouter metadata is used when available, with catalog
+limits or a conservative fallback for other models. `--context-window` sets
+the requested total window and discovers OpenRouter caps when available; known
+provider input/completion caps and `IRIS_AGENT_INPUT_TOKEN_LIMIT` still bound
+the budget, and a known provider context window caps the reported total. Iris
+Agent reserves up to 20% for output, enables
 Observational Memory consolidation at 75% of the input allowance (capped at
 200K tokens), and retains the token limiter as a final guard. Remaining context
 is omitted when the provider does not report token usage.

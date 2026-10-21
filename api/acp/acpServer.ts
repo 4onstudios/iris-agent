@@ -263,7 +263,7 @@ export type AcpMemoryAdapter = {
     resourceId: string;
     page: number;
     perPage: number | false;
-  }): Promise<{ messages: MastraDBMessage[] }>;
+  }): Promise<{ messages: MastraDBMessage[]; total: number }>;
   createThread(args: {
     threadId: string;
     resourceId: string;
@@ -417,8 +417,8 @@ const updateTranscriptCheckpoint = async (
     threadId: sessionId,
     resourceId: `acp-session:${sessionId}`,
     page: 0,
-    perPage: false,
-  })).messages.length;
+    perPage: 1,
+  })).total;
   const thread = await memory.getThreadById({ threadId: sessionId });
   if (!thread) return false;
   await memory.updateThread({
@@ -852,6 +852,7 @@ export const createAcpAgentApp = (
       const previousTurn = session.activeTurn;
       const activeTurn: ActiveTurn = {
         abortController: new AbortController(),
+        completion: previousTurn?.completion,
       };
       session.activeTurn = activeTurn;
       await cancelActiveTurn(previousTurn);
