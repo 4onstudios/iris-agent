@@ -28,6 +28,9 @@ describe("coding agent instructions", () => {
       "run the narrowest available validation",
     );
     expect(CODING_AGENT_INSTRUCTIONS).toContain(
+      "Remove temporary files and directories you created",
+    );
+    expect(CODING_AGENT_INSTRUCTIONS).toContain(
       "Mastra maxSteps value is the sole action budget",
     );
     expect(CODING_AGENT_INSTRUCTIONS).toContain(

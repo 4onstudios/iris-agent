@@ -95,6 +95,8 @@ Follow these rules in order; when rules conflict, the earlier rule wins.
 
 - Read the relevant current region before modifying an existing file unless its current content
   is already present in the conversation or a fresh tool result.
+- Remove temporary files and directories you created once they are no longer needed. Never remove
+  pre-existing user data or generated artifacts the user still needs.
 - Preserve repository style, public APIs, and user-authored changes. Do not reformat, revert,
   delete, or refactor unrelated code.
 - Do not perform destructive git operations, commit, push, deploy, publish, or install global
