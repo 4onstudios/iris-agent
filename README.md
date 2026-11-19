@@ -18,9 +18,9 @@
   <a href="https://github.com/4onstudios/iris-agent/blob/main/LICENSE"><img src="https://img.shields.io/github/license/4onstudios/iris-agent" alt="MIT License"></a>
 </p>
 
-Iris Agent is the standalone coding-agent service used by [AIRIS](https://github.com/4onstudios/iris).
+Iris Agent is the coding-agent harness and standalone service used by [AIRIS](https://github.com/4onstudios/iris). It connects language models to workspace and MCP tools, and manages conversation memory, context limits, command approvals, and run lifecycles.
 
-It provides streaming chat, workspace tools, LSP routes, MCP integration, command approvals, and run lifecycle APIs. It can run as:
+It provides streaming chat, workspace tools, LSP routes, and run lifecycle APIs. It can run as:
 
 - **HTTP Service** - RESTful API under `/api/agent`
 - **CLI** - Interactive chat in the terminal
